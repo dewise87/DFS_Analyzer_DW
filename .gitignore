@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Data — everything under data/ is local; structure docs are kept
+data/**
+!data/README.md
+
+# Secrets & local config
+.env
+.env.*
+*.pem
+secrets/
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings
+.claude/settings.local.json
