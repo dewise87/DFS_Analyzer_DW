@@ -8,6 +8,15 @@ from narrative_alpha.portfolio.adapter import (
     UnsupportedOptimizationFeature,
 )
 from narrative_alpha.portfolio.export import export_upload_csv
+from narrative_alpha.portfolio.heuristic_report import (
+    HEURISTIC_NOTICE,
+    HeuristicLineupRow,
+    HeuristicReport,
+    HeuristicReportError,
+    HeuristicThresholds,
+    build_heuristic_report,
+    render_heuristic_report,
+)
 from narrative_alpha.portfolio.models import (
     CLASSIC_SITE_RULES,
     BringBackRule,
@@ -39,6 +48,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CLASSIC_SITE_RULES",
+    "HEURISTIC_NOTICE",
     "BringBackRule",
     "CandidatePlayer",
     "CandidatePlayerScenario",
@@ -46,6 +56,10 @@ __all__ = [
     "ContestArchetype",
     "DfsSite",
     "ExposureLimit",
+    "HeuristicLineupRow",
+    "HeuristicReport",
+    "HeuristicReportError",
+    "HeuristicThresholds",
     "Lineup",
     "LineupPlayer",
     "NumericRange",
@@ -60,8 +74,10 @@ __all__ = [
     "UploadEntry",
     "ValidationIssue",
     "ValidationResult",
+    "build_heuristic_report",
     "export_upload_csv",
     "lineup_sha256",
+    "render_heuristic_report",
     "validate_lineup",
     "validate_portfolio",
 ]

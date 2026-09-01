@@ -13,6 +13,8 @@ from narrative_alpha.store.migrations import (
 from narrative_alpha.store.models import (
     ActualOwnershipRow,
     AppliedMigrationRow,
+    ContestPayoutRow,
+    ContestRow,
     DecisionManifestHash,
     DecisionSnapshotRow,
     ExternalPlayerIdRow,
@@ -39,6 +41,8 @@ __all__ = [
     "ActualOwnershipRow",
     "AppliedMigration",
     "AppliedMigrationRow",
+    "ContestPayoutRow",
+    "ContestRow",
     "DecisionManifestHash",
     "DecisionSnapshotRow",
     "ExternalPlayerIdRow",

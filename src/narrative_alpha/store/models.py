@@ -347,6 +347,38 @@ class ActualOwnershipRow(PointInTimeRow):
         return self
 
 
+ContestArchetypeValue = Literal[
+    "cash", "single_entry", "3max", "20max", "mass_multi_entry", "showdown"
+]
+
+
+class ContestRow(PointInTimeRow):
+    contest_id: int
+    external_contest_id: str
+    site: str
+    slate_id: int = Field(gt=0)
+    archetype: ContestArchetypeValue
+    field_size: int = Field(gt=0)
+    entry_limit: int = Field(gt=0)
+    entry_fee_cents: int = Field(ge=0)
+    total_prizes_cents: int | None = Field(default=None, ge=0)
+    payout_curve_id: str | None
+
+
+class ContestPayoutRow(PointInTimeRow):
+    contest_payout_id: int
+    payout_curve_id: str
+    rank_from: int = Field(ge=1)
+    rank_to: int = Field(ge=1)
+    prize_cents: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_rank_band(self) -> Self:
+        if self.rank_from > self.rank_to:
+            raise ValueError("rank_from must not exceed rank_to")
+        return self
+
+
 class OddsSnapshotRow(PointInTimeRow):
     odds_snapshot_id: int
     game_id: int

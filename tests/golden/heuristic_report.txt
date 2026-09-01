@@ -1,0 +1,10 @@
+HEURISTIC ONLY — NOT SIMULATOR-BACKED. These values make no probability claims.
+contest_external_contest_id=dk-manual-1
+contest_site=draftkings
+heuristic_cash_line_projection_points=150.000000
+heuristic_average_prize_per_entry_cents=10000.000000
+heuristic_naive_cash_line_proxy_formula=heuristic_lineup_projection_sum / heuristic_cash_line_projection_points
+heuristic_naive_ev_cents_formula=(heuristic_naive_cash_line_proxy * heuristic_average_prize_per_entry_cents) - entry_fee_cents
+
+lineup_id,heuristic_lineup_projection_sum,heuristic_salary_used,heuristic_projected_ownership_sum,heuristic_naive_cash_line_proxy,heuristic_naive_ev_cents
+ba33d8240fe88df0df26b0d002f3a2332623b9874ad8e79d186846de978efc6e,135.000000,45000,0.900000,0.900000,8000.00

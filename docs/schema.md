@@ -74,6 +74,17 @@ Every observation retains its input-file hash and §3.2 fields for pre-lock base
 Stores player ownership labels for a specific contest cohort, archetype, field, fee, and roster role.  
 Contest/site/player/role observations remain separate and retain result-file and point-in-time provenance.
 
+## `contests`
+
+Stores versioned contest cohorts, fees, prize totals, entry limits, and payout-curve identifiers.
+Site/contest observation identity and the full §3.2 provenance block preserve lobby history.
+
+## `contest_payouts`
+
+Stores inclusive rank bands and per-place prizes for manually captured payout curves.
+Positive ordered ranks are SQL-checked; overlaps are refused within one observation, while a
+later re-observation of the same curve is a new version — read one version via `as_of`.
+
 ## `odds_snapshots`
 
 Stores sportsbook spread, total, and optional American-price observations for a versioned game.  
