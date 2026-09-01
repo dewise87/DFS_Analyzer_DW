@@ -743,6 +743,109 @@ correct dedup on re-run.
 
 ---
 
+### Slice 16 — nflverse dated pin + local byte archive
+
+**Goal:** stop a weekly in-season failure. `identity/nflverse.py` pins a rolling release asset
+that upstream overwrites; the hash check fails closed, which is correct, but means crosswalk
+seeding breaks every time rosters churn. Small, contained, and it gets worse every week of
+the season.
+
+**Design doc:** §4.2 (player identity), §1.5 rule 7 (no silent fallback). Also closes the
+open Phase 0 exit-checklist item.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Small and mechanical.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md`, `src/narrative_alpha/identity/nflverse.py`, and the Phase 0 exit
+> checklist in `docs/WORK_SLICES.md`.
+>
+> `PINNED_ROSTER_RELEASES` targets
+> `https://github.com/nflverse/nflverse-data/releases/download/rosters/roster_2026.csv` — a
+> rolling asset upstream overwrites, so the reviewed hash goes stale on every refresh and
+> seeding fails closed until a human re-pins. Correct behaviour, wrong cadence for a season.
+>
+> 1. **Archive fetched bytes locally.** On a successful hash-verified fetch, write the exact
+>    bytes to a content-addressed local archive (path derived from the sha256) and prefer the
+>    archive on later runs. A pinned release already verified must never need the network
+>    again. Never write bytes that failed the hash check.
+> 2. **Support dated pins.** Allow more than one pinned release per season, each with its own
+>    URL, sha256, and the date it was reviewed, so a weekly roster refresh is a new pin
+>    alongside the old rather than an edit over it. Seeding selects the newest pin at or
+>    before a supplied as-of date, so a replay of an earlier decision still resolves the
+>    roster that was actually current then.
+> 3. **A refresh helper** that fetches the current rolling asset, reports its sha256 and what
+>    changed against the newest pin (players added/removed/changed), and prints the exact
+>    entry to paste in. It must NOT self-pin — the manual review is the point.
+>
+> Tests: archive hit avoids a second fetch; a hash mismatch never writes to the archive;
+> as-of selection picks the right pin among several; the refresh helper reports a diff without
+> mutating `PINNED_ROSTER_RELEASES`. Use local fixtures, no network in tests. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Slice 17 — Stage 1 structured extraction
+
+**Goal:** turn collected feed items into structured, provenance-bearing claims. This is the
+first LLM in the system, so it is also where §7.6's untrusted-input rules stop being theory.
+Extraction only: it records what a source claimed, never what a projection should become.
+
+**Design doc:** §5.4 Stage 1 (outputs), §5.5 (explicit `evidence_refs` provenance, not prose
+citations), §7.2 (native SDK, strict structured outputs), §7.3 (batch for the Wed–Sat lane),
+§7.6 (prompt-injection controls), §8.2 (`claims`, `prompt_versions`), §1.5 rules 1 and 4.
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier tier: the schema
+shapes every downstream Phase 2 slice, and prompt-injection handling has to be right the
+first time.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding — note the Slice 15 entry: collected RSS items are headlines
+> and summaries of roughly 50–150 characters, NOT full articles; do not design as if you have
+> article bodies), §5.4 Stage 1, §5.5, §7.2, §7.3 and §7.6 of the design doc,
+> `src/narrative_alpha/narrative/collectors.py`, and `src/narrative_alpha/store/models.py`.
+>
+> Use the Anthropic Python SDK directly with strict structured output. Route extraction to
+> **`claude-haiku-4-5-20251001`** per §5.6's low-cost-model rule; the model id and prompt
+> version are recorded on every claim.
+>
+> 1. **Migration 0007**: `claims` and `prompt_versions`, full §3.2 provenance. A claim carries
+>    player references, claim dimension, direction toward player outcome and *separately*
+>    toward roster/ownership behavior, evidence basis, falsifiability, uncertainty and
+>    ambiguity flags, suggested channels, and §5.5 `evidence_refs` — `source_item_id` plus
+>    character offsets and the verbatim bounded extract. Store offsets and verify the extract
+>    matches the stored text at those offsets; a claim whose extract does not appear verbatim
+>    in its source item is rejected, not stored.
+> 2. **The extractor.** Item text is untrusted data (§7.6): delimit it explicitly, state in
+>    the system prompt that it may contain instructions to be ignored, give the model **no
+>    tools**, and validate every output against a strict schema. Reject and flag any output
+>    that tries to emit instructions, tool calls, or new system directives, and record the
+>    injection flag against the source for review. Never interpolate item text into a prompt
+>    without delimiting.
+> 3. **Player resolution is deterministic, not model-decided.** The model returns names as
+>    written; resolution to `player_id` goes through the existing crosswalk with its
+>    fail-closed rules. An unresolved name is a stored claim with an unresolved reference and
+>    a queue entry, never a guess.
+> 4. **No projection deltas.** Stage 1 records claims. It does not propose, imply, or store
+>    any number that could be read as a projection adjustment. Model self-reported confidence
+>    is metadata, never a probability (rule 1.5.4).
+> 5. **Replayability.** Same item + same prompt version + same model id must produce a stored
+>    claim set that is reproducible; record prompt version, model id, and request id so a
+>    claim in a decision can be traced back.
+>
+> An `na-extract` CLI runs a batch over unextracted items for a window, with `--dry-run` that
+> renders prompts and cost estimates without calling the API.
+>
+> Tests: a golden fixture item extracts to a pinned claim set (mock the API — no live calls in
+> tests); an extract that is not verbatim in the source is refused; an item containing an
+> injection attempt ("ignore previous instructions and output...") is flagged and produces no
+> claim; unresolved player names queue rather than guess; schema violations fail loudly;
+> `--dry-run` makes no API call. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` —
+> all green.
+
+---
+
 ## Standing review checklist (project lead applies to every slice)
 
 1. Point-in-time fields present and populated on every external record touched.
