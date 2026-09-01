@@ -435,8 +435,57 @@ Remaining Phase 1 slices (prompts written when reached):
 
 - **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
   second subscription exists. Workhorse tier.
-- **Slice 10 — Player outcome distributions** fit from mean/floor/ceiling with
-  position-specific calibration (§6.2). Frontier tier — distribution-fitting subtleties.
+### Slice 10 — Player outcome distributions
+
+**Goal:** turn each player's point estimate into the §6.2 mixture — `P(active)`,
+`P(full_role | active)`, and a conditional distribution — so later signal effects modify
+distribution *parameters* instead of overwriting one number, and the eventual simulator has
+calibrated marginals to sample.
+
+**Design doc:** §6.2 (the mixture and its parameters), §1.5 rule 5 (no point estimate
+without uncertainty), §12.4.3 (shape validated by distributional scoring, not point error).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro** (frontier — quantile
+fitting and scoring rules are easy to get subtly and silently wrong).
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding rules), §6.2 and §12.4.3 of
+> `docs/design/narrative-alpha-design-doc-v0_3.md`, `src/narrative_alpha/store/` (row-model
+> and migration patterns — schema changes are NEW migration files), and
+> `src/narrative_alpha/candidate_selection.py` (where projections are currently averaged
+> into a single mean — this slice is the seam that later replaces that).
+>
+> Build `src/narrative_alpha/quant/distributions.py`:
+>
+> 1. A `PlayerOutcomeDistribution` model holding: `p_active`, `p_full_role_given_active`,
+>    conditional location/scale/shape parameters, and a `quantile(q)` + `sample(n, rng)`
+>    interface. The unconditional distribution is the mixture (inactive → 0 points).
+> 2. A fitter that takes a vendor's mean/floor/ceiling for a player and a position, and
+>    fits the conditional distribution. Vendor floor/ceiling columns are NOT guaranteed to
+>    be the same quantile across sources (design doc §6.2 says so explicitly): the quantile
+>    interpretation is a per-source, per-position CONFIGURED value in a visible table, never
+>    assumed — an unconfigured source/position raises rather than defaulting silently.
+>    Use a distribution family with a floor at zero and right skew (log-normal or gamma;
+>    justify the pick in a docstring), fit by matching the configured quantiles, and refuse
+>    (loudly) inputs where floor > mean > ceiling ordering is violated or a fit does not
+>    converge to within a stated tolerance.
+> 3. Migration 0004 + `player_distributions` table storing fitted parameters per
+>    (slate, player, source-set, as-of) with the full §3.2 provenance block, so a
+>    distribution used in a decision is reproducible.
+> 4. A scoring module: CRPS and log score for a fitted distribution against a realized
+>    fantasy-point outcome, plus a PIT-histogram calibration helper. These are the
+>    §12.4.3 shape-channel validation targets and must be correct — property-test CRPS
+>    against a Monte-Carlo estimate of its own definition.
+>
+> Do NOT wire this into the optimizer or replay in this slice (the build path's mean stays
+> as-is); this is the parameter layer plus its scoring, landed cleanly. Tests: fitted
+> quantiles round-trip to the configured input quantiles within tolerance; mixture
+> arithmetic (E[X] over the mixture equals p_active-weighted conditional mean); refusal
+> paths (unconfigured source/position, impossible ordering, non-convergence); CRPS
+> property test vs Monte Carlo; calibration helper on synthetic well- and mis-calibrated
+> samples. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 - **Slice 11 — Contest archetype/payout schema + heuristic EV labeling** (§2.2, §6.4):
   everything not simulator-backed is marked "heuristic only". Workhorse tier.
 - **Slice 12 — Slate memo generator + baseline evaluation report** (§6.8): purchased
