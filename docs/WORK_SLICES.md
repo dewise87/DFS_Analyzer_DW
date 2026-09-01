@@ -577,6 +577,59 @@ player-ID sets rather than candidate values — all fixed here and recorded in
 `docs/DECISIONS.md`. Review also made `--evaluation-as-of` optional so the pre-kickoff
 memo is reachable without inventing a result-label cutoff.
 
+### Slice 15 — Source seeding + first live collection
+
+**Goal:** make Slice 14 actually run. The collector reads enabled sources from a table that
+nothing populates, so today registering a feed means hand-writing SQL. This slice closes
+that gap and gets real items landing weekly — the capture clock §9.0 cares about.
+
+**Design doc:** §4.6 (per-source rights and retention), §5.3 (Wed–Fri batch cadence),
+§1.5 rule 7 (no silent fallback), §9.0 (Phase −1 capture outranks modeling).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Small and mechanical, but the
+review attestation is the one part that must not be made convenient.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding — especially the Slice 14 collector decisions and the
+> narrative-source entry), `src/narrative_alpha/collect_cli.py`,
+> `src/narrative_alpha/narrative/collectors.py`, and `config/narrative_sources.toml` (104
+> feeds, every URL verified live at commit time; note it deliberately carries no
+> `terms_reviewed_at`).
+>
+> Three parts.
+>
+> 1. **`na-collect seed --catalog config/narrative_sources.toml`.** Loads the catalog with
+>    `tomllib`, resolves each entry's `policy_tier` against the `[policy_tiers]` table, and
+>    writes `sources` + `source_policies` rows.
+>    - `--terms-reviewed-at` is **required**, and the command prints the tier terms being
+>      attested and the count per tier before writing. Never default it to now, never read it
+>      from the catalog: the operator is attesting they read the terms, and the Slice 14 gate
+>      exists to require exactly that.
+>    - Re-seeding is append-only versioning, not an overwrite — an unchanged entry inserts
+>      nothing, a changed feed URL or policy inserts a new version. Print what changed.
+>    - `--dry-run` renders the plan without writing.
+> 2. **A `--check-feeds` mode** that fetches each catalog URL through the existing
+>    `get_with_retry` path and reports which no longer return a valid RSS/Atom document,
+>    without writing anything. Feed URLs rot; a silent 404 in a weekly cron is the failure
+>    mode that costs irreplaceable data, so this must be runnable on demand and its output
+>    must name every dead feed explicitly.
+> 3. **Per-source failure isolation in `na-collect run`.** One dead feed must never abort the
+>    batch: collect every source, and report per-source failures in the JSON summary with a
+>    non-zero exit when any failed. Confirm this against the current `_run` behavior and fix
+>    it if a single failure currently stops the run.
+>
+> Do NOT add a Bluesky or X collector in this slice. The catalog is RSS/Atom only and the
+> migration's `collector_kind` check enforces it.
+>
+> Tests: seeding refuses without `--terms-reviewed-at`; the attested timestamp lands on every
+> policy row and is never taken from the catalog; re-seeding an unchanged catalog is a no-op
+> and a changed URL versions rather than overwrites; `--dry-run` writes nothing; `--check-feeds`
+> reports a dead feed from a local fixture without network; one failing source does not stop
+> the others and the exit code reflects it. No network in tests. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
 **Blocked behind Slice 12 (do not start yet):**
 
 - **Slice 13 — wire distributions into the build path** (§6.2): replace
