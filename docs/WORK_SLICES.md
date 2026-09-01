@@ -266,9 +266,8 @@ close against real-world data, tracked here until done:
 - [ ] **Complete the manual upload checklist** (docs/manual-lineup-upload-checklist.md) once
   per site before treating upload formats as accepted.
 - [ ] **Build the production decision-snapshot writer.** Only tests write
-  `decision_snapshots` rows today; replay can consume but nothing creates one. This is the
-  first task of the Saturday slate-build flow (fold into Slice 12 or a Slice 8b) and is
-  required before the first real Sunday decision.
+  `decision_snapshots` rows today; replay can consume but nothing creates one. Now specified
+  as **Slice 8b** below — required before the first real Sunday decision.
 - [ ] **Re-pin nflverse to a dated artifact.** The current pin targets a rolling
   `roster_2026.csv` release asset that upstream overwrites weekly; the hash check fails
   closed but will break on every refresh. Archive fetched bytes locally.
@@ -278,6 +277,56 @@ close against real-world data, tracked here until done:
   contests collapse to one archetype (entry_limit is stored, split downstream when needed);
   replay's SQL `avg()` blend must move into the Phase 1 blend module so there is exactly
   one blend implementation.
+
+### Slice 8b — Production decision-snapshot writer + `na-build` flow
+
+**Goal:** the missing write-side of the replay contract: one command that takes a slate's
+ingested data, builds lineups through the adapter, exports the upload CSV, and freezes a
+`decision_snapshots` row whose manifest names every input hash — so the Sunday decision is
+replayable from the moment it's made.
+
+**Design doc:** §8.4, §6.8, Phase 0 acceptance ("replay of one historical slate using only
+pre-lock files").
+
+**Model:** Claude **Fable 5 / Opus 5** (write-side of the byte-stability contract) · ChatGPT **GPT-5.1 Pro**
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Phase 0 is
+> complete: read `src/narrative_alpha/replay.py` (the consumer of what you will write),
+> `src/narrative_alpha/store/models.py` (DecisionSnapshotRow, canonical_manifest_hashes,
+> manifest_hash_set_sha256), the store connection/migrations, the ingest loaders, the
+> identity crosswalk (`require_all_resolved`), and `src/narrative_alpha/portfolio/`.
+> Also read docs/DECISIONS.md — its rules bind you, especially: schema changes are new
+> migration files now, never in-place edits.
+>
+> Build the production decision path in `src/narrative_alpha/build.py` + a `na-build` CLI:
+>
+> 1. Inputs: database path, slate id, site, decision-at timestamp (defaults to now, must be
+>    timezone-aware), artifact output directory, and optimizer request options (start
+>    minimal: number of lineups, contest archetype; read candidate players from the store
+>    exactly the way replay's `candidate_scenario` does — factor that SQL/logic into ONE
+>    shared function both paths call, so build and replay cannot drift; replay currently
+>    embeds an `avg()` blend that must move into this shared seam).
+> 2. Flow: verify `require_all_resolved()` for the slate's active players (fail closed);
+>    assemble the `OptimizationRequest`; serialize it to a canonical JSON artifact; build
+>    lineups via `PydfsAdapter`; export the upload CSV; write both artifacts plus the
+>    manifest hash-set (salary + projection file hashes drawn from the rows actually used,
+>    `optimizer_request`, `generated_lineups`) into the artifact directory; insert the
+>    `decision_snapshots` row in the same transaction scope as the run record in
+>    `model_runs`.
+> 3. Immediately self-verify: run `replay_decision` on the snapshot just written and refuse
+>    to report success unless the replay hash matches byte-for-byte. A build whose own
+>    replay mismatches is a failure (exit nonzero, structured error), not a warning.
+> 4. Determinism rules: canonical JSON serialization (sorted keys, no float repr drift),
+>    UTC-Z timestamps via the existing chokepoint, no wall-clock reads inside the
+>    build-once/replay-later path except the explicit decision-at input.
+>
+> Tests: end-to-end build→replay byte-identity on a seeded slate; the self-verify failure
+> path (corrupt an artifact between build and verify); unresolved-player refusal; and a
+> test that build and replay share one candidate-selection implementation (e.g. assert the
+> module function identity, not copied SQL). Run `~/.local/bin/uv run pytest -q`,
+> `ruff check .`, `mypy` — all green before done.
 
 ## Phase 1 — Quant floor and contest context (Weeks 3–4)
 
