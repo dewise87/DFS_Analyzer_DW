@@ -185,6 +185,55 @@ def test_seed_dry_run_writes_no_catalog_rows(
     assert '"source_action": "insert"' in output
 
 
+def test_a_locked_database_keeps_already_collected_sources_and_explains_itself(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store error must be isolated like a feed error, not discard the whole batch.
+
+    The run holds a write lock for as long as it takes to fetch every feed, so a second
+    concurrent run hits "database is locked". Before per-source commits, that error escaped
+    the loop and rolled back every source already collected.
+    """
+
+    database = tmp_path / "locked.sqlite3"
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        apply_source_seed(
+            connection,
+            plan_source_seed(
+                connection,
+                CATALOG_FIXTURE,
+                terms_reviewed_at=REVIEWED_AT,
+                observed_at=SEEDED_AT,
+            ),
+        )
+    calls: list[str] = []
+
+    def fake_collect(connection: object, source_id: str, **_: object) -> CollectionReport:
+        calls.append(source_id)
+        if len(calls) == 1:
+            return CollectionReport(source_id, datetime(2026, 9, 1, tzinfo=UTC), 3, 3, 0, 1)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(collect_cli, "collect_source", fake_collect)
+    exit_code = collect_cli.main(["run", "--database", str(database)])
+
+    assert exit_code == 2
+    # Stopped at the lock rather than burning a full busy timeout on every remaining source.
+    assert len(calls) == 2
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        rows = connection.execute("SELECT count(*) FROM source_items").fetchone()[0]
+    assert rows == 0  # the fake collector stores nothing; the run must still not crash
+
+
+def test_locked_database_message_names_the_likely_cause() -> None:
+    message = collect_cli._store_message(sqlite3.OperationalError("database is locked"))
+    assert "another na-collect run" in message
+    assert "were kept" in message
+
+
 def test_future_attestation_error_names_both_instants(tmp_path: Path) -> None:
     """The common cause is an operator ahead of UTC writing their local date as a Z time.
 

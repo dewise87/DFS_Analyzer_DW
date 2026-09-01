@@ -2,6 +2,24 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Collection run durability (found in first live operation)
+
+- **`na-collect run` commits per source, not once for the whole batch.** A full run takes
+  ~40s of HTTP against 104 feeds, and it previously held a single write transaction for that
+  entire window. Two consequences, both hit on the first real operator run: a second
+  invocation failed outright with "database is locked", and any store error late in the batch
+  rolled back every source already collected. Per-source commits release the lock between
+  sources, so concurrent runs now interleave and complete rather than one dying.
+- **Store errors are isolated per source, like feed errors already were.** Slice 15 isolated
+  `CollectionError` but let `sqlite3.Error` escape the loop, which meant a database problem
+  discarded the whole batch — the opposite of the requirement. A lock error additionally
+  stops the loop rather than continuing, since every remaining source would burn its full
+  10s busy timeout against the same lock.
+- **Operator-facing errors must name the likely cause.** "database is locked" told the
+  operator nothing; it now says another run is probably in progress and that already-collected
+  sources were kept. Same class of fix as the future-attestation message: both were found by a
+  real person running the tool, not by tests.
+
 ## 2026-09-01 — Slice 15 seeding decisions
 
 - **Credential-free feed fetches follow redirects; credentialed ones still must not.** The

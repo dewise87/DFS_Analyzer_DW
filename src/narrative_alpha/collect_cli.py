@@ -207,6 +207,20 @@ def _run(arguments: argparse.Namespace) -> int:
             except CollectionError as error:
                 errors.append({"source_id": source_id, "message": str(error)})
                 continue
+            except sqlite3.OperationalError as error:
+                # A locked database is almost always a second collection running against the
+                # same file. Every remaining source would hit the same lock and burn its full
+                # busy timeout, so stop here and keep what already committed.
+                connection.rollback()
+                errors.append({"source_id": source_id, "message": _store_message(error)})
+                break
+            except sqlite3.Error as error:
+                connection.rollback()
+                errors.append({"source_id": source_id, "message": _store_message(error)})
+                continue
+            # Commit per source: a whole-run transaction would hold an exclusive write lock
+            # across every fetch, and one late failure would discard every source before it.
+            connection.commit()
             reports.append(
                 {
                     "attempts": report.attempts,
@@ -219,6 +233,17 @@ def _run(arguments: argparse.Namespace) -> int:
             )
     print(json.dumps({"errors": errors, "reports": reports}, indent=2, sort_keys=True))
     return 2 if errors else 0
+
+
+def _store_message(error: sqlite3.Error) -> str:
+    """Name the likely cause; "database is locked" alone tells an operator nothing."""
+
+    if isinstance(error, sqlite3.OperationalError) and "locked" in str(error).casefold():
+        return (
+            "database is locked — another na-collect run is probably still in progress "
+            "against the same database; sources already collected were kept"
+        )
+    return f"store write failed: {error}"
 
 
 def _purge(arguments: argparse.Namespace) -> int:
