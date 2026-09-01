@@ -2,6 +2,46 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-01 — Slice 12 point-in-time correctness fixes
+
+Building the evaluation layer exposed three defects in the decision path it was written to
+measure. All three are fixed; the rules below are binding from here.
+
+- **Point-in-time SQL compares timestamps as text, never through `julianday()`.**
+  `julianday()` returns a float whose resolution near 2026 is ~47µs, so timestamps up to
+  ~100µs apart compared equal — a row observed *after* a decision cutoff passed the
+  `<= :as_of` filter. That is a silent look-ahead leak in the exact boundary the system
+  exists to enforce (rule 1.5.6). Every point-in-time predicate now uses
+  `rtrim(col,'Z') <= rtrim(:as_of,'Z')`. `ingest/timestamps.py` already documented text
+  comparison as the intended design; the `julianday()` calls were the deviation.
+- **`StoreRow.db_values()` now emits the same canonical timestamp string as
+  `ingest/timestamps.utc_timestamp()`.** It previously used pydantic's JSON mode, which
+  drops the fractional part when microseconds are zero: the same instant serialized as
+  `...T12:00:00Z` from one write path and `...T12:00:00.000000Z` from the other. Two
+  strings for one moment defeats `UNIQUE(..., observed_at)` duplicate detection and any
+  text comparison between the paths. One formatter, always microseconds, always `Z`.
+- **Replay now verifies candidate *values*, not just the set of player IDs**, and binds
+  manifest artifacts by `(source, sha256)` rather than by hash alone. The old check passed
+  a replay in which a projection's value had changed, which made the byte-stability
+  guarantee weaker than it read. `DecisionManifestHash.source` is consequently required for
+  salary and projection artifacts — a breaking manifest-contract change, acceptable only
+  because no production database exists yet.
+
+- **The FanDuel salary parser was dropping `Injury Indicator`** into a `player_status`
+  column that already existed in migration 0001. It is now populated, and it is one of the
+  two explicit-evidence paths the baseline report accepts for classifying a player inactive.
+  DraftKings exports carry no equivalent column, so DK rows are `NULL` — which the report
+  treats as *unknown*, never as active.
+- **Inactivity is never inferred from a missing or zero result.** Only explicit stored
+  evidence counts: a result `stat_line_json` activity flag, or a point-in-time salary status
+  in the visible inactive set. Inferring inactivity from a zero would silently drop the
+  worst outcomes from the error metrics and flatter the purchased baseline — the single
+  easiest way to make this system lie to its operator. Zero-point results with unknown
+  activity are scored, and additionally counted as their own visible diagnostic.
+- **`na-report --evaluation-as-of` is optional.** Omitted, the bundle renders the memo alone
+  and states that no baseline was requested. The memo is the pre-kickoff Saturday artifact;
+  requiring a result-label cutoff to produce it would have forced the operator to invent one.
+
 ## 2026-09-01 — Slice 10 player-distribution decisions
 
 - **A vendor's mean/floor/ceiling triplet is interpreted as conditional on the player being

@@ -568,6 +568,15 @@ look entirely reasonable and are wrong.
 > against the implementation; golden-file tests on both rendered artifacts so wording and
 > format are pinned. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Status note (2026-09-01):** landed and reviewed. `evaluation/baseline_report.py`,
+`interface/slate_memo.py`, `report_cli.py` (`na-report`), both golden files. Building it
+exposed three real defects in the decision path it measures — `julianday()` timestamp
+precision losing ~100µs of point-in-time discipline, `db_values()` writing a different
+timestamp string than `utc_timestamp()` for the same instant, and replay comparing only
+player-ID sets rather than candidate values — all fixed here and recorded in
+`docs/DECISIONS.md`. Review also made `--evaluation-as-of` optional so the pre-kickoff
+memo is reachable without inventing a result-label cutoff.
+
 **Blocked behind Slice 12 (do not start yet):**
 
 - **Slice 13 — wire distributions into the build path** (§6.2): replace

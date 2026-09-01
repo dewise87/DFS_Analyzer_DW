@@ -152,6 +152,7 @@ class ParsedSalaryRow(BaseModel):
     eligible_roster_slots: tuple[str, ...] = Field(min_length=1)
     salary: int = Field(gt=0)
     game_time: datetime | None
+    player_status: str | None = None
 
     @field_validator("site_player_id", "name_raw", "team", "opponent", "listed_position")
     @classmethod
@@ -182,6 +183,14 @@ class ParsedSalaryRow(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("game_time must include a timezone")
         return value.astimezone(UTC)
+
+    @field_validator("player_status")
+    @classmethod
+    def normalize_player_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_site_rules(self) -> Self:
@@ -445,6 +454,7 @@ def _parse_fanduel_row(
         eligible_roster_slots=eligible_slots,
         salary=_parse_salary(_required(row, "Salary")),
         game_time=game_time,
+        player_status=_optional(row, "Injury Indicator"),
     )
 
 
@@ -520,6 +530,14 @@ def _required(row: dict[str, str | None], column: str) -> str:
     if value is None or not value.strip():
         raise ValueError(f"{column} must not be empty")
     return value.strip()
+
+
+def _optional(row: dict[str, str | None], column: str) -> str | None:
+    value = row.get(column)
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _raw_player_id(site: SalarySite, row: dict[str, str | None]) -> str | None:

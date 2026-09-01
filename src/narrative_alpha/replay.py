@@ -14,11 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from narrative_alpha.candidate_selection import (
     CandidateSelection,
     CandidateSelectionError,
+    SelectedSourceArtifact,
     select_candidate_scenario,
 )
 from narrative_alpha.portfolio import (
     CandidatePlayerScenario,
     DfsSite,
+    Lineup,
     OptimizationRequest,
     OptimizerAdapter,
 )
@@ -61,6 +63,8 @@ class ReplayReport(BaseModel):
 class ReplayResult:
     report: ReplayReport
     output_bytes: bytes
+    request: OptimizationRequest
+    lineups: tuple[Lineup, ...]
 
 
 class PointInTimeSession:
@@ -100,7 +104,7 @@ class PointInTimeSession:
             SELECT *
             FROM decision_snapshots
             WHERE decision_snapshot_id = :decision_snapshot_id
-              AND julianday(decision_at) <= julianday(:as_of)
+              AND rtrim(decision_at, 'Z') <= rtrim(:as_of, 'Z')
             """,
             {"decision_snapshot_id": decision_snapshot_id},
             as_of=as_of,
@@ -120,9 +124,12 @@ class PointInTimeSession:
             SELECT *
             FROM slates
             WHERE slate_id = :slate_id
-              AND julianday(observed_at) <= julianday(:as_of)
-              AND julianday(valid_from) <= julianday(:as_of)
-              AND (valid_to IS NULL OR julianday(valid_to) > julianday(:as_of))
+              AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (
+                  valid_to IS NULL
+                  OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z')
+              )
             """,
             {"slate_id": slate_id},
             as_of=as_of,
@@ -136,23 +143,23 @@ class PointInTimeSession:
         *,
         slate_id: int,
         site: DfsSite,
-        salary_hashes: frozenset[str],
-        projection_hashes: frozenset[str],
+        salary_artifacts: frozenset[SelectedSourceArtifact],
+        projection_artifacts: frozenset[SelectedSourceArtifact],
         as_of: datetime | None,
     ) -> CandidateSelection:
         """Compatibility wrapper around the shared build/replay selection seam."""
 
-        if not salary_hashes or not projection_hashes:
+        if not salary_artifacts or not projection_artifacts:
             raise ReplayArtifactError(
-                "decision manifest requires salary and projection artifact hashes"
+                "decision manifest requires salary and projection artifacts"
             )
         try:
             return select_candidate_scenario(
                 self,
                 slate_id=slate_id,
                 site=site,
-                salary_hashes=salary_hashes,
-                projection_hashes=projection_hashes,
+                salary_artifacts=salary_artifacts,
+                projection_artifacts=projection_artifacts,
                 as_of=_require_as_of(as_of),
             )
         except CandidateSelectionError as error:
@@ -174,8 +181,8 @@ def replay_decision(
     snapshot = session.decision_snapshot(decision_snapshot_id, as_of=cutoff)
     request_artifact = _single_artifact(snapshot, "optimizer_request")
     expected_output = _single_artifact(snapshot, "generated_lineups")
-    salary_hashes = _artifact_hashes(snapshot, "salary")
-    projection_hashes = _artifact_hashes(snapshot, "projection")
+    salary_artifacts = _source_artifacts(snapshot, "salary")
+    projection_artifacts = _source_artifacts(snapshot, "projection")
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
     expected_output_bytes = _read_verified_artifact(artifact_root, expected_output)
@@ -197,27 +204,32 @@ def replay_decision(
             session,
             slate_id=snapshot.slate_id,
             site=original_request.site,
-            salary_hashes=salary_hashes,
-            projection_hashes=projection_hashes,
+            salary_artifacts=salary_artifacts,
+            projection_artifacts=projection_artifacts,
             as_of=cutoff,
         )
     except CandidateSelectionError as error:
         raise ReplayError(str(error)) from error
-    if rebuilt.salary_hashes != salary_hashes:
-        raise ReplayArtifactError("not every salary manifest hash contributed replay rows")
-    if rebuilt.projection_hashes != projection_hashes:
-        raise ReplayArtifactError("not every projection manifest hash contributed replay rows")
-    original_player_ids = {
-        player.player_id for player in original_request.candidate_player_scenario.players
-    }
-    replay_player_ids = {player.player_id for player in rebuilt.players}
-    if replay_player_ids != original_player_ids:
+    if frozenset(rebuilt.salary_artifacts) != salary_artifacts:
         raise ReplayArtifactError(
-            "point-in-time candidate player IDs differ from the optimizer request artifact"
+            "not every salary manifest source/hash pair contributed replay rows"
+        )
+    if frozenset(rebuilt.projection_artifacts) != projection_artifacts:
+        raise ReplayArtifactError(
+            "not every projection manifest source/hash pair contributed replay rows"
+        )
+    original_scenario = original_request.candidate_player_scenario
+    if rebuilt.players != original_scenario.players:
+        raise ReplayArtifactError(
+            "point-in-time candidate values differ from the optimizer request artifact"
+        )
+    if rebuilt.projection_source_versions != original_scenario.projection_source_versions:
+        raise ReplayArtifactError(
+            "point-in-time projection source versions differ from the optimizer request artifact"
         )
 
     scenario = CandidatePlayerScenario(
-        scenario_id=original_request.candidate_player_scenario.scenario_id,
+        scenario_id=original_scenario.scenario_id,
         players=rebuilt.players,
         projection_source_versions=rebuilt.projection_source_versions,
     )
@@ -235,7 +247,15 @@ def replay_decision(
         ),
         lineup_count=len(lineups),
     )
-    return ReplayResult(report=report, output_bytes=output)
+    return ReplayResult(
+        report=report,
+        output_bytes=output,
+        # Preserve the exact frozen request artifact for downstream audit/reporting.
+        # ``lineups`` were rebuilt from the point-in-time store-backed request above;
+        # consumers can therefore compare the two and fail if any candidate value drifted.
+        request=original_request,
+        lineups=lineups,
+    )
 
 
 def _single_artifact(
@@ -251,15 +271,28 @@ def _single_artifact(
     return artifacts[0]
 
 
-def _artifact_hashes(snapshot: DecisionSnapshotRow, artifact_kind: str) -> frozenset[str]:
-    hashes = frozenset(
+def _source_artifacts(
+    snapshot: DecisionSnapshotRow, artifact_kind: str
+) -> frozenset[SelectedSourceArtifact]:
+    missing_sources = tuple(
         item.sha256
         for item in snapshot.manifest_hashes_json
         if item.artifact_kind == artifact_kind
+        and (item.source is None or not item.source.strip())
     )
-    if not hashes:
+    if missing_sources:
+        raise ReplayArtifactError(
+            f"decision manifest {artifact_kind} artifacts have no source: "
+            + ", ".join(sorted(missing_sources))
+        )
+    artifacts = frozenset(
+        SelectedSourceArtifact(sha256=item.sha256, source=str(item.source))
+        for item in snapshot.manifest_hashes_json
+        if item.artifact_kind == artifact_kind
+    )
+    if not artifacts:
         raise ReplayArtifactError(f"decision manifest has no {artifact_kind} artifacts")
-    return hashes
+    return artifacts
 
 
 def _read_verified_artifact(root: Path, artifact: DecisionManifestHash) -> bytes:

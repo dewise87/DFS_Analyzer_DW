@@ -62,30 +62,38 @@ def select_candidate_scenario(
     slate_id: int,
     site: DfsSite,
     as_of: datetime,
-    salary_hashes: frozenset[str] | None = None,
-    projection_hashes: frozenset[str] | None = None,
+    salary_artifacts: frozenset[SelectedSourceArtifact] | None = None,
+    projection_artifacts: frozenset[SelectedSourceArtifact] | None = None,
 ) -> CandidateSelection:
     """Select and blend the exact point-in-time candidates used by build and replay.
 
-    Build leaves the optional hash filters unset and captures the hashes returned from
-    the selected rows. Replay supplies the captured hash sets, constraining the same
-    ranking, joins, and blend implementation to the frozen inputs.
+    Build leaves the optional artifact filters unset and captures the source/hash pairs
+    returned from the selected rows. Replay supplies those exact pairs, constraining the
+    same ranking, joins, and blend implementation to the frozen inputs.
     """
 
-    if (salary_hashes is None) != (projection_hashes is None):
+    if (salary_artifacts is None) != (projection_artifacts is None):
         raise CandidateSelectionError(
-            "salary and projection hash filters must either both be set or both be omitted"
+            "salary and projection artifact filters must either both be set or both be omitted"
         )
-    if salary_hashes is not None and (not salary_hashes or not projection_hashes):
+    if salary_artifacts is not None and (
+        not salary_artifacts or not projection_artifacts
+    ):
         raise CandidateSelectionError(
-            "candidate selection requires non-empty salary and projection hash filters"
+            "candidate selection requires non-empty salary and projection artifact filters"
         )
 
-    salary_filter, salary_parameters = _hash_filter(
-        "s.source_file_sha256", "salary_hash", salary_hashes
+    salary_filter, salary_parameters = _artifact_filter(
+        "s.source_file_sha256",
+        "s.source",
+        "salary_artifact",
+        salary_artifacts,
     )
-    projection_filter, projection_parameters = _hash_filter(
-        "ps.source_file_sha256", "projection_hash", projection_hashes
+    projection_filter, projection_parameters = _artifact_filter(
+        "ps.source_file_sha256",
+        "ps.source",
+        "projection_artifact",
+        projection_artifacts,
     )
     parameters: dict[str, object] = {
         "slate_id": slate_id,
@@ -99,28 +107,35 @@ def select_candidate_scenario(
             SELECT s.*,
                    row_number() OVER (
                        PARTITION BY s.player_id
-                       ORDER BY s.observed_at DESC, s.salary_id DESC
+                       ORDER BY rtrim(s.observed_at, 'Z') DESC, s.salary_id DESC
                    ) AS version_rank
             FROM salaries AS s
             WHERE s.slate_id = :slate_id
               {salary_filter}
-              AND julianday(s.observed_at) <= julianday(:as_of)
-              AND julianday(s.valid_from) <= julianday(:as_of)
-              AND (s.valid_to IS NULL OR julianday(s.valid_to) > julianday(:as_of))
+              AND rtrim(s.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(s.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (
+                  s.valid_to IS NULL
+                  OR rtrim(s.valid_to, 'Z') > rtrim(:as_of, 'Z')
+              )
         ),
         ranked_projections AS (
             SELECT ps.*,
                    row_number() OVER (
                        PARTITION BY ps.source, ps.player_id
-                       ORDER BY ps.observed_at DESC, ps.projection_snapshot_id DESC
+                       ORDER BY rtrim(ps.observed_at, 'Z') DESC,
+                                ps.projection_snapshot_id DESC
                    ) AS version_rank
             FROM projection_snapshots AS ps
             WHERE ps.slate_id = :slate_id
               AND ps.site = :site
               {projection_filter}
-              AND julianday(ps.observed_at) <= julianday(:as_of)
-              AND julianday(ps.valid_from) <= julianday(:as_of)
-              AND (ps.valid_to IS NULL OR julianday(ps.valid_to) > julianday(:as_of))
+              AND rtrim(ps.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(ps.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (
+                  ps.valid_to IS NULL
+                  OR rtrim(ps.valid_to, 'Z') > rtrim(:as_of, 'Z')
+              )
         )
         SELECT s.player_id, s.site_player_id, s.roster_positions_json, s.salary,
                s.source_file_sha256 AS salary_hash, s.source AS salary_source,
@@ -140,18 +155,30 @@ def select_candidate_scenario(
         JOIN ranked_projections AS ps
           ON ps.player_id = s.player_id AND ps.version_rank = 1
         WHERE s.version_rank = 1
-          AND julianday(p.observed_at) <= julianday(:as_of)
-          AND julianday(p.valid_from) <= julianday(:as_of)
-          AND (p.valid_to IS NULL OR julianday(p.valid_to) > julianday(:as_of))
-          AND julianday(team.observed_at) <= julianday(:as_of)
-          AND julianday(team.valid_from) <= julianday(:as_of)
-          AND (team.valid_to IS NULL OR julianday(team.valid_to) > julianday(:as_of))
-          AND julianday(opponent.observed_at) <= julianday(:as_of)
-          AND julianday(opponent.valid_from) <= julianday(:as_of)
-          AND (opponent.valid_to IS NULL OR julianday(opponent.valid_to) > julianday(:as_of))
-          AND julianday(g.observed_at) <= julianday(:as_of)
-          AND julianday(g.valid_from) <= julianday(:as_of)
-          AND (g.valid_to IS NULL OR julianday(g.valid_to) > julianday(:as_of))
+          AND rtrim(p.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(p.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (
+              p.valid_to IS NULL
+              OR rtrim(p.valid_to, 'Z') > rtrim(:as_of, 'Z')
+          )
+          AND rtrim(team.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(team.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (
+              team.valid_to IS NULL
+              OR rtrim(team.valid_to, 'Z') > rtrim(:as_of, 'Z')
+          )
+          AND rtrim(opponent.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(opponent.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (
+              opponent.valid_to IS NULL
+              OR rtrim(opponent.valid_to, 'Z') > rtrim(:as_of, 'Z')
+          )
+          AND rtrim(g.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(g.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (
+              g.valid_to IS NULL
+              OR rtrim(g.valid_to, 'Z') > rtrim(:as_of, 'Z')
+          )
         ORDER BY s.player_id, ps.source, ps.source_file_sha256
         """,
         parameters,
@@ -165,7 +192,7 @@ def select_candidate_scenario(
         grouped[int(row["player_id"])].append(row)
 
     players = tuple(_candidate_from_rows(grouped[player_id]) for player_id in sorted(grouped))
-    salary_artifacts = tuple(
+    selected_salary_artifacts = tuple(
         sorted(
             {
                 SelectedSourceArtifact(
@@ -176,7 +203,7 @@ def select_candidate_scenario(
             }
         )
     )
-    projection_artifacts = tuple(
+    selected_projection_artifacts = tuple(
         sorted(
             {
                 SelectedSourceArtifact(
@@ -200,8 +227,8 @@ def select_candidate_scenario(
     return CandidateSelection(
         players=players,
         projection_source_versions=source_versions,
-        salary_artifacts=salary_artifacts,
-        projection_artifacts=projection_artifacts,
+        salary_artifacts=selected_salary_artifacts,
+        projection_artifacts=selected_projection_artifacts,
     )
 
 
@@ -244,15 +271,22 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
     )
 
 
-def _hash_filter(
-    column: str,
+def _artifact_filter(
+    hash_column: str,
+    source_column: str,
     prefix: str,
-    hashes: frozenset[str] | None,
+    artifacts: frozenset[SelectedSourceArtifact] | None,
 ) -> tuple[str, dict[str, object]]:
-    if hashes is None:
+    if artifacts is None:
         return "", {}
-    parameters: dict[str, object] = {
-        f"{prefix}_{index}": value for index, value in enumerate(sorted(hashes))
-    }
-    placeholders = ", ".join(f":{key}" for key in parameters)
-    return f"AND {column} IN ({placeholders})", parameters
+    parameters: dict[str, object] = {}
+    predicates: list[str] = []
+    for index, artifact in enumerate(sorted(artifacts)):
+        source_key = f"{prefix}_source_{index}"
+        hash_key = f"{prefix}_hash_{index}"
+        parameters[source_key] = artifact.source
+        parameters[hash_key] = artifact.sha256
+        predicates.append(
+            f"({source_column} = :{source_key} AND {hash_column} = :{hash_key})"
+        )
+    return "AND (" + " OR ".join(predicates) + ")", parameters

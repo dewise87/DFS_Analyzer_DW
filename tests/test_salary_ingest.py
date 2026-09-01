@@ -131,7 +131,7 @@ def test_fanduel_old_style_game_with_kickoff_and_no_tier_still_parses(tmp_path: 
         "Id,Position,First Name,Nickname,Last Name,FPPG,Played,Salary,Game,Team,"
         "Opponent,Injury Indicator,Injury Details\n"
         "3001,QB,Example,Example Thrower,Thrower,20.8,16,8100,"
-        "DAL@NYG 09/13/2026 04:25PM ET,DAL,NYG,,\n",
+        "DAL@NYG 09/13/2026 04:25PM ET,DAL,NYG,O,Out\n",
         encoding="utf-8",
     )
 
@@ -142,6 +142,7 @@ def test_fanduel_old_style_game_with_kickoff_and_no_tier_still_parses(tmp_path: 
     row = result.rows[0]
     assert row.game_time == datetime(2026, 9, 13, 20, 25, tzinfo=UTC)
     assert row.opponent == "NYG"
+    assert row.player_status == "O"
 
 
 def test_fanduel_tier_column_is_not_reported_as_drift(tmp_path: Path) -> None:

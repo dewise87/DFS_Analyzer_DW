@@ -27,6 +27,22 @@ def _decode_json(value: object) -> object:
     return value
 
 
+def _canonical_timestamp(value: datetime) -> str:
+    return _utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, datetime):
+        return _canonical_timestamp(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 class StoreRow(BaseModel):
     """Base for strict, immutable rows that can cross the SQLite boundary."""
 
@@ -44,9 +60,13 @@ class StoreRow(BaseModel):
         """Return SQLite-bindable values without hiding any SQL operation."""
 
         values: dict[str, DatabaseValue] = {}
-        for key, value in self.model_dump(mode="json").items():
-            if isinstance(value, (dict, list)):
-                values[key] = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        for key, value in self.model_dump(mode="python").items():
+            if isinstance(value, datetime):
+                values[key] = _canonical_timestamp(value)
+            elif isinstance(value, date):
+                values[key] = value.isoformat()
+            elif isinstance(value, (dict, list, tuple)):
+                values[key] = json.dumps(_json_value(value), sort_keys=True, separators=(",", ":"))
             else:
                 values[key] = value
         return values

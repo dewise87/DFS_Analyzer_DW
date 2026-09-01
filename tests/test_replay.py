@@ -22,6 +22,7 @@ from narrative_alpha.portfolio import (
 from narrative_alpha.replay import (
     MissingAsOfBound,
     PointInTimeSession,
+    ReplayArtifactError,
     UnboundedReplayQuery,
     replay_decision,
 )
@@ -122,6 +123,15 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
             artifact_root=artifact_root,
             adapter=adapter,
         )
+        _insert_prelock_projection_drift(connection)
+        with pytest.raises(ReplayArtifactError, match="candidate values differ"):
+            replay_decision(
+                connection,
+                decision_snapshot_id=snapshot.decision_snapshot_id,
+                decision_at=DECISION_AT,
+                artifact_root=artifact_root,
+                adapter=adapter,
+            )
 
     assert first.output_bytes == expected_output
     assert second.output_bytes == first.output_bytes
@@ -140,7 +150,9 @@ def _request() -> OptimizationRequest:
         candidate_player_scenario=CandidatePlayerScenario(
             scenario_id="prelock-fixture",
             players=_players(),
-            projection_source_versions=("fixture-projection:v1",),
+            projection_source_versions=(
+                f"fixture-projection:projection-v1:{PROJECTION_HASH}",
+            ),
         ),
         number_of_lineups=1,
         upload_entries=(
@@ -309,6 +321,29 @@ def _insert_post_lock_projection(connection: sqlite3.Connection) -> None:
                 "fixture-projection",
                 observed_at=post_lock,
                 source_version="projection-post-lock",
+            ),
+        },
+    )
+
+
+def _insert_prelock_projection_drift(connection: sqlite3.Connection) -> None:
+    _insert(
+        connection,
+        "projection_snapshots",
+        {
+            "projection_snapshot_id": 10_002,
+            "slate_id": 1,
+            "player_id": 30,
+            "site": "draftkings",
+            "projection_mean": 998.0,
+            "projection_floor": None,
+            "projection_ceiling": None,
+            "ownership_projection": 0.98,
+            "source_file_sha256": PROJECTION_HASH,
+            **_pit(
+                "fixture-projection",
+                observed_at=DATA_AT + timedelta(microseconds=1),
+                source_version="projection-drift",
             ),
         },
     )

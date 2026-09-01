@@ -1,0 +1,75 @@
+SLATE DECISION MEMO
+as_of=2026-09-13T16:55:00.000000Z
+decision_at=2026-09-13T16:55:00.000000Z
+decision_snapshot_id=decision-1add91e03437019d47e45f6efc76cf5cd905e28298d746259292a41b8704c380
+run_id=na-build-1add91e03437019d47e45f6efc76cf5cd905e28298d746259292a41b8704c380
+manifest_hash_set_sha256=e22d32f34810e666a0ee832faf94abcf864af4d07aa391b913a33a6200d8c0a7
+slate_id=1
+external_slate_id=dk-main
+site=draftkings
+slate_type=classic
+season=2026
+week=1
+slate_name=Sunday Main
+starts_at=2026-09-13T17:00:00.000000Z
+locks_at=2026-09-13T17:00:00.000000Z
+scenario_id=scenario-504f21d26c54c2649c71449c7876cc115bce1b88f9c0d1eb9c797d84e867d834
+honest_labeling_notice=DECISION INPUT SUMMARY — projections and ownership are point-in-time inputs, not realized outcomes; no EV or probability claim is simulator-backed.
+
+INPUT PROVENANCE
+artifact_kind,source,sha256,logical_path
+projection,fixture-projection,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,store/projection/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+salary,draftkings,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,store/salary/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+projection_source_versions
+source_version
+fixture-projection:projection-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+LINEUPS
+lineup_id,total_projection,total_salary,projected_ownership_sum
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,155.000000,40500,0.900000
+
+ROSTERS
+lineup_id,slot,player_id,site_player_id,name,team,opponent,position,salary,projection,projected_ownership,game_id
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,QB,1,10001,QB Player 1,AAA,BBB,QB,6000,24.000000,0.100000,game-1
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,RB,2,10002,RB Player 2,AAA,BBB,RB,5000,20.000000,0.100000,game-1
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,RB,3,10003,RB Player 3,BBB,AAA,RB,5000,19.000000,0.100000,game-1
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,WR,5,10005,WR Player 5,AAA,BBB,WR,4500,17.000000,0.100000,game-1
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,WR,6,10006,WR Player 6,BBB,AAA,WR,4500,16.000000,0.100000,game-1
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,WR,7,10007,WR Player 7,CCC,DDD,WR,4500,15.000000,0.100000,game-2
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,TE,8,10008,TE Player 8,DDD,CCC,TE,3500,14.000000,0.100000,game-2
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,FLEX,4,10004,RB Player 4,CCC,DDD,RB,5000,18.000000,0.100000,game-2
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,DST,9,10009,DST Player 9,DDD,CCC,DST,2500,12.000000,0.100000,game-2
+
+ATTACHED CONTEST
+contest_status=available
+contest_id=1
+contest_external_contest_id=dk-contest-1
+contest_site=draftkings
+contest_slate_id=1
+contest_archetype=single_entry
+contest_field_size=100
+contest_entry_limit=1
+contest_entry_fee_cents=1000
+contest_total_prizes_cents=1000000
+contest_payout_curve_id=payout-1
+contest_source=manual-site-lobby
+contest_published_at=unavailable
+contest_observed_at=2026-09-13T12:00:00.000000Z
+contest_ingested_at=2026-09-13T12:00:00.000000Z
+contest_effective_at=unavailable
+contest_valid_from=2026-09-13T12:00:00.000000Z
+contest_valid_to=unavailable
+contest_source_version=fixture-v1
+contest_run_id=unavailable
+
+HEURISTIC EV
+HEURISTIC ONLY — NOT SIMULATOR-BACKED. These values make no probability claims.
+contest_external_contest_id=dk-contest-1
+contest_site=draftkings
+heuristic_cash_line_projection_points=150.000000
+heuristic_average_prize_per_entry_cents=10000.000000
+heuristic_naive_cash_line_proxy_formula=heuristic_lineup_projection_sum / heuristic_cash_line_projection_points
+heuristic_naive_ev_cents_formula=(heuristic_naive_cash_line_proxy * heuristic_average_prize_per_entry_cents) - entry_fee_cents
+
+lineup_id,heuristic_lineup_projection_sum,heuristic_salary_used,heuristic_projected_ownership_sum,heuristic_naive_cash_line_proxy,heuristic_naive_ev_cents
+0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,155.000000,40500,0.900000,1.033333,9333.33

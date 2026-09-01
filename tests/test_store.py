@@ -65,6 +65,30 @@ EXTERNAL_TABLES = {
 }
 
 
+def test_store_rows_serialize_utc_timestamps_at_fixed_microsecond_width() -> None:
+    instant = datetime(2026, 9, 13, 16, 55, tzinfo=UTC)
+    row = PlayerRow(
+        player_id=1,
+        player_key="player-1",
+        canonical_name="Player One",
+        position="WR",
+        birth_date=None,
+        source="fixture",
+        published_at=None,
+        observed_at=instant,
+        ingested_at=instant,
+        effective_at=None,
+        valid_from=instant,
+        valid_to=instant + timedelta(microseconds=1),
+        source_version=None,
+        run_id=None,
+    )
+
+    values = row.db_values()
+    assert values["observed_at"] == "2026-09-13T16:55:00.000000Z"
+    assert values["valid_to"] == "2026-09-13T16:55:00.000001Z"
+
+
 def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     database_path = tmp_path / "store.sqlite3"
 
