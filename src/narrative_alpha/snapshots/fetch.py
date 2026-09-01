@@ -39,10 +39,12 @@ WEATHER_API_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 ODDS_SOURCE = "the-odds-api-v4"
 WEATHER_SOURCE = "open-meteo-gfs-seamless"
 ODDS_QUOTA_HEADERS = ("x-requests-remaining", "x-requests-used", "x-requests-last")
+# precipitation_probability is deliberately absent: it is an ensemble-derived field that
+# makes the single-runs API require a GEFS run alongside the pinned GFS run and rejects
+# the request (live-verified HTTP 400, 2026-09-01). Deterministic amounts suffice.
 WEATHER_HOURLY_FIELDS = (
     "temperature_2m",
     "relative_humidity_2m",
-    "precipitation_probability",
     "precipitation",
     "rain",
     "showers",
