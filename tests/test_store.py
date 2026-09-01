@@ -62,6 +62,10 @@ EXTERNAL_TABLES = {
     "odds_snapshots",
     "weather_snapshots",
     "results",
+    "sources",
+    "source_policies",
+    "source_items",
+    "content_tombstones",
 }
 
 
@@ -99,9 +103,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4]
+    assert [migration.version for migration in first] == [1, 2, 3, 4, 5]
     assert second == ()
-    assert len(records) == 4
+    assert len(records) == 5
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -114,6 +118,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[3][0] == 4
     assert records[3][1] == "0004_player_distributions.sql"
     assert len(records[3][2]) == 64
+    assert records[4][0] == 5
+    assert records[4][1] == "0005_narrative_sources.sql"
+    assert len(records[4][2]) == 64
 
 
 def test_each_migration_is_transactional(tmp_path: Path) -> None:

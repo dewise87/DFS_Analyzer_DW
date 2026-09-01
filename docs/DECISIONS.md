@@ -2,6 +2,30 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-01 — Slice 14 collector decisions
+
+- **Malformed feed HTML must cost at most its own element, never the article body.** The
+  first visible-text extractor tracked hidden regions with a depth counter. Void elements
+  (`<br>`, `<img>`) never emit an end tag and unclosed `<p>`/`<li>` are routine in feeds, so
+  each one read as an open level that never closed: a single hidden tracking pixel silently
+  truncated everything after it. The extractor now keeps the open-element stack. Silent
+  truncation is the worst failure mode available in this slice, because the evidence cannot
+  be re-fetched later.
+- **Item hash uniqueness is source-scoped, deliberately.** Identical text at two outlets is
+  two rows sharing a content hash, not one row. Collapsing them here would destroy the reach
+  signal rule 1.5.3 depends on, before the clustering slice ever sees it.
+- **`observed_at` is always the capture instant and is never backfilled from the item.**
+  `published_at` carries the item's own claim about its time. Rule 1.5.2 admissibility rests
+  on the first, not the second.
+- **A tombstone survives; the text does not.** Retention expiry and platform deletions both
+  clear title, raw bytes, and cleaned text while keeping the row and its hash. One tombstone
+  per item, so purge and deletion handling are idempotent. Cleared cleaned text means the
+  later extraction slice must run inside the retention window — the derived claims are what
+  outlive it, per §4.6.
+- **No policy is never permission.** Collection and deletion handling both require a current
+  reviewed policy; a missing or stale `terms_reviewed_at` refuses. Same shape as Slice 10's
+  empty quantile table.
+
 ## 2026-09-01 — Slice 12 point-in-time correctness fixes
 
 Building the evaluation layer exposed three defects in the decision path it was written to

@@ -600,6 +600,12 @@ was already being collected (rule 1.5.2 quarantines any signal type discovered a
 outcomes are known). Every week without collectors is a week that can never be used for
 signal validation.
 
+**Status note (2026-09-01):** landed and reviewed. Migration 0005, `narrative/collectors.py`,
+`na-collect`. Review found and fixed a silent truncation bug in the markup cleaner (a void or
+unclosed tag inside a hidden block discarded the rest of the document) and added regression
+coverage. Reddit stayed out, as scoped; the collector interface accepts one behind the same
+policy gate once access clears.
+
 ### Slice 14 — Source policies + narrative collectors
 
 **Goal:** start the clock on irreplaceable data. A source cannot be collected from until its

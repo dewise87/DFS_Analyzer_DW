@@ -79,7 +79,9 @@ class FetchReport:
 
 
 @dataclass(frozen=True)
-class _RequestFailure(Exception):
+class HttpRequestFailure(Exception):
+    """Structured terminal failure from the shared retrying HTTP path."""
+
     attempts: int
     error_type: str
     status_code: int | None
@@ -133,8 +135,8 @@ def fetch_odds(
     else:
         with _http_client(client) as http_client:
             try:
-                response, attempts = _get_with_retry(http_client, ODDS_API_URL, params, sleep=sleep)
-            except _RequestFailure as failure:
+                response, attempts = get_with_retry(http_client, ODDS_API_URL, params, sleep=sleep)
+            except HttpRequestFailure as failure:
                 errors.append(
                     _snapshot_error(
                         failure,
@@ -229,10 +231,10 @@ def fetch_weather(
             request_url = _redacted_url(WEATHER_API_URL, params)
             filename = f"{game.row_number:02d}_{_slug(game.stadium.name)}.json"
             try:
-                response, attempts = _get_with_retry(
+                response, attempts = get_with_retry(
                     http_client, WEATHER_API_URL, params, sleep=sleep
                 )
-            except _RequestFailure as failure:
+            except HttpRequestFailure as failure:
                 errors.append(
                     _snapshot_error(
                         failure,
@@ -275,7 +277,7 @@ def fetch_weather(
     return FetchReport(capture_path, len(payloads), tuple(errors))
 
 
-def _get_with_retry(
+def get_with_retry(
     client: httpx.Client,
     url: str,
     params: Mapping[str, str],
@@ -306,7 +308,7 @@ def _get_with_retry(
             return response, attempt
 
     assert last_error is not None
-    raise _RequestFailure(
+    raise HttpRequestFailure(
         attempts=attempt,
         error_type=type(last_error).__name__,
         status_code=None if last_response is None else last_response.status_code,
@@ -434,7 +436,7 @@ def _selected_headers(headers: Mapping[str, str], names: tuple[str, ...]) -> dic
 
 
 def _snapshot_error(
-    failure: _RequestFailure,
+    failure: HttpRequestFailure,
     *,
     source: str,
     occurred_at: datetime,

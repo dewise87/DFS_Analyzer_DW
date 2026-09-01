@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 na-build = "narrative_alpha.build_cli:main"
+na-collect = "narrative_alpha.collect_cli:main"
 na-contest = "narrative_alpha.contest_cli:main"
 na-crosswalk = "narrative_alpha.identity.cli:main"
 na-report = "narrative_alpha.report_cli:main"

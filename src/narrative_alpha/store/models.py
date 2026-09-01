@@ -629,6 +629,109 @@ class ContestPayoutRow(PointInTimeRow):
         return self
 
 
+class SourceRow(PointInTimeRow):
+    """One explicitly configured public feed source."""
+
+    source_id: str
+    display_name: str
+    source_family: str
+    collector_kind: Literal["rss_atom", "official_team_feed"]
+    feed_url: str
+    enabled: bool = True
+
+    @field_validator("source_id", "display_name", "source_family")
+    @classmethod
+    def nonempty_source_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("source fields must not be empty")
+        return normalized
+
+    @field_validator("feed_url")
+    @classmethod
+    def public_feed_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("feed_url must be an HTTP(S) URL")
+        return normalized
+
+
+class SourcePolicyRow(PointInTimeRow):
+    """A reviewed, versioned rights and retention decision for one source."""
+
+    source_policy_id: int
+    source_id: str
+    permitted_use: str
+    raw_retention_days: int = Field(ge=0)
+    personal_data_fields_allowed: tuple[str, ...]
+    must_honor_deletions: bool
+    redistribution_allowed: bool
+    third_party_processing_allowed: bool
+    commercial_use_status: str
+    terms_reviewed_at: datetime
+
+    @field_validator("personal_data_fields_allowed", mode="before")
+    @classmethod
+    def decode_personal_data_fields(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("terms_reviewed_at")
+    @classmethod
+    def normalize_terms_reviewed_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("source_id", "permitted_use", "commercial_use_status")
+    @classmethod
+    def nonempty_policy_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("policy fields must not be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def unique_personal_data_fields(self) -> Self:
+        if len(set(self.personal_data_fields_allowed)) != len(
+            self.personal_data_fields_allowed
+        ):
+            raise ValueError("personal_data_fields_allowed contains duplicates")
+        return self
+
+
+class SourceItemRow(PointInTimeRow):
+    """One inert feed item, deduplicated only inside its originating source."""
+
+    source_item_id: int
+    source_id: str
+    external_item_id: str | None
+    canonical_url: str | None
+    title: str | None
+    raw_content: bytes | None
+    cleaned_text: str | None
+    content_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_retained_content_pair(self) -> Self:
+        if (self.raw_content is None) != (self.cleaned_text is None):
+            raise ValueError("raw_content and cleaned_text must be retained or purged together")
+        return self
+
+
+class ContentTombstoneRow(PointInTimeRow):
+    """Durable evidence that reconstructive source content was removed."""
+
+    content_tombstone_id: int
+    source_item_id: int
+    source_id: str
+    content_sha256: Sha256
+    reason: Literal["retention_expired", "platform_deleted"]
+    tombstoned_at: datetime
+
+    @field_validator("tombstoned_at")
+    @classmethod
+    def normalize_tombstoned_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
 class OddsSnapshotRow(PointInTimeRow):
     odds_snapshot_id: int
     game_id: int

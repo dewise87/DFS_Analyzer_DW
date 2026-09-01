@@ -107,6 +107,26 @@ Each row references its raw response hash and carries §3.2 provenance for point
 Stores player fantasy outcomes and an optional raw stat-line object for a game and DFS site.  
 Rows retain the result-file hash and §3.2 source fields even though they are post-lock labels.
 
+## `sources`
+
+Configures only supported public RSS/Atom and official-team feeds, with an explicit collector kind.
+Each source carries point-in-time provenance; no source configuration implies collection permission.
+
+## `source_policies`
+
+Records the reviewed rights, retention, deletion, redistribution, processing, and commercial terms.
+Collection fails closed when no current policy exists or its `terms_reviewed_at` is stale.
+
+## `source_items`
+
+Stores inert feed bytes, separately cleaned visible text, item/capture times, and a content hash.
+Hash uniqueness is source-scoped so cross-source copies remain separate evidence of reach.
+
+## `content_tombstones`
+
+Durably records retention expiry or a platform deletion after reconstructive item text is cleared.
+One tombstone per item makes purge and deletion handling idempotent without silently deleting rows.
+
 ## `decision_snapshots`
 
 Freezes a slate decision cutoff with canonical JSON containing the complete §8.4 artifact hash-set.  
