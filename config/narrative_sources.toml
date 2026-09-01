@@ -1,0 +1,975 @@
+# NFL narrative feed catalog — candidate sources for `na-collect seed`.
+#
+# Every feed_url below returned a valid RSS/Atom document when this file was generated
+# (2026-09-01). Nothing here is a reviewed rights decision: `terms_reviewed_at` is
+# deliberately absent, and seeding requires the operator to pass one explicitly. The
+# policy_tier only proposes retention/permission defaults for that review to accept or
+# change.
+#
+# Individual beat reporters are intentionally absent: they publish at outlets and post on
+# X, and almost none run a personal feed. The per-team outlet feeds below are where their
+# reporting actually becomes machine-readable. See docs/DECISIONS.md for the X/Bluesky call.
+
+[policy_tiers.official_team]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 30
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "unreviewed_assume_prohibited"
+
+[policy_tiers.national_media]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 14
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "unreviewed_assume_prohibited"
+
+[policy_tiers.team_blog]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 14
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "unreviewed_assume_prohibited"
+
+[policy_tiers.fantasy_aggregator]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 14
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "unreviewed_assume_prohibited"
+
+[[sources]]
+source_id = "official-ari"
+display_name = "ARI official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.azcardinals.com/rss/news"
+policy_tier = "official_team"
+team = "ARI"
+
+[[sources]]
+source_id = "espn-ari"
+display_name = "ESPN ARI"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=ari"
+policy_tier = "national_media"
+team = "ARI"
+
+[[sources]]
+source_id = "sbn-ari"
+display_name = "SB Nation ARI (revengeofthebirds)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.revengeofthebirds.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "ARI"
+
+[[sources]]
+source_id = "official-atl"
+display_name = "ATL official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.atlantafalcons.com/rss/news"
+policy_tier = "official_team"
+team = "ATL"
+
+[[sources]]
+source_id = "espn-atl"
+display_name = "ESPN ATL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=atl"
+policy_tier = "national_media"
+team = "ATL"
+
+[[sources]]
+source_id = "sbn-atl"
+display_name = "SB Nation ATL (thefalcoholic)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.thefalcoholic.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "ATL"
+
+[[sources]]
+source_id = "official-bal"
+display_name = "BAL official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.baltimoreravens.com/rss/news"
+policy_tier = "official_team"
+team = "BAL"
+
+[[sources]]
+source_id = "espn-bal"
+display_name = "ESPN BAL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=bal"
+policy_tier = "national_media"
+team = "BAL"
+
+[[sources]]
+source_id = "sbn-bal"
+display_name = "SB Nation BAL (baltimorebeatdown)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.baltimorebeatdown.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "BAL"
+
+[[sources]]
+source_id = "official-buf"
+display_name = "BUF official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.buffalobills.com/rss/news"
+policy_tier = "official_team"
+team = "BUF"
+
+[[sources]]
+source_id = "espn-buf"
+display_name = "ESPN BUF"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=buf"
+policy_tier = "national_media"
+team = "BUF"
+
+[[sources]]
+source_id = "sbn-buf"
+display_name = "SB Nation BUF (buffalorumblings)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.buffalorumblings.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "BUF"
+
+[[sources]]
+source_id = "official-car"
+display_name = "CAR official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.panthers.com/rss/news"
+policy_tier = "official_team"
+team = "CAR"
+
+[[sources]]
+source_id = "espn-car"
+display_name = "ESPN CAR"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=car"
+policy_tier = "national_media"
+team = "CAR"
+
+[[sources]]
+source_id = "sbn-car"
+display_name = "SB Nation CAR (catscratchreader)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.catscratchreader.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "CAR"
+
+[[sources]]
+source_id = "official-chi"
+display_name = "CHI official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.chicagobears.com/rss/news"
+policy_tier = "official_team"
+team = "CHI"
+
+[[sources]]
+source_id = "espn-chi"
+display_name = "ESPN CHI"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=chi"
+policy_tier = "national_media"
+team = "CHI"
+
+[[sources]]
+source_id = "sbn-chi"
+display_name = "SB Nation CHI (windycitygridiron)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.windycitygridiron.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "CHI"
+
+[[sources]]
+source_id = "official-cin"
+display_name = "CIN official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.bengals.com/rss/news"
+policy_tier = "official_team"
+team = "CIN"
+
+[[sources]]
+source_id = "espn-cin"
+display_name = "ESPN CIN"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=cin"
+policy_tier = "national_media"
+team = "CIN"
+
+[[sources]]
+source_id = "sbn-cin"
+display_name = "SB Nation CIN (cincyjungle)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.cincyjungle.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "CIN"
+
+[[sources]]
+source_id = "official-cle"
+display_name = "CLE official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.clevelandbrowns.com/rss/news"
+policy_tier = "official_team"
+team = "CLE"
+
+[[sources]]
+source_id = "espn-cle"
+display_name = "ESPN CLE"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=cle"
+policy_tier = "national_media"
+team = "CLE"
+
+[[sources]]
+source_id = "sbn-cle"
+display_name = "SB Nation CLE (dawgsbynature)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.dawgsbynature.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "CLE"
+
+[[sources]]
+source_id = "official-dal"
+display_name = "DAL official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.dallascowboys.com/rss/news"
+policy_tier = "official_team"
+team = "DAL"
+
+[[sources]]
+source_id = "espn-dal"
+display_name = "ESPN DAL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=dal"
+policy_tier = "national_media"
+team = "DAL"
+
+[[sources]]
+source_id = "sbn-dal"
+display_name = "SB Nation DAL (bloggingtheboys)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.bloggingtheboys.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "DAL"
+
+[[sources]]
+source_id = "official-den"
+display_name = "DEN official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.denverbroncos.com/rss/news"
+policy_tier = "official_team"
+team = "DEN"
+
+[[sources]]
+source_id = "espn-den"
+display_name = "ESPN DEN"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=den"
+policy_tier = "national_media"
+team = "DEN"
+
+[[sources]]
+source_id = "sbn-den"
+display_name = "SB Nation DEN (milehighreport)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.milehighreport.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "DEN"
+
+[[sources]]
+source_id = "official-det"
+display_name = "DET official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.detroitlions.com/rss/news"
+policy_tier = "official_team"
+team = "DET"
+
+[[sources]]
+source_id = "espn-det"
+display_name = "ESPN DET"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=det"
+policy_tier = "national_media"
+team = "DET"
+
+[[sources]]
+source_id = "sbn-det"
+display_name = "SB Nation DET (prideofdetroit)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.prideofdetroit.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "DET"
+
+[[sources]]
+source_id = "official-gb"
+display_name = "GB official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.packers.com/rss/news"
+policy_tier = "official_team"
+team = "GB"
+
+[[sources]]
+source_id = "espn-gb"
+display_name = "ESPN GB"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=gb"
+policy_tier = "national_media"
+team = "GB"
+
+[[sources]]
+source_id = "sbn-gb"
+display_name = "SB Nation GB (acmepackingcompany)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.acmepackingcompany.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "GB"
+
+[[sources]]
+source_id = "official-hou"
+display_name = "HOU official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.houstontexans.com/rss/news"
+policy_tier = "official_team"
+team = "HOU"
+
+[[sources]]
+source_id = "espn-hou"
+display_name = "ESPN HOU"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=hou"
+policy_tier = "national_media"
+team = "HOU"
+
+[[sources]]
+source_id = "sbn-hou"
+display_name = "SB Nation HOU (battleredblog)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.battleredblog.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "HOU"
+
+[[sources]]
+source_id = "official-ind"
+display_name = "IND official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.colts.com/rss/news"
+policy_tier = "official_team"
+team = "IND"
+
+[[sources]]
+source_id = "espn-ind"
+display_name = "ESPN IND"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=ind"
+policy_tier = "national_media"
+team = "IND"
+
+[[sources]]
+source_id = "sbn-ind"
+display_name = "SB Nation IND (stampedeblue)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.stampedeblue.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "IND"
+
+[[sources]]
+source_id = "official-jax"
+display_name = "JAX official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.jaguars.com/rss/news"
+policy_tier = "official_team"
+team = "JAX"
+
+[[sources]]
+source_id = "espn-jax"
+display_name = "ESPN JAX"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=jax"
+policy_tier = "national_media"
+team = "JAX"
+
+[[sources]]
+source_id = "sbn-jax"
+display_name = "SB Nation JAX (bigcatcountry)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.bigcatcountry.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "JAX"
+
+[[sources]]
+source_id = "official-kc"
+display_name = "KC official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.chiefs.com/rss/news"
+policy_tier = "official_team"
+team = "KC"
+
+[[sources]]
+source_id = "espn-kc"
+display_name = "ESPN KC"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=kc"
+policy_tier = "national_media"
+team = "KC"
+
+[[sources]]
+source_id = "sbn-kc"
+display_name = "SB Nation KC (arrowheadpride)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.arrowheadpride.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "KC"
+
+[[sources]]
+source_id = "official-lv"
+display_name = "LV official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.raiders.com/rss/news"
+policy_tier = "official_team"
+team = "LV"
+
+[[sources]]
+source_id = "espn-lv"
+display_name = "ESPN LV"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=lv"
+policy_tier = "national_media"
+team = "LV"
+
+[[sources]]
+source_id = "sbn-lv"
+display_name = "SB Nation LV (silverandblackpride)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.silverandblackpride.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "LV"
+
+[[sources]]
+source_id = "official-lac"
+display_name = "LAC official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.chargers.com/rss/news"
+policy_tier = "official_team"
+team = "LAC"
+
+[[sources]]
+source_id = "espn-lac"
+display_name = "ESPN LAC"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=lac"
+policy_tier = "national_media"
+team = "LAC"
+
+[[sources]]
+source_id = "sbn-lac"
+display_name = "SB Nation LAC (boltsfromtheblue)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.boltsfromtheblue.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "LAC"
+
+[[sources]]
+source_id = "official-lar"
+display_name = "LAR official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.therams.com/rss/news"
+policy_tier = "official_team"
+team = "LAR"
+
+[[sources]]
+source_id = "espn-lar"
+display_name = "ESPN LAR"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=lar"
+policy_tier = "national_media"
+team = "LAR"
+
+[[sources]]
+source_id = "sbn-lar"
+display_name = "SB Nation LAR (turfshowtimes)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.turfshowtimes.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "LAR"
+
+[[sources]]
+source_id = "official-mia"
+display_name = "MIA official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.miamidolphins.com/rss/news"
+policy_tier = "official_team"
+team = "MIA"
+
+[[sources]]
+source_id = "espn-mia"
+display_name = "ESPN MIA"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=mia"
+policy_tier = "national_media"
+team = "MIA"
+
+[[sources]]
+source_id = "sbn-mia"
+display_name = "SB Nation MIA (thephinsider)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.thephinsider.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "MIA"
+
+[[sources]]
+source_id = "official-min"
+display_name = "MIN official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.vikings.com/rss/news"
+policy_tier = "official_team"
+team = "MIN"
+
+[[sources]]
+source_id = "espn-min"
+display_name = "ESPN MIN"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=min"
+policy_tier = "national_media"
+team = "MIN"
+
+[[sources]]
+source_id = "sbn-min"
+display_name = "SB Nation MIN (dailynorseman)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.dailynorseman.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "MIN"
+
+[[sources]]
+source_id = "official-ne"
+display_name = "NE official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.patriots.com/rss/news"
+policy_tier = "official_team"
+team = "NE"
+
+[[sources]]
+source_id = "espn-ne"
+display_name = "ESPN NE"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=ne"
+policy_tier = "national_media"
+team = "NE"
+
+[[sources]]
+source_id = "sbn-ne"
+display_name = "SB Nation NE (patspulpit)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.patspulpit.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "NE"
+
+[[sources]]
+source_id = "official-no"
+display_name = "NO official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.neworleanssaints.com/rss/news"
+policy_tier = "official_team"
+team = "NO"
+
+[[sources]]
+source_id = "espn-no"
+display_name = "ESPN NO"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=no"
+policy_tier = "national_media"
+team = "NO"
+
+[[sources]]
+source_id = "sbn-no"
+display_name = "SB Nation NO (canalstreetchronicles)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.canalstreetchronicles.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "NO"
+
+[[sources]]
+source_id = "official-nyg"
+display_name = "NYG official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.giants.com/rss/news"
+policy_tier = "official_team"
+team = "NYG"
+
+[[sources]]
+source_id = "espn-nyg"
+display_name = "ESPN NYG"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=nyg"
+policy_tier = "national_media"
+team = "NYG"
+
+[[sources]]
+source_id = "sbn-nyg"
+display_name = "SB Nation NYG (bigblueview)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.bigblueview.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "NYG"
+
+[[sources]]
+source_id = "official-nyj"
+display_name = "NYJ official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.newyorkjets.com/rss/news"
+policy_tier = "official_team"
+team = "NYJ"
+
+[[sources]]
+source_id = "espn-nyj"
+display_name = "ESPN NYJ"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=nyj"
+policy_tier = "national_media"
+team = "NYJ"
+
+[[sources]]
+source_id = "sbn-nyj"
+display_name = "SB Nation NYJ (ganggreennation)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.ganggreennation.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "NYJ"
+
+[[sources]]
+source_id = "official-phi"
+display_name = "PHI official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.philadelphiaeagles.com/rss/news"
+policy_tier = "official_team"
+team = "PHI"
+
+[[sources]]
+source_id = "espn-phi"
+display_name = "ESPN PHI"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=phi"
+policy_tier = "national_media"
+team = "PHI"
+
+[[sources]]
+source_id = "sbn-phi"
+display_name = "SB Nation PHI (bleedinggreennation)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.bleedinggreennation.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "PHI"
+
+[[sources]]
+source_id = "official-pit"
+display_name = "PIT official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.steelers.com/rss/news"
+policy_tier = "official_team"
+team = "PIT"
+
+[[sources]]
+source_id = "espn-pit"
+display_name = "ESPN PIT"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=pit"
+policy_tier = "national_media"
+team = "PIT"
+
+[[sources]]
+source_id = "sbn-pit"
+display_name = "SB Nation PIT (behindthesteelcurtain)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.behindthesteelcurtain.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "PIT"
+
+[[sources]]
+source_id = "official-sf"
+display_name = "SF official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.49ers.com/rss/news"
+policy_tier = "official_team"
+team = "SF"
+
+[[sources]]
+source_id = "espn-sf"
+display_name = "ESPN SF"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=sf"
+policy_tier = "national_media"
+team = "SF"
+
+[[sources]]
+source_id = "sbn-sf"
+display_name = "SB Nation SF (ninersnation)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.ninersnation.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "SF"
+
+[[sources]]
+source_id = "official-sea"
+display_name = "SEA official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.seahawks.com/rss/news"
+policy_tier = "official_team"
+team = "SEA"
+
+[[sources]]
+source_id = "espn-sea"
+display_name = "ESPN SEA"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=sea"
+policy_tier = "national_media"
+team = "SEA"
+
+[[sources]]
+source_id = "sbn-sea"
+display_name = "SB Nation SEA (fieldgulls)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.fieldgulls.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "SEA"
+
+[[sources]]
+source_id = "official-tb"
+display_name = "TB official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.buccaneers.com/rss/news"
+policy_tier = "official_team"
+team = "TB"
+
+[[sources]]
+source_id = "espn-tb"
+display_name = "ESPN TB"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=tb"
+policy_tier = "national_media"
+team = "TB"
+
+[[sources]]
+source_id = "sbn-tb"
+display_name = "SB Nation TB (bucsnation)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.bucsnation.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "TB"
+
+[[sources]]
+source_id = "official-ten"
+display_name = "TEN official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.tennesseetitans.com/rss/news"
+policy_tier = "official_team"
+team = "TEN"
+
+[[sources]]
+source_id = "espn-ten"
+display_name = "ESPN TEN"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=ten"
+policy_tier = "national_media"
+team = "TEN"
+
+[[sources]]
+source_id = "sbn-ten"
+display_name = "SB Nation TEN (musiccitymiracles)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.musiccitymiracles.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "TEN"
+
+[[sources]]
+source_id = "official-was"
+display_name = "WAS official site"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://www.commanders.com/rss/news"
+policy_tier = "official_team"
+team = "WAS"
+
+[[sources]]
+source_id = "espn-was"
+display_name = "ESPN WAS"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/team?team=wsh"
+policy_tier = "national_media"
+team = "WAS"
+
+[[sources]]
+source_id = "sbn-was"
+display_name = "SB Nation WAS (hogshaven)"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.hogshaven.com/rss/index.xml"
+policy_tier = "team_blog"
+team = "WAS"
+
+[[sources]]
+source_id = "athletic-nfl"
+display_name = "The Athletic NFL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.nytimes.com/athletic/rss/nfl/"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "espn-nfl"
+display_name = "ESPN NFL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.espn.com/espn/rss/nfl/news"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "yahoo-nfl"
+display_name = "Yahoo Sports NFL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://sports.yahoo.com/nfl/rss.xml"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "cbs-nfl"
+display_name = "CBS Sports NFL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.cbssports.com/rss/headlines/nfl/"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "fox-nfl"
+display_name = "FOX Sports NFL"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://api.foxsports.com/v1/rss?tag=nfl"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "sbnation-nfl"
+display_name = "SB Nation NFL"
+source_family = "team_community"
+collector_kind = "rss_atom"
+feed_url = "https://www.sbnation.com/rss/nfl/index.xml"
+policy_tier = "team_blog"
+
+[[sources]]
+source_id = "pfn-nfl"
+display_name = "Pro Football Network"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://www.profootballnetwork.com/feed/"
+policy_tier = "national_media"
+
+[[sources]]
+source_id = "rotoballer-nfl"
+display_name = "RotoBaller NFL"
+source_family = "fantasy_aggregator"
+collector_kind = "rss_atom"
+feed_url = "https://www.rotoballer.com/category/nfl/feed"
+policy_tier = "fantasy_aggregator"

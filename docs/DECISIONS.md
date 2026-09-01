@@ -2,6 +2,31 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-01 — Narrative source selection and the X/Twitter question
+
+- **X/Twitter is not collected, and the collector cannot reach it today.** The migration
+  only permits `rss_atom` and `official_team_feed`. X killed RSS in 2013, and in February
+  2026 it dropped the free tier and moved new developers to pay-per-use at **$0.005 per post
+  read**. Scraping and third-party mirrors violate its terms, so §4.6's "prefer licensed or
+  clearly permitted access" rules them out. Revisit if the mean-channel timing edge is ever
+  shown to be worth the metered cost — X is where beat reporters break news first, and that
+  latency is the one thing the RSS tier genuinely cannot replicate.
+- **Bluesky is the free alternative but is not a drop-in replacement.** Its API is free with
+  no paid tier and a public unauthenticated firehose. Querying it directly confirmed real
+  NFL presence (Adam Schefter, Mina Kimes, Jordan Schultz, and per-team Athletic writers),
+  but coverage is partial, its actor search is too weak to build a list automatically, and
+  unofficial *mirror* accounts republishing X content are present. Mirrors are excluded on
+  sight: they launder the same terms problem and can vanish without notice. Any Bluesky
+  collector needs a hand-verified handle list.
+- **Per-reporter feeds are a category error; per-team outlet feeds are the real unit.**
+  Beat reporters publish at outlets and post on X; almost none run a personal feed. The
+  catalog therefore carries three feeds per team — the club's official site, ESPN's per-team
+  feed, and the team's SB Nation community — plus The Athletic's NFL feed, which is where
+  most top beat writers actually publish.
+- **The catalog ships without `terms_reviewed_at`, on purpose.** Auto-stamping a review date
+  would forge exactly the human judgment the Slice 14 policy gate exists to require. Seeding
+  must take the timestamp from the operator, who is attesting they read the terms.
+
 ## 2026-09-01 — Slice 14 collector decisions
 
 - **Malformed feed HTML must cost at most its own element, never the article body.** The
