@@ -185,6 +185,30 @@ def test_seed_dry_run_writes_no_catalog_rows(
     assert '"source_action": "insert"' in output
 
 
+def test_future_attestation_error_names_both_instants(tmp_path: Path) -> None:
+    """The common cause is an operator ahead of UTC writing their local date as a Z time.
+
+    "must not be later than the seed observation" gives them nothing to act on; the message
+    has to show the attested instant and the current UTC instant side by side.
+    """
+
+    database = tmp_path / "future.sqlite3"
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        with pytest.raises(CatalogError) as error:
+            plan_source_seed(
+                connection,
+                CATALOG_FIXTURE,
+                terms_reviewed_at=datetime(2026, 9, 2, tzinfo=UTC),
+                observed_at=datetime(2026, 9, 1, 21, 8, tzinfo=UTC),
+            )
+
+    message = str(error.value)
+    assert "2026-09-02T00:00:00.000000Z" in message
+    assert "2026-09-01T21:08:00.000000Z" in message
+    assert "future" in message
+
+
 def test_feed_check_follows_a_moved_feed_instead_of_reporting_it_dead() -> None:
     """A publisher moving a feed answers 301; refusing to follow silently drops the source.
 

@@ -212,7 +212,13 @@ def plan_source_seed(
     review_time = ensure_utc(terms_reviewed_at)
     seed_time = ensure_utc(observed_at or datetime.now(UTC))
     if review_time > seed_time:
-        raise CatalogError("terms-reviewed-at must not be later than the seed observation")
+        # Name both instants: the usual cause is a local-date timestamp written as UTC by an
+        # operator whose clock is ahead of UTC, which reads as a future review date.
+        raise CatalogError(
+            f"--terms-reviewed-at {utc_timestamp(review_time)} is in the future; "
+            f"the current UTC time is {utc_timestamp(seed_time)}. A review cannot be "
+            "attested before it happened — pass a UTC timestamp at or before now."
+        )
     catalog_sha256 = hashlib.sha256(catalog_bytes).hexdigest()
     counts = Counter(source.policy_tier for source in catalog.sources)
     attestations = tuple(
