@@ -381,6 +381,56 @@ ChatGPT **GPT-5.1 Thinking** (workhorse — the registry seam already exists).
 > If the real files are NOT present under data/snapshots/, STOP and say so — do not invent
 > the schema.
 
+**Status note (2026-09-01):** Stokastic has no main-slate NFL data until the season starts,
+so Slice 9 waits for the first real export. Not a project blocker — Slices 10–12 are
+code-first and proceed against seeded fixtures.
+
+### Slice 11 — Contest archetype/payout schema + heuristic EV labeling
+
+**Goal:** the contest side of the store and the honest-labeling rule from §2.2: contests,
+payout curves, and a simple heuristic lineup-EV report where everything not backed by a
+simulator is explicitly marked "heuristic only".
+
+**Design doc:** §4.3 (contest cohort fields), §6.4 (lineup decision metrics), §2.2 (label
+heuristics honestly), §8.2 (contests, contest_payouts tables).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding: schema changes are NEW migration files now, never in-place
+> edits), `src/narrative_alpha/store/` (migration runner, row-model patterns, §3.2
+> point-in-time provenance columns — copy the established table shape exactly),
+> `src/narrative_alpha/ingest/results.py` (the contest cohort fields already captured on
+> actual_ownership), and `src/narrative_alpha/build.py` (BuildResult, whose lineups the
+> report consumes).
+>
+> Three parts:
+>
+> 1. **Migration 0003**: `contests` (external_contest_id, site, slate_id, archetype,
+>    field_size, entry_limit, entry_fee_cents, total_prizes_cents, payout_curve_id, full
+>    §3.2 provenance block, STRICT, UNIQUE on (site, external_contest_id, observed_at)) and
+>    `contest_payouts` (payout_curve_id, rank_from, rank_to, prize_cents, provenance block;
+>    CHECK rank_from <= rank_to, no overlapping rank bands within a curve — enforce overlap
+>    in code with a loud error, plus what CHECK can express). Typed Pydantic row models +
+>    docs/schema.md two-liners, following the existing patterns exactly.
+> 2. **Manual contest entry**: a small `na-contest add` CLI (or subcommand) that records a
+>    contest and its payout table from flags/CSV — the operator copies these from the site
+>    lobby; there is no API. Validate prize totals against total_prizes_cents when given.
+> 3. **Heuristic EV report**: `src/narrative_alpha/portfolio/heuristic_report.py` — given a
+>    BuildResult's lineups and a contest row, produce a report with: lineup projection sum,
+>    salary used, projected-ownership sum (when present), naive cash-line proxy and naive
+>    EV — and every such number carried in fields/headers explicitly named `heuristic_*`,
+>    with a top-of-report line stating these are NOT simulator-backed (design doc §2.2).
+>    No probability claims beyond the naive arithmetic; no hidden constants — thresholds
+>    live in one visible dataclass.
+>
+> Tests: migration idempotency + row-model round-trips (copy test_store.py patterns),
+> payout-band overlap refusal, prize-total mismatch refusal, CLI add + reload, and a
+> golden-file test on the rendered report so its wording/format is pinned. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green before done.
+
 Remaining Phase 1 slices (prompts written when reached):
 
 - **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
