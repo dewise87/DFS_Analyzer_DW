@@ -50,6 +50,23 @@ uv run pytest
 
 See Appendix D of the design doc for the in-season checklist. Phase −1 rule: **every week the snapshot capture doesn't run destroys irreplaceable training data.**
 
+### Narrative feed collection
+
+Review the tier terms in `config/narrative_sources.toml`, then explicitly attest that review
+when seeding. The timestamp is never inferred from the file or current time:
+
+```bash
+uv run na-collect seed --catalog config/narrative_sources.toml \
+  --terms-reviewed-at 2026-09-01T12:00:00Z --dry-run
+uv run na-collect seed --catalog config/narrative_sources.toml \
+  --terms-reviewed-at 2026-09-01T12:00:00Z
+uv run na-collect seed --catalog config/narrative_sources.toml --check-feeds
+```
+
+Run `uv run na-collect run` on the Wed–Fri batch cadence. It attempts every enabled source,
+reports failures by source, and exits nonzero if any feed failed. Run
+`uv run na-collect purge` on the same schedule to enforce each reviewed raw-text TTL.
+
 ## Salary CSV parsing
 
 DraftKings and FanDuel classic/showdown exports are detected from their headers and parsed

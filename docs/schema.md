@@ -110,7 +110,13 @@ Rows retain the result-file hash and §3.2 source fields even though they are po
 ## `sources`
 
 Configures only supported public RSS/Atom and official-team feeds, with an explicit collector kind.
-Each source carries point-in-time provenance; no source configuration implies collection permission.
+Each source configuration is an append-only version behind a stable `source_keys` identity; no
+source configuration implies collection permission.
+
+## `source_keys`
+
+Holds stable source identifiers referenced by policies, items, tombstones, and configuration versions.
+It contains identity only; collection uses the latest point-in-time-valid row from `sources`.
 
 ## `source_policies`
 

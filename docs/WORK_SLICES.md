@@ -734,6 +734,15 @@ review attestation is the one part that must not be made convenient.
 
 ---
 
+**Status note (2026-09-01):** Slice 15 landed and reviewed. `na-collect seed` with a required
+operator attestation, `--check-feeds`, `--dry-run` against a disposable copy, migration 0006
+versioning `sources`, and per-source failure isolation. Review found and fixed a redirect bug
+that silently dropped any feed answering 301. Verified end to end against the real 104-feed
+catalog: seed 104 → re-seed 0, and live collection of 250 items across three sources with
+correct dedup on re-run.
+
+---
+
 ## Standing review checklist (project lead applies to every slice)
 
 1. Point-in-time fields present and populated on every external record touched.

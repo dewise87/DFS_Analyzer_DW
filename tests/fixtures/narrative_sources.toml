@@ -1,0 +1,34 @@
+[policy_tiers.official]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 30
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "commercial_use_prohibited"
+
+[policy_tiers.media]
+permitted_use = "internal_analysis_only"
+raw_retention_days = 14
+personal_data_fields_allowed = []
+must_honor_deletions = true
+redistribution_allowed = false
+third_party_processing_allowed = true
+commercial_use_status = "commercial_use_prohibited"
+
+[[sources]]
+source_id = "fixture-official"
+display_name = "Fixture official feed"
+source_family = "official_team"
+collector_kind = "rss_atom"
+feed_url = "https://example.test/official.xml"
+policy_tier = "official"
+team = "TST"
+
+[[sources]]
+source_id = "fixture-media"
+display_name = "Fixture media feed"
+source_family = "national_media"
+collector_kind = "rss_atom"
+feed_url = "https://example.test/media.xml"
+policy_tier = "media"

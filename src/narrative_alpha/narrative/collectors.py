@@ -201,7 +201,10 @@ def collect_source(
         raise CollectionError(f"source {source_id!r} is disabled")
 
     owned_client = client is None
-    http_client = client or httpx.Client(timeout=HTTP_TIMEOUT)
+    # Feed requests carry no credentials, so the redirect-leak rationale that makes the
+    # odds/weather client refuse redirects does not apply here. A publisher moving a feed
+    # answers 301, and refusing to follow it silently drops that source from collection.
+    http_client = client or httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True)
     context = http_client if owned_client else nullcontext(http_client)
     try:
         with context as active_client:
@@ -377,6 +380,8 @@ def _load_source(connection: sqlite3.Connection, source_id: str, as_of: datetime
           AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
           AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
           AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
+        ORDER BY observed_at DESC, source_record_id DESC
+        LIMIT 1
         """,
         (source_id, cutoff, cutoff, cutoff),
     ).fetchone()

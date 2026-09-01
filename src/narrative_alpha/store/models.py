@@ -632,6 +632,7 @@ class ContestPayoutRow(PointInTimeRow):
 class SourceRow(PointInTimeRow):
     """One explicitly configured public feed source."""
 
+    source_record_id: int = Field(gt=0)
     source_id: str
     display_name: str
     source_family: str

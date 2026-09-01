@@ -2,6 +2,34 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-01 — Slice 15 seeding decisions
+
+- **Credential-free feed fetches follow redirects; credentialed ones still must not.** The
+  collector and the feed health check both inherited `follow_redirects=False` from the
+  odds/weather client, where it is deliberate and correct: that client puts `apiKey` in the
+  query string, and following a redirect would hand the key to another host. Feed requests
+  carry no credentials, so the rationale does not transfer, and refusing a publisher's 301
+  silently dropped that source from collection while the health check reported it dead.
+  Confirmed live against the catalog (`yahoo-nfl` answers 301 and now collects 50 items).
+  `nflverse.py` already set the same precedent for credential-free public artifacts.
+- **`sources` is append-only versioned, keyed by a separate `source_keys` identity table.**
+  Migration 0005 made `source_id` the primary key, which cannot represent a changed feed URL
+  without overwriting the row and destroying the record of what was actually being polled
+  when an item was captured. Every read now takes the latest version at the cutoff, and
+  `na-collect run` enumerates by latest-version-then-enabled so disabling a source actually
+  disables it.
+- **Re-attesting is a new policy version even when the terms are unchanged.** A fresh review
+  is new information with its own provenance, so `terms_reviewed_at` participates in change
+  detection. Re-seeding an unchanged catalog with the same attestation is a true no-op
+  (verified: 104 inserted, then 0).
+- **A catalog containing `terms_reviewed_at` anywhere is rejected outright**, checked
+  recursively before validation. The attestation must come from the operator on the command
+  line; letting a file supply it would forge the review the policy gate exists to require.
+- **RSS gives headlines and summaries, not article bodies.** Captured items run ~50–150
+  characters of cleaned text. That is enough for availability and usage claims ("put on the
+  commissioner exemption list") but not for full beat-writer analysis. Do not let the
+  extraction slice assume it is working with full articles.
+
 ## 2026-09-01 — Narrative source selection and the X/Twitter question
 
 - **X/Twitter is not collected, and the collector cannot reach it today.** The migration

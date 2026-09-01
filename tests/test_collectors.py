@@ -220,7 +220,15 @@ def test_narrative_source_row_models_round_trip(tmp_path: Path) -> None:
 
 def _seed_source(connection: sqlite3.Connection, source_id: str) -> SourceRow:
     configured_at = CAPTURE_TIME - timedelta(days=10)
+    connection.execute(
+        "INSERT OR IGNORE INTO source_keys(source_id) VALUES (?)", (source_id,)
+    )
     row = SourceRow(
+        source_record_id=int(
+            connection.execute(
+                "SELECT coalesce(max(source_record_id), 0) + 1 FROM sources"
+            ).fetchone()[0]
+        ),
         source_id=source_id,
         display_name=source_id,
         source_family="official_team",

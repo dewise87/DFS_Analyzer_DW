@@ -103,9 +103,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6]
     assert second == ()
-    assert len(records) == 5
+    assert len(records) == 6
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -121,6 +121,106 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[4][0] == 5
     assert records[4][1] == "0005_narrative_sources.sql"
     assert len(records[4][2]) == 64
+    assert records[5][0] == 6
+    assert records[5][1] == "0006_versioned_sources.sql"
+    assert len(records[5][2]) == 64
+
+
+def test_source_versioning_migration_preserves_existing_narrative_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    legacy_migrations = tmp_path / "legacy_migrations"
+    legacy_migrations.mkdir()
+    migrations_path = Path("src/narrative_alpha/store/migrations")
+    for version in range(1, 6):
+        source_path = next(migrations_path.glob(f"{version:04d}_*.sql"))
+        (legacy_migrations / source_path.name).write_bytes(source_path.read_bytes())
+
+    timestamp = "2026-08-01T12:00:00.000000Z"
+    point_in_time_columns = (
+        "source, published_at, observed_at, ingested_at, effective_at, "
+        "valid_from, valid_to, source_version, run_id"
+    )
+    point_in_time_values = (
+        "'fixture', NULL, :at, :at, NULL, :at, NULL, 'v1', NULL"
+    )
+    with connect_database(database_path) as connection:
+        apply_migrations(connection, legacy_migrations)
+        connection.execute(
+            f"""
+            INSERT INTO sources(
+                source_id, display_name, source_family, collector_kind, feed_url,
+                enabled, {point_in_time_columns}
+            ) VALUES (
+                'fixture', 'Fixture', 'official_team', 'rss_atom',
+                'https://example.test/feed.xml', 1, {point_in_time_values}
+            )
+            """,
+            {"at": timestamp},
+        )
+        connection.execute(
+            f"""
+            INSERT INTO source_policies(
+                source_id, permitted_use, raw_retention_days,
+                personal_data_fields_allowed, must_honor_deletions,
+                redistribution_allowed, third_party_processing_allowed,
+                commercial_use_status, terms_reviewed_at, {point_in_time_columns}
+            ) VALUES (
+                'fixture', 'internal', 7, '[]', 1, 0, 1, 'prohibited', :at,
+                {point_in_time_values}
+            )
+            """,
+            {"at": timestamp},
+        )
+        connection.execute(
+            f"""
+            INSERT INTO source_items(
+                source_id, external_item_id, canonical_url, title, raw_content,
+                cleaned_text, content_sha256, {point_in_time_columns}
+            ) VALUES (
+                'fixture', 'item-1', NULL, 'Title', X'74657874', 'text',
+                :content_hash, {point_in_time_values}
+            )
+            """,
+            {"at": timestamp, "content_hash": "a" * 64},
+        )
+        item_id = int(connection.execute("SELECT source_item_id FROM source_items").fetchone()[0])
+        connection.execute(
+            f"""
+            INSERT INTO content_tombstones(
+                source_item_id, source_id, content_sha256, reason, tombstoned_at,
+                {point_in_time_columns}
+            ) VALUES (
+                :item_id, 'fixture', :content_hash, 'platform_deleted', :at,
+                {point_in_time_values}
+            )
+            """,
+            {"at": timestamp, "content_hash": "a" * 64, "item_id": item_id},
+        )
+
+        applied = apply_migrations(connection)
+        counts = {
+            table: int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            for table in (
+                "source_keys",
+                "sources",
+                "source_policies",
+                "source_items",
+                "content_tombstones",
+            )
+        }
+        foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert [migration.version for migration in applied] == [6]
+    assert counts == {
+        "source_keys": 1,
+        "sources": 1,
+        "source_policies": 1,
+        "source_items": 1,
+        "content_tombstones": 1,
+    }
+    assert foreign_key_problems == []
 
 
 def test_each_migration_is_transactional(tmp_path: Path) -> None:
