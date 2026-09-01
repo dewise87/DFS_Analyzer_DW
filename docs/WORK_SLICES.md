@@ -593,6 +593,86 @@ extraction → episode clustering → heat features → logit-offset ownership m
 first-season simplification) → prequential evaluation. The extraction and clustering slices
 are frontier-tier; collectors are workhorse-tier.
 
+**Pulled forward (2026-09-01):** the collectors slice is promoted ahead of the remaining
+Phase 1 work. Slices 9/9b/13 are blocked on data that does not exist yet, and §9.0 is
+explicit that Phase −1 capture outranks modeling: narrative evidence is only usable if it
+was already being collected (rule 1.5.2 quarantines any signal type discovered after
+outcomes are known). Every week without collectors is a week that can never be used for
+signal validation.
+
+### Slice 14 — Source policies + narrative collectors
+
+**Goal:** start the clock on irreplaceable data. A source cannot be collected from until its
+rights and retention policy has been reviewed, and every item captured carries the observed-at
+time that makes it admissible as prospective evidence later. Collection only — no extraction,
+no clustering, no LLM anywhere in this slice.
+
+**Design doc:** §4.5 (source families), §4.6 (per-source retention and rights — the "raw
+items are immutable forever" rule is explicitly rejected), §5.3 (collection cadence), §8.2
+(`source_policies`, `sources`, `source_items`, `content_tombstones`), §7.6 (raw text is
+untrusted input), §9.0 (Phase −1 capture is the highest-ROI activity in the document).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse shape — schema,
+ingest, CLI — but review two seams hard: the fail-closed policy gate, and the dedup seam,
+where collapsing cross-source duplicates too early destroys the reach signal that rule 1.5.3
+depends on.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding rules — note the Slice 12 timestamp rules: point-in-time SQL
+> compares canonical text, never `julianday()`, and every write goes through
+> `ingest/timestamps.utc_timestamp`), §4.5, §4.6, §5.3 and §7.6 of
+> `docs/design/narrative-alpha-design-doc-v0_3.md`, `src/narrative_alpha/store/` (migration
+> and row-model patterns — schema changes are NEW migration files), and
+> `src/narrative_alpha/snapshots/fetch.py` (the established fetch/retry/hash pattern; reuse
+> it rather than writing a second HTTP path).
+>
+> Four parts.
+>
+> 1. **Migration 0005** — `source_policies` carrying exactly the §4.6 field list
+>    (`source_id`, `permitted_use`, `raw_retention_days`, `personal_data_fields_allowed`,
+>    `must_honor_deletions`, `redistribution_allowed`, `third_party_processing_allowed`,
+>    `commercial_use_status`, `terms_reviewed_at`) plus the §3.2 provenance block;
+>    `sources`; `source_items`; `content_tombstones`. STRICT tables, following the
+>    established shape exactly.
+> 2. **The policy gate, fail-closed.** Collecting from a source with no reviewed policy row
+>    raises — there is no default policy, no inherited policy, and no "unknown" fallback
+>    (rule 1.5.7). `terms_reviewed_at` older than a configurable staleness window also
+>    refuses. This is the same shape as Slice 10's empty `SOURCE_POSITION_QUANTILES`: the
+>    table ships with only the policies you have actually reviewed.
+> 3. **Collectors for public RSS/Atom and official team feeds only.** No Reddit in this
+>    slice — §4.6 says obtain approved access before depending on the API, and the request
+>    is still queued. Design the collector interface so a Reddit collector drops in behind
+>    the same policy gate later, and do not import or stub any Reddit client now.
+>    - Store `published_at` (the item's own timestamp, nullable) and `observed_at` (capture
+>      time) as separate columns. Rule 1.5.2 depends on `observed_at` being the capture
+>      instant, never backfilled from the item.
+>    - Content-address each item by a hash of its normalized text. Deduplicate within a
+>      source by that hash, but **keep cross-source duplicates as separate rows sharing the
+>      hash** — fifty outlets carrying one report is one episode with broader reach
+>      (rule 1.5.3), and collapsing them here would destroy the reach signal the later
+>      clustering slice needs. Write a comment saying so at the seam.
+>    - Raw text is untrusted data (§7.6). This module stores it and never interprets it:
+>      no LLM call, no tool call, no `eval`, no templating of item text into any prompt.
+>      Strip embedded markup and hidden text into a separate cleaned field, preserving the
+>      raw bytes under the retention policy.
+> 4. **Retention enforcement** — a purge/tombstone command that drops raw text past its
+>    source's `raw_retention_days` and writes a `content_tombstones` row, plus deletion
+>    handling for items a platform reports removed. The tombstone survives; the raw text
+>    does not. Never delete the row silently.
+>
+> Wire an `na-collect` CLI (following `build_cli.py`/`contest_cli.py`) with a run subcommand
+> suitable for the §5.3 Wed–Fri batch cron, and a `purge` subcommand for part 4.
+>
+> Tests: policy-gate refusal (missing policy, stale `terms_reviewed_at`); `observed_at` is
+> capture time and is never taken from the item; within-source dedup collapses and
+> cross-source duplicates do not; retention purge removes raw text, writes the tombstone, and
+> is idempotent; a feed fixture with embedded script/hidden markup is stored inert and
+> cleaned; migration idempotency and row-model round-trips (copy `test_store.py` patterns).
+> Use local fixture files — no network in tests. Run `~/.local/bin/uv run pytest -q`,
+> `ruff check .`, `mypy` — all green.
+
 ---
 
 ## Standing review checklist (project lead applies to every slice)
