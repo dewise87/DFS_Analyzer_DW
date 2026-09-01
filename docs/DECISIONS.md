@@ -2,6 +2,40 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-01 — Slice 10 player-distribution decisions
+
+- **A vendor's mean/floor/ceiling triplet is interpreted as conditional on the player being
+  active**, not as the unconditional expectation. Consequence, and the thing that will
+  surprise whoever wires this in: `PlayerOutcomeDistribution.mean` is
+  `p_active × vendor_mean`, which is strictly below the vendor's published number whenever
+  `p_active < 1`. Revisit when a vendor documents that its projection already prices in
+  availability — then the fitter needs a per-source flag, not a silent reinterpretation.
+- **The fit matches the vendor mean exactly and the floor/ceiling *ratio* exactly, then
+  validates the level against a visible tolerance** (default 2%), rather than
+  least-squaring across all three targets. Two parameters cannot honor three constraints;
+  choosing which one is exact beats an opaque compromise, and the residual is stored per
+  row as `fit_max_relative_error`. A triplet that a zero-location log-normal cannot
+  represent is refused, not silently approximated.
+- **`SOURCE_POSITION_QUANTILES` ships empty on purpose.** No vendor has documented what its
+  floor/ceiling columns mean, and §6.2 forbids assuming they match across sources, so the
+  production fitter raises until a source/position pair is configured (rule 1.5.7, no
+  silent fallback). Callers pass an explicit table; there is no cross-source or
+  cross-position fallback. Revisit per source as documented semantics or position-level
+  historical calibration arrive.
+- **`p_full_role_given_active` is stored but is not yet part of the marginal.** Inventing a
+  limited-role scoring distribution to make the field "used" would be a fabricated number.
+  The marginal is exactly the inactive atom at zero plus the fitted active component until
+  the second conditional component is modeled.
+- **`p_active` is currently caller-supplied with no provenance column.** It is the one
+  number in `player_distributions` that does not resolve to a stored evidence row, which
+  is tolerable only while nothing consumes these rows. Revisit when the availability
+  channel lands or when Slice 13 wires distributions into the build path — whichever comes
+  first — since rule 1.5.1 binds the moment one reaches a decision.
+- **Negative realized scores are off-support.** DK/FD fantasy points can go below zero;
+  the zero-floored family gives them zero density, so `log_score` returns `+inf` there
+  while CRPS stays finite and well-behaved. Any aggregate log score must therefore report
+  off-support counts separately rather than averaging an infinity.
+
 ## 2026-09-01 — Phase 0 review decisions
 
 - **Phase 0 `PydfsAdapter` explicitly rejects player-exposure ranges.** pydfs 3.6.1's

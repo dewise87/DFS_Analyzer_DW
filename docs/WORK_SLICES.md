@@ -385,56 +385,6 @@ ChatGPT **GPT-5.1 Thinking** (workhorse — the registry seam already exists).
 so Slice 9 waits for the first real export. Not a project blocker — Slices 10–12 are
 code-first and proceed against seeded fixtures.
 
-### Slice 11 — Contest archetype/payout schema + heuristic EV labeling
-
-**Goal:** the contest side of the store and the honest-labeling rule from §2.2: contests,
-payout curves, and a simple heuristic lineup-EV report where everything not backed by a
-simulator is explicitly marked "heuristic only".
-
-**Design doc:** §4.3 (contest cohort fields), §6.4 (lineup decision metrics), §2.2 (label
-heuristics honestly), §8.2 (contests, contest_payouts tables).
-
-**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**
-
-**Prompt:**
-
-> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
-> `docs/DECISIONS.md` (binding: schema changes are NEW migration files now, never in-place
-> edits), `src/narrative_alpha/store/` (migration runner, row-model patterns, §3.2
-> point-in-time provenance columns — copy the established table shape exactly),
-> `src/narrative_alpha/ingest/results.py` (the contest cohort fields already captured on
-> actual_ownership), and `src/narrative_alpha/build.py` (BuildResult, whose lineups the
-> report consumes).
->
-> Three parts:
->
-> 1. **Migration 0003**: `contests` (external_contest_id, site, slate_id, archetype,
->    field_size, entry_limit, entry_fee_cents, total_prizes_cents, payout_curve_id, full
->    §3.2 provenance block, STRICT, UNIQUE on (site, external_contest_id, observed_at)) and
->    `contest_payouts` (payout_curve_id, rank_from, rank_to, prize_cents, provenance block;
->    CHECK rank_from <= rank_to, no overlapping rank bands within a curve — enforce overlap
->    in code with a loud error, plus what CHECK can express). Typed Pydantic row models +
->    docs/schema.md two-liners, following the existing patterns exactly.
-> 2. **Manual contest entry**: a small `na-contest add` CLI (or subcommand) that records a
->    contest and its payout table from flags/CSV — the operator copies these from the site
->    lobby; there is no API. Validate prize totals against total_prizes_cents when given.
-> 3. **Heuristic EV report**: `src/narrative_alpha/portfolio/heuristic_report.py` — given a
->    BuildResult's lineups and a contest row, produce a report with: lineup projection sum,
->    salary used, projected-ownership sum (when present), naive cash-line proxy and naive
->    EV — and every such number carried in fields/headers explicitly named `heuristic_*`,
->    with a top-of-report line stating these are NOT simulator-backed (design doc §2.2).
->    No probability claims beyond the naive arithmetic; no hidden constants — thresholds
->    live in one visible dataclass.
->
-> Tests: migration idempotency + row-model round-trips (copy test_store.py patterns),
-> payout-band overlap refusal, prize-total mismatch refusal, CLI add + reload, and a
-> golden-file test on the rendered report so its wording/format is pinned. Run
-> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green before done.
-
-Remaining Phase 1 slices (prompts written when reached):
-
-- **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
-  second subscription exists. Workhorse tier.
 ### Slice 10 — Player outcome distributions
 
 **Goal:** turn each player's point estimate into the §6.2 mixture — `P(active)`,
@@ -486,8 +436,66 @@ fitting and scoring rules are easy to get subtly and silently wrong).
 > paths (unconfigured source/position, impossible ordering, non-convergence); CRPS
 > property test vs Monte Carlo; calibration helper on synthetic well- and mis-calibrated
 > samples. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
-- **Slice 11 — Contest archetype/payout schema + heuristic EV labeling** (§2.2, §6.4):
-  everything not simulator-backed is marked "heuristic only". Workhorse tier.
+
+**Status note (2026-09-01):** landed and reviewed. `quant/distributions.py` (fitter +
+mixture), `quant/scoring.py` (CRPS, log score, randomized PIT), and migration 0004 +
+`player_distributions`. Deliberately NOT wired into `candidate_selection.py`, `build.py`,
+or the optimizer — the binding modelling choices are recorded in `docs/DECISIONS.md`, and
+the wiring is Slice 13.
+
+### Slice 11 — Contest archetype/payout schema + heuristic EV labeling
+
+**Goal:** the contest side of the store and the honest-labeling rule from §2.2: contests,
+payout curves, and a simple heuristic lineup-EV report where everything not backed by a
+simulator is explicitly marked "heuristic only".
+
+**Design doc:** §4.3 (contest cohort fields), §6.4 (lineup decision metrics), §2.2 (label
+heuristics honestly), §8.2 (contests, contest_payouts tables).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding: schema changes are NEW migration files now, never in-place
+> edits), `src/narrative_alpha/store/` (migration runner, row-model patterns, §3.2
+> point-in-time provenance columns — copy the established table shape exactly),
+> `src/narrative_alpha/ingest/results.py` (the contest cohort fields already captured on
+> actual_ownership), and `src/narrative_alpha/build.py` (BuildResult, whose lineups the
+> report consumes).
+>
+> Three parts:
+>
+> 1. **Migration 0003**: `contests` (external_contest_id, site, slate_id, archetype,
+>    field_size, entry_limit, entry_fee_cents, total_prizes_cents, payout_curve_id, full
+>    §3.2 provenance block, STRICT, UNIQUE on (site, external_contest_id, observed_at)) and
+>    `contest_payouts` (payout_curve_id, rank_from, rank_to, prize_cents, provenance block;
+>    CHECK rank_from <= rank_to, no overlapping rank bands within a curve — enforce overlap
+>    in code with a loud error, plus what CHECK can express). Typed Pydantic row models +
+>    docs/schema.md two-liners, following the existing patterns exactly.
+> 2. **Manual contest entry**: a small `na-contest add` CLI (or subcommand) that records a
+>    contest and its payout table from flags/CSV — the operator copies these from the site
+>    lobby; there is no API. Validate prize totals against total_prizes_cents when given.
+> 3. **Heuristic EV report**: `src/narrative_alpha/portfolio/heuristic_report.py` — given a
+>    BuildResult's lineups and a contest row, produce a report with: lineup projection sum,
+>    salary used, projected-ownership sum (when present), naive cash-line proxy and naive
+>    EV — and every such number carried in fields/headers explicitly named `heuristic_*`,
+>    with a top-of-report line stating these are NOT simulator-backed (design doc §2.2).
+>    No probability claims beyond the naive arithmetic; no hidden constants — thresholds
+>    live in one visible dataclass.
+>
+> Tests: migration idempotency + row-model round-trips (copy test_store.py patterns),
+> payout-band overlap refusal, prize-total mismatch refusal, CLI add + reload, and a
+> golden-file test on the rendered report so its wording/format is pinned. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green before done.
+
+**Status note (2026-09-01):** landed and reviewed (commit `25cfb13`). Contest and payout
+capture stays manual by design until site logins are reachable again.
+
+Remaining Phase 1 slices (prompts written when reached):
+
+- **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
+  second subscription exists. Workhorse tier.
 - **Slice 12 — Slate memo generator + baseline evaluation report** (§6.8): purchased
   baseline error by position and week; the first artifact you actually read on Saturdays.
   Workhorse tier.

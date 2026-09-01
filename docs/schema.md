@@ -64,6 +64,13 @@ Rows are immutable slate/player observations with the full §3.2 block for exact
 Stores each vendor independently: player mean, optional floor/ceiling, and optional ownership view.  
 Vendor, slate, player, observed time, file hash, and §3.2 fields prevent later files replacing earlier ones.
 
+## `player_distributions`
+
+Stores activity/full-role gates and fitted zero-location log-normal active-outcome parameters.
+`source` identifies the fitted vendor. The v1 writer accepts one exact projection reference,
+derives every fit column from a validated fit result, and lets SQLite allocate the row ID;
+fit/config hashes, the as-of cutoff, and §3.2 fields reproduce each marginal.
+
 ## `ownership_baselines`
 
 Stores purchased player ownership fractions separately by vendor, site, slate, and roster role.  

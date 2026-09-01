@@ -23,6 +23,9 @@ from narrative_alpha.store.models import (
     OddsSnapshotRow,
     OwnershipBaselineRow,
     PlayerAliasRow,
+    PlayerDistributionCreate,
+    PlayerDistributionRow,
+    PlayerDistributionSourceRef,
     PlayerRow,
     PlayerTeamHistoryRow,
     ProjectionSnapshotRow,
@@ -32,8 +35,14 @@ from narrative_alpha.store.models import (
     TeamRow,
     UnresolvedPlayerMatchRow,
     WeatherSnapshotRow,
+    canonical_distribution_source_set,
     canonical_manifest_hashes,
+    distribution_source_set_sha256,
     manifest_hash_set_sha256,
+)
+from narrative_alpha.store.player_distributions import (
+    PlayerDistributionStoreError,
+    insert_player_distribution,
 )
 
 __all__ = [
@@ -54,6 +63,10 @@ __all__ = [
     "OddsSnapshotRow",
     "OwnershipBaselineRow",
     "PlayerAliasRow",
+    "PlayerDistributionCreate",
+    "PlayerDistributionRow",
+    "PlayerDistributionSourceRef",
+    "PlayerDistributionStoreError",
     "PlayerRow",
     "PlayerTeamHistoryRow",
     "ProjectionSnapshotRow",
@@ -65,8 +78,11 @@ __all__ = [
     "UnresolvedPlayerMatchRow",
     "WeatherSnapshotRow",
     "apply_migrations",
+    "canonical_distribution_source_set",
     "canonical_manifest_hashes",
     "connect_database",
     "discover_migrations",
+    "distribution_source_set_sha256",
+    "insert_player_distribution",
     "manifest_hash_set_sha256",
 ]

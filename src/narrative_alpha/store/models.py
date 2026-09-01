@@ -311,6 +311,236 @@ class ProjectionSnapshotRow(PointInTimeRow):
         return self
 
 
+class PlayerDistributionSourceRef(StoreRow):
+    """One exact projection snapshot contributing to a fitted source-set."""
+
+    projection_snapshot_id: int = Field(gt=0)
+    source: str
+    source_file_sha256: Sha256
+
+    @field_validator("source")
+    @classmethod
+    def normalize_source(cls, value: str) -> str:
+        source = value.strip().casefold()
+        if not source:
+            raise ValueError("source must not be empty")
+        return source
+
+
+def canonical_distribution_source_set(
+    source_set: tuple[PlayerDistributionSourceRef, ...],
+) -> str:
+    """Serialize exact projection inputs deterministically and order-independently."""
+
+    if not source_set:
+        raise ValueError("distribution source-set must not be empty")
+    snapshot_ids = {item.projection_snapshot_id for item in source_set}
+    if len(snapshot_ids) != len(source_set):
+        raise ValueError("distribution source-set contains duplicate projection snapshots")
+    values = [item.model_dump(mode="json") for item in source_set]
+    values.sort(
+        key=lambda item: (
+            str(item["source"]),
+            int(item["projection_snapshot_id"]),
+            str(item["source_file_sha256"]),
+        )
+    )
+    return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def distribution_source_set_sha256(
+    source_set: tuple[PlayerDistributionSourceRef, ...],
+) -> str:
+    """Hash the canonical projection source-set used by a fitted distribution."""
+
+    canonical = canonical_distribution_source_set(source_set)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _sorted_distribution_source_set(
+    source_set: tuple[PlayerDistributionSourceRef, ...],
+) -> tuple[PlayerDistributionSourceRef, ...]:
+    canonical_distribution_source_set(source_set)
+    return tuple(
+        sorted(
+            source_set,
+            key=lambda item: (
+                item.source,
+                item.projection_snapshot_id,
+                item.source_file_sha256,
+            ),
+        )
+    )
+
+
+class PlayerDistributionCreate(PointInTimeRow):
+    """Write-side metadata; fitted parameters come from a validated quant fit result."""
+
+    slate_id: int = Field(gt=0)
+    player_id: int = Field(gt=0)
+    source_set_json: tuple[PlayerDistributionSourceRef, ...] = Field(min_length=1)
+    as_of_at: datetime
+
+    @field_validator("source_set_json", mode="before")
+    @classmethod
+    def decode_source_set(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("source_set_json")
+    @classmethod
+    def normalize_source_set(
+        cls,
+        value: tuple[PlayerDistributionSourceRef, ...],
+    ) -> tuple[PlayerDistributionSourceRef, ...]:
+        return _sorted_distribution_source_set(value)
+
+    @field_validator("as_of_at")
+    @classmethod
+    def normalize_as_of_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_as_of_at(self) -> Self:
+        if self.as_of_at > self.ingested_at:
+            raise ValueError("as_of_at must not be later than ingested_at")
+        return self
+
+    def db_values(self) -> dict[str, DatabaseValue]:
+        values = super().db_values()
+        values["source_set_json"] = canonical_distribution_source_set(self.source_set_json)
+        return values
+
+
+class PlayerDistributionRow(PointInTimeRow):
+    """Stored parameters and fit provenance for one player marginal as of a cutoff.
+
+    For fitter v1, the inherited ``source`` is the vendor whose mean/floor/ceiling
+    triplet was fitted and the source-set contains that one exact projection snapshot.
+    """
+
+    player_distribution_id: int = Field(gt=0)
+    slate_id: int = Field(gt=0)
+    player_id: int = Field(gt=0)
+    position: str
+    source_set_json: tuple[PlayerDistributionSourceRef, ...] = Field(min_length=1)
+    source_set_sha256: Sha256
+    as_of_at: datetime
+    distribution_family: Literal["lognormal"]
+    p_active: float = Field(ge=0, le=1, allow_inf_nan=False)
+    p_full_role_given_active: float = Field(ge=0, le=1, allow_inf_nan=False)
+    conditional_location: float = Field(ge=0, allow_inf_nan=False)
+    conditional_scale: float = Field(gt=0, allow_inf_nan=False)
+    conditional_shape: float = Field(gt=0, allow_inf_nan=False)
+    input_mean: float = Field(gt=0, allow_inf_nan=False)
+    input_floor: float = Field(gt=0, allow_inf_nan=False)
+    input_ceiling: float = Field(gt=0, allow_inf_nan=False)
+    floor_quantile: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    ceiling_quantile: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    fit_tolerance: float = Field(gt=0, allow_inf_nan=False)
+    fit_max_relative_error: float = Field(ge=0, allow_inf_nan=False)
+    fit_config_sha256: Sha256
+    fitter_version: str
+
+    @field_validator("source_set_json", mode="before")
+    @classmethod
+    def decode_source_set(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("source_set_json")
+    @classmethod
+    def normalize_source_set(
+        cls,
+        value: tuple[PlayerDistributionSourceRef, ...],
+    ) -> tuple[PlayerDistributionSourceRef, ...]:
+        return _sorted_distribution_source_set(value)
+
+    @field_validator("as_of_at")
+    @classmethod
+    def normalize_as_of_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("position")
+    @classmethod
+    def normalize_position(cls, value: str) -> str:
+        position = value.strip().upper()
+        if not position:
+            raise ValueError("position must not be empty")
+        return position
+
+    @field_validator("fitter_version")
+    @classmethod
+    def normalize_fitter_version(cls, value: str) -> str:
+        version = value.strip()
+        if not version:
+            raise ValueError("fitter_version must not be empty")
+        return version
+
+    @model_validator(mode="after")
+    def validate_fit_provenance(self) -> Self:
+        if self.conditional_location != 0.0:
+            raise ValueError("lognormal conditional_location must be zero")
+        if not self.input_floor < self.input_mean < self.input_ceiling:
+            raise ValueError("inputs must satisfy input_floor < input_mean < input_ceiling")
+        if self.floor_quantile >= self.ceiling_quantile:
+            raise ValueError("floor_quantile must be below ceiling_quantile")
+        if self.fit_max_relative_error > self.fit_tolerance:
+            raise ValueError("fit_max_relative_error must not exceed fit_tolerance")
+        if self.as_of_at > self.ingested_at:
+            raise ValueError("as_of_at must not be later than ingested_at")
+        expected_hash = distribution_source_set_sha256(self.source_set_json)
+        if self.source_set_sha256 != expected_hash:
+            raise ValueError("source_set_sha256 does not match distribution source-set")
+        if len(self.source_set_json) != 1:
+            raise ValueError(
+                "distribution fitter v1 requires exactly one projection snapshot"
+            )
+        canonical_source = self.source.strip().casefold()
+        if self.source != canonical_source:
+            raise ValueError("distribution source must be canonical")
+        if self.source_set_json[0].source != canonical_source:
+            raise ValueError("distribution source does not match its source-set reference")
+
+        # Re-run the quant-layer invariants at the read boundary. This rejects rows whose
+        # config hash, version, claimed fit error, inputs, and parameters disagree even if
+        # they were written outside the supported store API.
+        from narrative_alpha.quant.distributions import DistributionFitResult
+
+        try:
+            DistributionFitResult.model_validate(
+                {
+                    "distribution": {
+                        "distribution_family": self.distribution_family,
+                        "p_active": self.p_active,
+                        "p_full_role_given_active": self.p_full_role_given_active,
+                        "conditional_location": self.conditional_location,
+                        "conditional_scale": self.conditional_scale,
+                        "conditional_shape": self.conditional_shape,
+                    },
+                    "source": self.source,
+                    "position": self.position,
+                    "input_mean": self.input_mean,
+                    "input_floor": self.input_floor,
+                    "input_ceiling": self.input_ceiling,
+                    "floor_quantile": self.floor_quantile,
+                    "ceiling_quantile": self.ceiling_quantile,
+                    "fit_tolerance": self.fit_tolerance,
+                    "fit_max_relative_error": self.fit_max_relative_error,
+                    "fit_config_sha256": self.fit_config_sha256,
+                    "fitter_version": self.fitter_version,
+                }
+            )
+        except ValueError as error:
+            raise ValueError(
+                "stored distribution fit provenance is internally inconsistent"
+            ) from error
+        return self
+
+    def db_values(self) -> dict[str, DatabaseValue]:
+        values = super().db_values()
+        values["source_set_json"] = canonical_distribution_source_set(self.source_set_json)
+        return values
+
+
 class OwnershipBaselineRow(PointInTimeRow):
     ownership_baseline_id: int
     slate_id: int
