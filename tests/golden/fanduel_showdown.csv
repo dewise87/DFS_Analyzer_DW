@@ -1,0 +1,4 @@
+Id,Position,First Name,Nickname,Last Name,FPPG,Played,Salary,Game,Team,Opponent,Injury Indicator,Injury Details,Tier,Roster Position
+4001,QB,Example,Example Signalcaller,Signalcaller,23.1,16,14500,KC@LV,KC,LV,,,,MVP/FLEX
+4002,RB,Sample,Sample Back,Back,15.7,15,12000,KC@LV,LV,KC,,,,MVP/FLEX
+4003,K,Example,Example Kicker,Kicker,8.2,16,8500,KC@LV,KC,LV,,,,MVP/FLEX

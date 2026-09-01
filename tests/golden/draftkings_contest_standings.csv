@@ -1,0 +1,9 @@
+Rank,EntryId,EntryName,TimeRemaining,Points,Lineup
+1,dk-entry-1,FixtureOne,0,151.20,QB Example Passer RB Sample Runner WR Example Receiver
+2,dk-entry-2,FixtureTwo,0,142.10,QB Example Passer RB Other Runner WR Example Receiver
+3,dk-entry-3,FixtureThree,0,130.00,QB Other Passer RB Sample Runner WR Other Receiver
+
+Player,Roster Position,%Drafted,FPTS
+Example Passer,QB,66.67%,25.20
+Sample Runner,RB,66.67%,14.50
+Example Receiver,WR,66.67%,18.10

@@ -1,0 +1,4 @@
+Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame
+QB,Example Passer (1001),Example Passer,1001,QB,7200,GB@CHI 09/13/2026 01:00PM ET,GB,21.4
+RB,Sample Runner (1002),Sample Runner,1002,RB/FLEX,6400,GB@CHI 09/13/2026 01:00PM ET,CHI,14.8
+DST,Green Bay Defense (1003),Green Bay Defense,1003,DST,3100,GB@CHI 09/13/2026 01:00PM ET,GB,7.1

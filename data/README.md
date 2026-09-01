@@ -28,3 +28,11 @@ data/
 - Fixed capture times (ET), per design doc §9.0: Sat 6:00 p.m., Sun 9:00 a.m., Sun 11:00 a.m.
 - Post-lock exports (standings, actuals) are labels, not predictors — the point-in-time rule
   applies to predictors only.
+
+## Weather games CSV
+
+Until schedule ingestion exists, `na-snapshot fetch --kind weather --games <path>` accepts a
+CSV with a timezone-aware ISO 8601 `kickoff` (also `kickoff_at` or `commence_time`) and either
+`stadium`/`stadium_name` or `home_team` (also `host_team`). Stadium names and team abbreviations/full names resolve
+through the versioned static table in `src/narrative_alpha/snapshots/stadiums.py`. Indoor games
+are intentionally skipped; outdoor and retractable-roof games are fetched.

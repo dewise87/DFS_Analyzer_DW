@@ -252,6 +252,33 @@ tests.
 
 ---
 
+## Phase 0 status — DONE (reviewed 2026-09-01) with an exit checklist
+
+Slices 1–8 landed and passed project-lead review (4 parallel review agents + core review;
+4 blockers and ~20 majors found and fixed; suite grew 60 → 106 tests). Items that can only
+close against real-world data, tracked here until done:
+
+- [ ] **Validate every parser against the first real exports.** All golden files are
+  synthesized. Known open questions: DK contest-standings layout (real exports likely put
+  athlete columns side-by-side with entries, not stacked — parser rewrite deliberately
+  deferred until a real export exists); DK showdown dual-row CPT/FLEX shape; FD standings
+  export shape. FD salary quirks (Tier column, time-less Game) are now handled.
+- [ ] **Complete the manual upload checklist** (docs/manual-lineup-upload-checklist.md) once
+  per site before treating upload formats as accepted.
+- [ ] **Build the production decision-snapshot writer.** Only tests write
+  `decision_snapshots` rows today; replay can consume but nothing creates one. This is the
+  first task of the Saturday slate-build flow (fold into Slice 12 or a Slice 8b) and is
+  required before the first real Sunday decision.
+- [ ] **Re-pin nflverse to a dated artifact.** The current pin targets a rolling
+  `roster_2026.csv` release asset that upstream overwrites weekly; the hash check fails
+  closed but will break on every refresh. Archive fetched bytes locally.
+- [ ] Deferred minors (fast-follow, none block operation): snapshot `verify` doesn't bind
+  directory name to `captured_at`; capture dir names contain colons (Windows-hostile);
+  fetch failure records can pair an earlier HTTP status with a later error type; showdown
+  contests collapse to one archetype (entry_limit is stored, split downstream when needed);
+  replay's SQL `avg()` blend must move into the Phase 1 blend module so there is exactly
+  one blend implementation.
+
 ## Phase 1 — Quant floor and contest context (Weeks 3–4)
 
 Slices sketched now, prompts written when Phase 0 lands (they must reference real code):

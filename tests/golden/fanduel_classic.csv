@@ -1,0 +1,4 @@
+Id,Position,First Name,Nickname,Last Name,FPPG,Played,Salary,Game,Team,Opponent,Injury Indicator,Injury Details,Tier
+3001,QB,Example,Example Thrower,Thrower,20.8,16,8100,DAL@NYG,DAL,NYG,,,
+3002,WR,Sample,Sample Catcher,Catcher,12.4,15,6700,DAL@NYG,NYG,DAL,,,
+3003,D,New York,New York Defense,Defense,6.9,16,4200,DAL@NYG,NYG,DAL,,,

@@ -1,0 +1,4 @@
+Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame
+QB,Example Quarterback (2001),Example Quarterback,2001,CPT/FLEX,10800,BUF@MIA 09/17/2026 08:15PM ET,BUF,22.7
+WR,Sample Receiver (2002),Sample Receiver,2002,CPT/FLEX,7600,BUF@MIA 09/17/2026 08:15PM ET,MIA,13.2
+K,Example Kicker (2003),Example Kicker,2003,CPT/FLEX,4800,BUF@MIA 09/17/2026 08:15PM ET,BUF,8.6

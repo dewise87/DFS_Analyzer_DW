@@ -1,0 +1,8 @@
+Rank,Entry ID,Entry Name,Score,Lineup
+1,fd-entry-1,FixtureOne,155.20,QB Example Passer RB Sample Runner WR Example Receiver
+2,fd-entry-2,FixtureTwo,143.10,QB Other Passer RB Sample Runner WR Example Receiver
+
+Player,Roster Position,% Drafted,FPTS
+Example Passer,QB,50%,24.10
+Sample Runner,RB,100%,15.20
+Example Receiver,WR,100%,17.80
