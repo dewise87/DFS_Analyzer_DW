@@ -492,13 +492,89 @@ heuristics honestly), §8.2 (contests, contest_payouts tables).
 **Status note (2026-09-01):** landed and reviewed (commit `25cfb13`). Contest and payout
 capture stays manual by design until site logins are reachable again.
 
-Remaining Phase 1 slices (prompts written when reached):
+Blocked Phase 1 slice (prompt written when unblocked):
 
 - **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
   second subscription exists. Workhorse tier.
-- **Slice 12 — Slate memo generator + baseline evaluation report** (§6.8): purchased
-  baseline error by position and week; the first artifact you actually read on Saturdays.
-  Workhorse tier.
+
+### Slice 12 — Slate memo + baseline evaluation report
+
+**Goal:** the two artifacts a human actually reads — a per-slate memo saying what was
+decided and on what evidence, and a baseline evaluation report saying, with visible `n` and
+strict point-in-time discipline, how wrong the purchased projections have been by position
+and week. This is the system's first feedback loop; if it flatters the baseline, every
+modelling judgment made after it is made against a lie.
+
+**Design doc:** §6.8 (output artifacts per slate), §12.4.3 (channel-specific validation
+targets), §1.5 rule 6 (no backtest without an information cutoff) and rule 7 (no silent
+fallback), §7.1 (every response carries `as_of` and source/run identifiers).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Nominally workhorse work,
+tiered up on purpose: this is the measuring instrument for everything downstream, and both
+of its failure modes — look-ahead joins and silently dropped players — produce numbers that
+look entirely reasonable and are wrong.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md` (binding rules, including the new Slice 10 player-distribution
+> entries), §6.8 and §12.4.3 of `docs/design/narrative-alpha-design-doc-v0_3.md`,
+> `src/narrative_alpha/replay.py` (`PointInTimeSession` — the fail-closed as-of read
+> boundary), `src/narrative_alpha/build.py` (`BuildResult`),
+> `src/narrative_alpha/portfolio/heuristic_report.py` with
+> `tests/golden/heuristic_report.txt` (the established report + golden-file pattern), and
+> migration 0001 for `results`, `games.season`/`games.week`, and `projection_snapshots`.
+>
+> Two deliverables. No new tables — everything needed is already stored.
+>
+> 1. **`src/narrative_alpha/evaluation/baseline_report.py`** — purchased-projection error
+>    by position and week.
+>    - Every read goes through `PointInTimeSession`, bound to the slate's decision cutoff.
+>      The projection scored against a result must be the version that was valid at that
+>      cutoff, never the newest row: scoring a revised projection against a known outcome
+>      is look-ahead and rule 1.5.6 forbids it.
+>    - Accounting must be complete and visible. Per (position, week) report `n_scored`,
+>      `n_projected_without_result`, and `n_result_without_projection` as separate counts.
+>      Never drop a player silently. Projected-but-inactive players are the easiest way in
+>      this whole system to make a baseline look better than it is — they get their own
+>      count, and the report states in words that they are excluded from the error metrics
+>      rather than leaving it implied.
+>    - Metrics per cell: signed mean error (bias), MAE, RMSE, and Spearman rank correlation
+>      — rank ordering matters more than level for lineup construction. Carry `n` on every
+>      cell, and render any cell below a threshold held in one visible dataclass (follow
+>      `HeuristicThresholds`) as `insufficient_n`, never as a number.
+>    - The §12.4.3 shape channel: if — and only if — `player_distributions` rows exist for
+>      the slate, add CRPS, log score, and a PIT summary from `narrative_alpha.quant.scoring`.
+>      `SOURCE_POSITION_QUANTILES` is empty, so today's normal path is that no distributions
+>      exist: render an explicit "shape channel unavailable — no configured source/position
+>      quantiles" line (rule 1.5.7) and do NOT invent a quantile configuration to make the
+>      section populate. Where log score is reported, count off-support (negative) outcomes
+>      separately per the Slice 10 decision instead of averaging in an infinity.
+> 2. **A per-slate memo** under `src/narrative_alpha/interface/` (currently empty — this is
+>    its first occupant). From a `BuildResult` plus the store: slate identity, `decision_at`,
+>    each lineup with projection/salary/ownership, which sources and file hashes fed the
+>    decision, the heuristic-EV block when a contest is attached (call
+>    `heuristic_report.py`; do not recompute its numbers), and the honest-labeling notice.
+>    Header carries `as_of`, `decision_snapshot_id`, and `run_id` per §7.1. No number in the
+>    memo may be one the store cannot reproduce.
+>
+> Wire an `na-report` entry point in `pyproject.toml` that renders both to stdout and to a
+> file, following how `build_cli.py` and `contest_cli.py` are structured.
+>
+> Tests: a look-ahead regression test — a projection revised *after* `decision_at` must not
+> move the report; missing-result and missing-projection accounting on a seeded fixture whose
+> counts are known by construction; `insufficient_n` rendering; shape-channel-unavailable
+> rendering; a hand-computed Spearman/MAE case checked against values worked out by hand, not
+> against the implementation; golden-file tests on both rendered artifacts so wording and
+> format are pinned. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+**Blocked behind Slice 12 (do not start yet):**
+
+- **Slice 13 — wire distributions into the build path** (§6.2): replace
+  `candidate_selection.py`'s single mean with the Slice 10 mixture. Blocked on the same real
+  vendor export as Slice 9 — `SOURCE_POSITION_QUANTILES` cannot be configured until some
+  source's floor/ceiling semantics are known, and guessing them is the one thing Slice 10
+  was built to refuse.
 
 ## Phase 2+ — Narrative ownership MVP and beyond
 
