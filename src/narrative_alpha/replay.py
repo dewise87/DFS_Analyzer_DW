@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,8 +11,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from narrative_alpha.candidate_selection import (
+    CandidateSelection,
+    CandidateSelectionError,
+    select_candidate_scenario,
+)
 from narrative_alpha.portfolio import (
-    CandidatePlayer,
     CandidatePlayerScenario,
     DfsSite,
     OptimizationRequest,
@@ -58,14 +61,6 @@ class ReplayReport(BaseModel):
 class ReplayResult:
     report: ReplayReport
     output_bytes: bytes
-
-
-@dataclass(frozen=True)
-class _ReplayCandidateScenario:
-    players: tuple[CandidatePlayer, ...]
-    projection_source_versions: tuple[str, ...]
-    salary_hashes: frozenset[str]
-    projection_hashes: frozenset[str]
 
 
 class PointInTimeSession:
@@ -144,124 +139,24 @@ class PointInTimeSession:
         salary_hashes: frozenset[str],
         projection_hashes: frozenset[str],
         as_of: datetime | None,
-    ) -> _ReplayCandidateScenario:
+    ) -> CandidateSelection:
+        """Compatibility wrapper around the shared build/replay selection seam."""
+
         if not salary_hashes or not projection_hashes:
             raise ReplayArtifactError(
                 "decision manifest requires salary and projection artifact hashes"
             )
-        salary_clause, salary_parameters = _hash_clause("salary_hash", salary_hashes)
-        projection_clause, projection_parameters = _hash_clause(
-            "projection_hash", projection_hashes
-        )
-        parameters: dict[str, object] = {
-            "slate_id": slate_id,
-            "site": site.value,
-            **salary_parameters,
-            **projection_parameters,
-        }
-        rows = self.query(
-            f"""
-            WITH ranked_salaries AS (
-                SELECT s.*,
-                       row_number() OVER (
-                           PARTITION BY s.player_id
-                           ORDER BY s.observed_at DESC, s.salary_id DESC
-                       ) AS version_rank
-                FROM salaries AS s
-                WHERE s.slate_id = :slate_id
-                  AND s.source_file_sha256 IN ({salary_clause})
-                  AND julianday(s.observed_at) <= julianday(:as_of)
-                  AND julianday(s.valid_from) <= julianday(:as_of)
-                  AND (s.valid_to IS NULL OR julianday(s.valid_to) > julianday(:as_of))
-            ),
-            ranked_projections AS (
-                SELECT ps.*,
-                       row_number() OVER (
-                           PARTITION BY ps.source, ps.player_id
-                           ORDER BY ps.observed_at DESC, ps.projection_snapshot_id DESC
-                       ) AS version_rank
-                FROM projection_snapshots AS ps
-                WHERE ps.slate_id = :slate_id
-                  AND ps.site = :site
-                  AND ps.source_file_sha256 IN ({projection_clause})
-                  AND julianday(ps.observed_at) <= julianday(:as_of)
-                  AND julianday(ps.valid_from) <= julianday(:as_of)
-                  AND (ps.valid_to IS NULL OR julianday(ps.valid_to) > julianday(:as_of))
+        try:
+            return select_candidate_scenario(
+                self,
+                slate_id=slate_id,
+                site=site,
+                salary_hashes=salary_hashes,
+                projection_hashes=projection_hashes,
+                as_of=_require_as_of(as_of),
             )
-            SELECT s.player_id, s.site_player_id, s.roster_positions_json, s.salary,
-                   s.source_file_sha256 AS salary_hash,
-                   p.canonical_name, p.position,
-                   team.abbreviation AS team,
-                   opponent.abbreviation AS opponent,
-                   g.external_game_id, g.kickoff_at,
-                   avg(ps.projection_mean) AS projection,
-                   avg(ps.ownership_projection) AS projected_ownership
-            FROM ranked_salaries AS s
-            JOIN players AS p ON p.player_id = s.player_id
-            JOIN teams AS team ON team.team_id = s.team_id
-            JOIN teams AS opponent ON opponent.team_id = s.opponent_team_id
-            JOIN games AS g ON g.game_id = s.game_id
-            JOIN ranked_projections AS ps
-              ON ps.player_id = s.player_id AND ps.version_rank = 1
-            WHERE s.version_rank = 1
-              AND julianday(p.observed_at) <= julianday(:as_of)
-              AND julianday(p.valid_from) <= julianday(:as_of)
-              AND (p.valid_to IS NULL OR julianday(p.valid_to) > julianday(:as_of))
-              AND julianday(team.observed_at) <= julianday(:as_of)
-              AND julianday(team.valid_from) <= julianday(:as_of)
-              AND (team.valid_to IS NULL OR julianday(team.valid_to) > julianday(:as_of))
-              AND julianday(opponent.observed_at) <= julianday(:as_of)
-              AND julianday(opponent.valid_from) <= julianday(:as_of)
-              AND (opponent.valid_to IS NULL OR julianday(opponent.valid_to) > julianday(:as_of))
-              AND julianday(g.observed_at) <= julianday(:as_of)
-              AND julianday(g.valid_from) <= julianday(:as_of)
-              AND (g.valid_to IS NULL OR julianday(g.valid_to) > julianday(:as_of))
-            GROUP BY s.player_id, s.site_player_id, s.roster_positions_json, s.salary,
-                     s.source_file_sha256, p.canonical_name, p.position,
-                     team.abbreviation, opponent.abbreviation,
-                     g.external_game_id, g.kickoff_at
-            ORDER BY s.player_id
-            """,
-            parameters,
-            as_of=as_of,
-        )
-        source_rows = self.query(
-            f"""
-            WITH ranked AS (
-                SELECT ps.*,
-                       row_number() OVER (
-                           PARTITION BY ps.source, ps.player_id
-                           ORDER BY ps.observed_at DESC, ps.projection_snapshot_id DESC
-                       ) AS version_rank
-                FROM projection_snapshots AS ps
-                WHERE ps.slate_id = :slate_id
-                  AND ps.site = :site
-                  AND ps.source_file_sha256 IN ({projection_clause})
-                  AND julianday(ps.observed_at) <= julianday(:as_of)
-                  AND julianday(ps.valid_from) <= julianday(:as_of)
-                  AND (ps.valid_to IS NULL OR julianday(ps.valid_to) > julianday(:as_of))
-            )
-            SELECT DISTINCT source, source_version, source_file_sha256
-            FROM ranked
-            WHERE version_rank = 1
-            ORDER BY source, source_version, source_file_sha256
-            """,
-            parameters,
-            as_of=as_of,
-        )
-        players = tuple(_candidate_from_row(row) for row in rows)
-        if not players:
-            raise ReplayError("no candidate players were available at the replay cutoff")
-        source_versions = tuple(
-            f"{row['source']}:{row['source_version'] or 'unknown'}:{row['source_file_sha256']}"
-            for row in source_rows
-        )
-        return _ReplayCandidateScenario(
-            players=players,
-            projection_source_versions=source_versions,
-            salary_hashes=frozenset(str(row["salary_hash"]) for row in rows),
-            projection_hashes=frozenset(str(row["source_file_sha256"]) for row in source_rows),
-        )
+        except CandidateSelectionError as error:
+            raise ReplayError(str(error)) from error
 
 
 def replay_decision(
@@ -283,6 +178,7 @@ def replay_decision(
     projection_hashes = _artifact_hashes(snapshot, "projection")
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
+    expected_output_bytes = _read_verified_artifact(artifact_root, expected_output)
     try:
         original_request = OptimizationRequest.model_validate_json(request_bytes)
     except ValidationError as error:
@@ -296,13 +192,17 @@ def replay_decision(
     if original_request.slate_type.value != slate.slate_type:
         raise ReplayArtifactError("optimizer request slate type does not match stored slate")
 
-    rebuilt = session.candidate_scenario(
-        slate_id=snapshot.slate_id,
-        site=original_request.site,
-        salary_hashes=salary_hashes,
-        projection_hashes=projection_hashes,
-        as_of=cutoff,
-    )
+    try:
+        rebuilt = select_candidate_scenario(
+            session,
+            slate_id=snapshot.slate_id,
+            site=original_request.site,
+            salary_hashes=salary_hashes,
+            projection_hashes=projection_hashes,
+            as_of=cutoff,
+        )
+    except CandidateSelectionError as error:
+        raise ReplayError(str(error)) from error
     if rebuilt.salary_hashes != salary_hashes:
         raise ReplayArtifactError("not every salary manifest hash contributed replay rows")
     if rebuilt.projection_hashes != projection_hashes:
@@ -330,36 +230,12 @@ def replay_decision(
         decision_at=cutoff,
         expected_output_sha256=expected_output.sha256,
         actual_output_sha256=actual_hash,
-        output_matches=actual_hash == expected_output.sha256,
+        output_matches=(
+            actual_hash == expected_output.sha256 and output == expected_output_bytes
+        ),
         lineup_count=len(lineups),
     )
     return ReplayResult(report=report, output_bytes=output)
-
-
-def _candidate_from_row(row: sqlite3.Row) -> CandidatePlayer:
-    try:
-        slots = json.loads(str(row["roster_positions_json"]))
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ReplayError("stored salary roster positions are invalid JSON") from error
-    if not isinstance(slots, list) or not all(isinstance(slot, str) for slot in slots):
-        raise ReplayError("stored salary roster positions must be a JSON string array")
-    position = str(row["position"] or slots[0]).upper()
-    return CandidatePlayer(
-        player_id=int(row["player_id"]),
-        site_player_id=str(row["site_player_id"]),
-        name=str(row["canonical_name"]),
-        team=str(row["team"]),
-        opponent=str(row["opponent"]),
-        position=position,
-        eligible_roster_slots=tuple(slots),
-        salary=int(row["salary"]),
-        projection=float(row["projection"]),
-        projected_ownership=(
-            None if row["projected_ownership"] is None else float(row["projected_ownership"])
-        ),
-        game_id=str(row["external_game_id"]),
-        game_start=row["kickoff_at"],
-    )
 
 
 def _single_artifact(
@@ -402,13 +278,6 @@ def _read_verified_artifact(root: Path, artifact: DecisionManifestHash) -> bytes
     if actual_hash != artifact.sha256:
         raise ReplayArtifactError(f"artifact hash mismatch for {artifact.path}")
     return content
-
-
-def _hash_clause(prefix: str, hashes: frozenset[str]) -> tuple[str, dict[str, object]]:
-    parameters: dict[str, object] = {
-        f"{prefix}_{index}": value for index, value in enumerate(sorted(hashes))
-    }
-    return ", ".join(f":{key}" for key in parameters), parameters
 
 
 def _require_as_of(value: datetime | None) -> datetime:

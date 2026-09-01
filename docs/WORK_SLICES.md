@@ -265,9 +265,14 @@ close against real-world data, tracked here until done:
   export shape. FD salary quirks (Tier column, time-less Game) are now handled.
 - [ ] **Complete the manual upload checklist** (docs/manual-lineup-upload-checklist.md) once
   per site before treating upload formats as accepted.
-- [ ] **Build the production decision-snapshot writer.** Only tests write
-  `decision_snapshots` rows today; replay can consume but nothing creates one. Now specified
-  as **Slice 8b** below — required before the first real Sunday decision.
+- [x] **Build the production decision-snapshot writer.** Done (Slice 8b, reviewed
+  2026-09-01): `na-build` freezes artifacts + snapshot row in one transaction and refuses
+  to succeed unless its own immediate replay matches byte-for-byte. The shared candidate
+  selection seam (`candidate_selection.py`) also retired the replay-blend drift risk from
+  the deferred-minors list.
+- [ ] **DK/FD-dependent items are blocked until Daniel returns to the US** (site logins are
+  geo-unavailable): real salary/standings exports, probe-contest entries, and the manual
+  upload checklist all wait; Stokastic exports (Slice 9) are the interim data source.
 - [ ] **Re-pin nflverse to a dated artifact.** The current pin targets a rolling
   `roster_2026.csv` release asset that upstream overwrites weekly; the hash check fails
   closed but will break on every refresh. Archive fetched bytes locally.
@@ -330,9 +335,56 @@ pre-lock files").
 
 ## Phase 1 — Quant floor and contest context (Weeks 3–4)
 
-Slices sketched now, prompts written when Phase 0 lands (they must reference real code):
+### Slice 9 — Stokastic source adapter (projections + ownership)
 
-- **Slice 9 — Second projection source + equal-weight blend** (§6.1). Workhorse tier.
+**Goal:** the first real purchased source. Wire Stokastic NFL projection and ownership CSV
+exports into the existing `SourceFormatRegistry` so a captured Stokastic file loads into
+`projection_snapshots`/`ownership_baselines` end to end.
+
+**Prerequisite (human):** Daniel downloads one of each export from Stokastic (NFL
+projections CSV, ownership/leverage CSV — main slate) and captures them:
+`uv run na-snapshot capture --season 2026 --week 1 --kind projections --source stokastic <files>`.
+The executing model builds the adapter FROM those real files — no invented schemas.
+
+**Design doc:** §4.3, §2 (buy 1–2 projection sources). **Model:** Claude **Sonnet 5** ·
+ChatGPT **GPT-5.1 Thinking** (workhorse — the registry seam already exists).
+
+**Prompt:** see the ready-to-paste version below (kept with the slice for reuse).
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/ingest/projections.py` (the `SourceFormatRegistry` seam and existing
+> loaders), `src/narrative_alpha/ingest/timestamps.py`, `docs/DECISIONS.md` (binding rules:
+> no silent fallback, no magnitude-inferred units, insert-only point-in-time writes), and
+> the capture manifest under `data/snapshots/2026/week_01/` that contains the real
+> Stokastic files — the actual CSV headers there are the source of truth for the schema.
+>
+> Build a `stokastic` source format registered in the `SourceFormatRegistry`:
+>
+> 1. Header-signature detection for the projections export and the ownership export
+>    (two formats or one, matching whatever the real files show); unknown drift raises the
+>    existing structured schema error naming missing/unexpected columns.
+> 2. Map fields onto the existing parsed-row models: projection mean (floor/ceiling if the
+>    export carries them), ownership as a FRACTION in [0,1] — determine the unit from the
+>    header/percent-sign deterministically, never from magnitude. Player identification
+>    uses name + team + position through the crosswalk (Stokastic has no DK/FD site IDs in
+>    all exports — if an ID column exists in the real file, also store it as an
+>    external_player_id source). Unresolvable players go to the unresolved queue and the
+>    load report must say so.
+> 3. Anonymize a small sample of the real files (a dozen rows, fake names/values, same
+>    columns and quirks) into `tests/golden/stokastic_projections.csv` and
+>    `tests/golden/stokastic_ownership.csv`; never commit the full real export (licensed
+>    data).
+> 4. Tests: golden-file parse, drift refusal, unit handling, idempotent reload, end-to-end
+>    load into a seeded store through the capture manifest path. Run
+>    `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+>
+> If the real files are NOT present under data/snapshots/, STOP and say so — do not invent
+> the schema.
+
+Remaining Phase 1 slices (prompts written when reached):
+
+- **Slice 9b — Second projection source + equal-weight blend across sources** (§6.1) once a
+  second subscription exists. Workhorse tier.
 - **Slice 10 — Player outcome distributions** fit from mean/floor/ceiling with
   position-specific calibration (§6.2). Frontier tier — distribution-fitting subtleties.
 - **Slice 11 — Contest archetype/payout schema + heuristic EV labeling** (§2.2, §6.4):

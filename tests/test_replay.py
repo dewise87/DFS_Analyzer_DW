@@ -61,6 +61,9 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
     expected_output = adapter.export_upload_csv(
         adapter.build_lineups(request), request.site, request.upload_entries
     )
+    output_path = artifact_root / "lineups" / "upload.csv"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(expected_output)
     manifest = (
         DecisionManifestHash(
             artifact_kind="salary",
