@@ -3,8 +3,11 @@
   "configurations": [
     {
       "name": "na-ops-dashboard",
-      "runtimeExecutable": "/Users/danielwise/.local/bin/uv",
-      "runtimeArgs": ["run", "na-ops", "dashboard", "--port", "8765"],
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "ANTHROPIC_API_KEY=\"$(/usr/bin/security find-generic-password -s narrative-alpha-anthropic -w 2>/dev/null)\" exec /Users/danielwise/.local/bin/uv run na-ops dashboard --port 8765"
+      ],
       "port": 8765
     }
   ]

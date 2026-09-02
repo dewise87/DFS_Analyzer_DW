@@ -1551,21 +1551,220 @@ path, any request whose `Host` is not a loopback name on the bound port (`localh
 `127.0.0.1`, `[::1]`), with HTTP 421 and the remedy. Seven tests cover it, including the
 case where `Origin` and `Host` agree under the rebound name. Suite 589 → 596.
 
+### Slice 25 — Tuesday results lane (`na-ops results`)
+
+**Goal:** the third lane, for Tuesday: hash and ingest the week's contest-standings exports
+into actual-ownership labels, prove the frozen decision replays byte-identically now that
+post-lock data exists, write the baseline evaluation report, and show the label count that
+gates the ownership model. Every week without this lane is a week of labels ingested by
+hand or not at all.
+
+**Design doc:** §4.3 (actual ownership), §3.2, Appendix C, Appendix D (Tuesday items).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse: the parsing and
+the replay already exist; this is orchestration with the lane conventions.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read, in
+> this order: `src/narrative_alpha/ops/batch.py` and `ops/slate.py` (how a lane records
+> steps through `StepRecorder` in `ops/runs.py`, and how `slate_memo` records a file path
+> in its summary), `ops/status.py` (`collect_ops_status`, `status_payload`,
+> `render_status`), `ingest/results.py` (`parse_contest_standings`,
+> `load_contest_standings`), `evaluation/baseline_report.py` (`build_baseline_report`,
+> `render_baseline_report`) with `report_cli.py`, `replay_cli.py` and `replay.py`,
+> `contest_cli.py`, and `snapshots/` (capture machinery). Design doc §4.3, §3.2,
+> Appendix C, and the Tuesday lines of Appendix D.
+>
+> Build `na-ops results --season N --week N --site dk|fd <standings files...>` as the
+> third lane beside `batch` and `slate`, recording `ops_runs` steps the way they do:
+>
+> 1. `results_capture`: copy the standings files into a snapshot capture of kind
+>    `standings` through the Slice 1 machinery (hashed, manifested, append-only). The
+>    `source_observed_at` of every label row is that capture's `observed_at`, never now. A
+>    file already captured this week (same sha256) is not captured again, and the step
+>    summary says which files were new.
+> 2. `results_ingest`: `load_contest_standings` per file into `actual_ownership`, one
+>    contest population per file, never mixing archetypes. A file whose contest is not in
+>    `contests` fails the step naming `na-contest add`. A layout the parser does not know
+>    fails with the header row it saw — the real DK layout is still unverified (Phase 0
+>    exit checklist), so this failure text is what the operator will paste back to us.
+>    Re-running the lane on the same file inserts nothing (assert row counts).
+> 3. `results_replay`: replay every decision snapshot frozen for this week/site at its own
+>    `decision_at` (what `na-replay` does) and fail the step, recording both hash sets in
+>    the summary, if the rebuild is not byte-identical. This is the weekly proof that
+>    post-lock data changed nothing.
+> 4. `results_report`: `build_baseline_report` for the newest decision snapshot with the
+>    evaluation as-of the lane's start, rendered to
+>    `<report dir>/<season>/week_NN/results-<site>-<UTC stamp>.txt`, path in the step
+>    summary (the `slate_memo` pattern, so a page can find it).
+> 5. `results_labels`: count `actual_ownership` rows per contest archetype for the week
+>    into the summary, and add a `labels` section to `collect_ops_status` /
+>    `status_payload` / `render_status`: per week and archetype, label rows and distinct
+>    contests, plus `weeks_with_labels`. This number is the gate for the ownership-model
+>    slice (three weeks). Add `results_steps` beside `slate_steps` in the payload and the
+>    renderer. The dashboard renders the payload itself, so it needs no change — extend
+>    `test_status_page_shows_every_section_of_the_status_payload` with the new sections
+>    rather than weakening it.
+>
+> Wire the subcommand into `ops/cli.py` (exit codes as the other lanes), and add the
+> Tuesday step to the README's weekly section. The lane never touches the Keychain.
+>
+> Tests: synthesized standings exports (extend the Slice 8 golden fixtures, do not fork
+> them); each failure mode above; the idempotent re-run; a replay mismatch recorded with
+> both hashes; `labels` and `results_steps` on an empty store and a seeded one. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green. Never run against
+> `data/db/narrative_alpha.sqlite3`; copy it to a scratch path if you need real shapes.
+
+### Slice 26 — Batch lane finishes with episodes; the key from the Keychain in-process; narrative counts in status
+
+**Goal:** three small closures found in operation. Episodes are built at the end of every
+batch run so mid-week status shows them; the batch lane (and so the dashboard's "Run
+batch now") reads the Anthropic key from the Keychain itself when the environment has
+none, instead of failing at `extract` unless started through the launchd wrapper; and
+`na-ops status` gains a narrative section.
+
+**Design doc:** §5.3 (Stage 2 is deterministic and cheap), §7.6, §1.6.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Hand out after Slice 25
+merges (both touch `ops/status.py`), or accept one small merge there.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/ops/batch.py` (the `extract` step's key check near line 310, and the
+> `nflverse_refresh` step), `ops/slate.py` (the `slate_episodes` step — reuse it),
+> `ops/schedule.py` (the wrapper's `security find-generic-password` lookup, lines ~354–370),
+> `ops/dashboard.py` (`_start_batch`), `ops/status.py`, `narrative/episodes.py`, and commit
+> `40e02fd` (episode snapshot reuse is scoped by Stage 1 prompt version). Three changes:
+>
+> 1. **Episodes at the end of every batch run.** After `nflverse_refresh`, add an
+>    `episodes` step that builds one append-only as-of episode snapshot at the run's start
+>    timestamp exactly as `slate_episodes` does — the same library call, no second
+>    clustering path. `recorder.skip` it with the reason when no extraction has ever
+>    succeeded. It must not extend the run by more than a few seconds on 4,000 items; say
+>    the measured time in the PR.
+> 2. **The key from the Keychain, in-process, when the environment has none.** Add
+>    `ops/secrets.py` with `anthropic_api_key(config) -> str | None`: `ANTHROPIC_API_KEY` /
+>    `ANTHROPIC_AUTH_TOKEN` first, else `/usr/bin/security find-generic-password -s
+>    <config.keychain_service> -w` via `subprocess` (the command the wrapper already runs),
+>    returned to the caller only — never stored on the config object, never logged, never
+>    placed in `os.environ` for longer than the extract step needs it. Use it in the batch
+>    lane's extract step so `na-ops batch` in a plain terminal and `Run batch now` on the
+>    dashboard both work. Failure stays loud: no env and no Keychain item gives the same
+>    refusal text plus the `security add-generic-password` remedy from `KEYCHAIN_ACCOUNT_HINT`.
+>    Tests mock the subprocess; one test asserts the key string never appears in an
+>    `ops_runs` summary, an error text, the status payload, or any dashboard page.
+> 3. **Narrative counts in status.** Add `narrative` to `collect_ops_status` /
+>    `status_payload` / `render_status`: items collected in the last seven days, items
+>    extracted vs awaiting extraction, claims recorded, episodes in the newest snapshot
+>    with its as-of and prompt version, and pending review flags. The dashboard shows it
+>    without change; extend the every-section test.
+>
+> Tests for every branch above, `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy`
+> green. Do not run against the production database.
+
+### Slice 27 — Week 1 runbook (documentation only)
+
+**Goal:** one checklist for Thu 2026-09-10 through Tue 2026-09-15 with every command
+exactly as the CLIs accept it today, so Week 1 is run from a page and not from memory.
+
+**Model:** Claude **Haiku 4.5** · ChatGPT **GPT-5.1** (cheap tier), on the condition that
+the model reads `--help` output and the README rather than guessing flags. Sonnet 5 if the
+first draft invents anything.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `README.md`, `docs/WORK_SLICES.md` (the
+> "Implementation status" notes of Slices 18, 19, 22, 23, 24), Appendix D of
+> `docs/design/narrative-alpha-design-doc-v0_3.md`, `docs/manual-lineup-upload-checklist.md`,
+> and the `--help` of every entry point in `pyproject.toml` `[project.scripts]` (run
+> `~/.local/bin/uv run <name> --help` and its subcommands). Do not invent a flag: every
+> command in the document must appear in a `--help` you ran.
+>
+> Write `docs/WEEK_1_RUNBOOK.md`: a checklist by day and New York time for Thu 2026-09-10
+> to Tue 2026-09-15. For each item: the command, what "done" looks like on `na-ops status`
+> or the dashboard (`na-ops dashboard`, http://127.0.0.1:8765/), and what to do when it
+> fails (quote the failure texts from `ops/batch.py` and `ops/slate.py`). Cover: Wed–Fri
+> batch runs (launchd, Keychain), the first real DK showdown export on Thursday and the
+> CPT/FLEX dual-row risk from Slice 22, Saturday noon Stokastic export capture (capture-only
+> until Slice 9 lands), Saturday 6 p.m. capture, clearing the unresolved-identity queue from
+> the dashboard, the Saturday slate lane, Sunday 9 a.m. and 11 a.m. captures, the Sunday
+> slate lane and the manual upload checklist, and Tuesday standings capture (`na-snapshot
+> capture --kind standings` if Slice 25 has not landed, `na-ops results` if it has). Include
+> the two live issues visible in the run history today: dead sources `fox-nfl` and `pfn-nfl`
+> (HTTP 403), and the nflverse pin drift remedy (`na-crosswalk nflverse-refresh --season
+> 2026 --reviewed-at <date>`). Two pages at most; checklist boxes, no prose.
+
+### Slice 28 — Sunday fast lane, boring version (Phase 3, §7.4)
+
+**Goal:** the pre-approved rule file, a deterministic official-inactives path from paste to
+a re-frozen decision snapshot and upload CSV, and a single-item synchronous extraction for
+A-graded sources — extraction plus alert, never an automatic projection change. Needed from
+Week 2's Sunday; start after Slices 25 and 26 land.
+
+**Design doc:** §7.4 (pre-approved rule list), §12.5 (the eight-minute path), §7.6, §5.3
+Family 1, Phase 3 acceptance tests in §9.
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: the rule
+semantics and the re-freeze must be right the first time, on a Sunday.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read §7.4,
+> §12.5, §7.6, and the Phase 3 acceptance tests in §9 of
+> `docs/design/narrative-alpha-design-doc-v0_3.md`; then `src/narrative_alpha/narrative/`
+> (`extraction.py` submission path and leases, `source_catalog.py` source grades,
+> `collectors.py`), `ops/slate.py` (`slate_build` and how a decision snapshot is frozen),
+> `build_cli.py` and `candidate_selection.py`, `identity/` (`PlayerCrosswalk`), and
+> `docs/schema.md`. Build the boring fast lane in `src/narrative_alpha/fast/` with a
+> `na-fast` entry point:
+>
+> 1. **Rules file.** `config/fast_lane_rules.yaml`, versioned (`rules_version`,
+>    `approved_at`, `expires_at`, `approved_by`), each rule naming the trigger source class
+>    (official inactive list; a named A-graded beat account), the claim type, the maximum
+>    automatic adjustment per channel, and its own expiry. The loader refuses an expired,
+>    unsigned, or unknown-field rule set; `na-ops status` shows the rule-set version and
+>    expiry so the weekly re-sign (Appendix D) is visible. Ship one rule only: official
+>    inactives.
+> 2. **Official inactives, deterministic.** `na-fast inactives --season N --week N --site
+>    dk|fd --file <text>` (or `--paste` reading stdin) takes the official inactive list as
+>    typed at 11:30 a.m. Eastern. No LLM. Names resolve through `PlayerCrosswalk`; an
+>    unresolved name refuses the whole command and names the queue. It records each player
+>    as unavailable as-of the paste time — check `docs/schema.md` for an availability table
+>    and add a migration if none exists; point-in-time fields on every row — then rebuilds
+>    only the lineups that carried an inactive player through the Slice 8b build path,
+>    freezing a new decision snapshot and upload CSV, and prints the diff: who out, who in,
+>    the rule that permitted it. A mean change larger than the rule's cap refuses and says
+>    what a human must confirm. Nothing here changes a projection.
+> 3. **Single-item extraction.** `na-fast item --url <url>` (or `--source-item-id`): one
+>    synchronous Stage 1 extraction with the existing prompt, validator, and injection
+>    controls — no batch — allowed only for sources graded A in the catalog, timed, written
+>    to the usual tables under an extraction run tagged `fast` so grading treats it like any
+>    other signal. Output: the claims, the players they touch, and the words "no lineup was
+>    changed".
+> 4. **Timing.** A test proves inactives paste → new upload CSV in under sixty seconds on
+>    the seeded fixture; the eight-minute SLA is the whole path's p95, and the deterministic
+>    branch must be near-instant.
+>
+> Tests: expired and unsigned rule sets refuse; an unresolved name refuses; the cap refuses;
+> the fast decision snapshot replays byte-identically through `na-replay`; a B-graded source
+> is refused by `item`; nothing imports `pydfs_lineup_optimizer` outside its adapter. Gates
+> green. Do not run against the production database.
+
 ### Queued, not yet prompted (in order)
 
-- **Slice 9 — Stokastic adapter** stays open until real exports exist under
+- **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
   `data/snapshots/`. Stokastic opens NFL main-slate data within about twelve hours of lock,
   so the first chance is Saturday 2026-09-12; hand the slice out that day, and expect Week 1
   to be capture-only for that source.
-- **Slice 25 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
-  §12.2.5–§12.2.8): prompt when there are at least three weeks of actual ownership labels and
-  a vendor ownership baseline is ingesting. Fitting on synthetic labels would violate rule
-  1.5.2.
-- **Slice 26 — Sunday fast lane** (Phase 3, §7.4): pre-approved `fast_lane_rules.yaml`,
-  single-item synchronous extraction, official-inactive bypass.
-- **Stage 2/3 in the weekly batch:** once Slice 23 lands, decide whether `na-ops batch` should
-  also build episodes at the end of each run (cheap, deterministic) so `status` can show
-  episode counts mid-week.
+- **Slice 29 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
+  §12.2.5–§12.2.8): prompt when `na-ops status` reports `weeks_with_labels >= 3` (Slice 25)
+  and a vendor ownership baseline is ingesting (Slice 9). Fitting on synthetic labels would
+  violate rule 1.5.2.
+- **Dashboard follow-on:** a "results" button once Slice 25 lands, taking the standings
+  files by path; and the LANES block reading the last run of each lane from `ops_runs`
+  rather than only the runs started from the page.
 
 ---
 
