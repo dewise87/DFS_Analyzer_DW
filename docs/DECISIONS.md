@@ -262,6 +262,23 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slice 25 review outcomes
+
+- **One query for the label gate.** The Tuesday lane records per-week, per-archetype label
+  counts in its `results_labels` step, and `na-ops status` shows the same gate. Both now come
+  from `ops.results.label_summary`; the screen may not carry a second copy of a number the
+  lane records, because the two would drift and the gate decides when the ownership model
+  may be fitted.
+- **Standings are a capture kind, and a Tuesday-only one.** `CaptureKind.STANDINGS` makes
+  every export hashed and manifested before it is parsed, and the label rows carry the
+  capture's `observed_at`, not the ingest time — a rerun keeps Tuesday's stamp. The cost is
+  that the current week's snapshot block says `standings MISSING` from Saturday to Tuesday.
+  Accepted: it is true, and it is not a warning.
+- **Contest identity comes from the filename.** The lane matches an export to its
+  append-only `contests` row by the external contest id in the file's name and refuses,
+  naming `na-contest add` and the known ids, when it cannot. Guessing the contest from the
+  file's contents would let a mislabeled export poison a population.
+
 ## 2026-09-02 — Slice 24 review outcomes
 
 - **The dashboard trusts its loopback name, not the `Host` header it is handed.** The

@@ -126,9 +126,10 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
         10,
         11,
         12,
+        13,
     ]
     assert second == ()
-    assert len(records) == 12
+    assert len(records) == 13
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -250,7 +251,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6, 7, 8, 9, 10, 11, 12]
+    assert [migration.version for migration in applied] == [6, 7, 8, 9, 10, 11, 12, 13]
     assert counts == {
         "source_keys": 1,
         "sources": 1,
@@ -303,7 +304,7 @@ def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
                 ("2026-09-02T12:00:01.000000Z",),
             )
 
-    assert [migration.version for migration in applied] == [9, 10, 11, 12]
+    assert [migration.version for migration in applied] == [9, 10, 11, 12, 13]
     assert parent["observed_at"] == timestamp
     assert parent["ingested_at"] == timestamp
 

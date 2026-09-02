@@ -68,8 +68,10 @@ class ContestSchemaError(ContestStandingsError):
         self.unexpected_columns = unexpected_columns
         missing = ", ".join(missing_columns) or "none"
         unexpected = ", ".join(unexpected_columns) or "none"
+        observed = ",".join(headers) or "<missing>"
         super().__init__(
-            f"contest standings {section} header drift; missing columns: {missing}; "
+            f"contest standings {section} header drift; header row: {observed}; "
+            f"missing columns: {missing}; "
             f"unexpected columns: {unexpected}"
         )
 
@@ -736,5 +738,3 @@ def _listed_position(roster_position: str) -> str | None:
     if roster_position in {"FLEX", "UTIL", "ANYFLEX", "CPT", "CAPTAIN", "MVP"}:
         return None
     return "DST" if roster_position in {"D", "DEF"} else roster_position
-
-

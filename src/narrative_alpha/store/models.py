@@ -1665,6 +1665,12 @@ class OpsRunRow(StoreRow):
         "slate_features",
         "slate_build",
         "slate_memo",
+        # Results lane (`na-ops results`), Tuesday.
+        "results_capture",
+        "results_ingest",
+        "results_replay",
+        "results_report",
+        "results_labels",
     ]
     status: Literal["succeeded", "failed", "skipped"]
     started_at: datetime

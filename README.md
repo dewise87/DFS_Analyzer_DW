@@ -49,9 +49,9 @@ uv run pytest
 
 ## Weekly operations
 
-Two commands run the week — `na-ops batch` mid-week, `na-ops slate` on Saturday and Sunday
-— and one screen reports both. Everything below them is what a person still has to do by
-hand.
+Three commands run the week — `na-ops batch` mid-week, `na-ops slate` on Saturday and Sunday,
+and `na-ops results` on Tuesday — and one screen reports all three. Everything below them is
+what a person still has to do by hand.
 
 **Install once.** Put the Anthropic API key in the login Keychain (the scheduled jobs read
 it at run time; it is never written into a plist, a log, or this repository), then install
@@ -93,7 +93,7 @@ laptop delays the Wednesday batch rather than skipping the week.
 uv run na-ops status
 ```
 
-One page: per-step last success and last failure with age for both lanes, dead feeds from
+One page: per-step last success and last failure with age for all three lanes, dead feeds from
 the last collection, items collected in the last 7 days, the Stage 1 backlog and what it
 would cost to clear, review flags, in-flight attempts, pending accepted-batch receipts, the
 crosswalk unresolved queue, whether a roster is seeded at all, this week's snapshot
@@ -103,8 +103,9 @@ reached the store (proved by the file's own hash appearing on a row, not by a st
 reporting success), each ingested slate with its lock time, player count and unresolved
 count, the latest salary/projection/ownership observation, how many features exist at the
 latest decision instant, and the decision snapshot frozen against it. `--json` prints the
-same data. It answers "did this week run, and what do I need to do by hand" without any
-other command.
+same data. Its RESULTS LANE and RESULT LABELS sections show Tuesday's five steps and the
+per-week/archetype label counts that gate the first ownership model. It answers "did this
+week run, and what do I need to do by hand" without any other command.
 
 **Run the lane by hand** when you want it now rather than on Wednesday:
 
@@ -192,7 +193,7 @@ One local web page at `http://127.0.0.1:8765/`, on the standard library alone �
 framework, no build step, no JavaScript, no external asset. Four read pages: the whole
 `na-ops status` screen, the review queues (pending flags, in-flight attempts, held leases,
 and the unresolved identities with their candidate players), the last twenty `ops_runs`
-rows across both lanes newest first, and the latest slate memo. Each one is rendered from
+rows across all lanes newest first, and the latest slate memo. Each one is rendered from
 the same function the CLI calls, so the page cannot drift from the terminal — the status
 page renders the `status_payload` dict itself, which is why a section added to `na-ops
 status` appears here the day it lands.
@@ -223,6 +224,10 @@ frame carries no usable origin, and it is refused rather than trusted.
   pre-lock state is gone. Re-run `na-ops slate`; it versions the salaries rather than
   overwriting Saturday's, and the 11:00 a.m. run is the one you upload.
 - **Sunday post-slate** — export contest standings for every probe contest.
+- **Tuesday after settlement** — keep each export's contest ID in its filename, then run
+  `na-ops results --season 2026 --week N --site dk|fd <standings files...>`. The lane
+  captures the exports, ingests actual ownership/results, verifies every frozen decision,
+  writes the baseline report, and updates the three-week label gate in `na-ops status`.
 - **Whenever `status` says so** — clear the crosswalk unresolved queue
   (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
   reviewed nflverse pin when the refresh check reports a moved roster:
@@ -473,6 +478,8 @@ DraftKings/FanDuel standings exports. `load_contest_standings` stores weekly fan
 contest-specific actual ownership, retaining contest archetype, field size, entry limit, fee,
 roster role, lineup/roster counts, file hash, and full point-in-time provenance. Unknown schemas,
 unresolved players, and conflicting contest cohort metadata remain explicit rather than guessed.
+The Tuesday `na-ops results` lane matches each export to the append-only `contests` record by the
+external contest ID in its filename and refuses with the `na-contest add` remedy when it cannot.
 
 ## Point-in-time replay
 

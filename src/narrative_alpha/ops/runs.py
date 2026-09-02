@@ -1,9 +1,10 @@
 """Append-only history of operator-lane steps, and the reads `na-ops status` needs.
 
-Both lanes record here. ``na-ops batch`` runs the Wed-Fri data steps; ``na-ops slate``
-runs the Saturday/Sunday decision steps. The step recorder below is what makes a lane a
-lane: every step is isolated, its outcome is committed on its own, and a failure is a
-recorded fact rather than an exception that costs the run its history.
+All three lanes record here. ``na-ops batch`` runs the Wed-Fri data steps, ``na-ops slate``
+runs the Saturday/Sunday decision steps, and ``na-ops results`` closes the week on Tuesday.
+The step recorder below is what makes a lane a lane: every step is isolated, its outcome is
+committed on its own, and a failure is a recorded fact rather than an exception that costs
+the run its history.
 """
 
 from __future__ import annotations
@@ -27,12 +28,20 @@ OpsSlateStep = Literal[
     "slate_build",
     "slate_memo",
 ]
-OpsStep = OpsBatchStep | OpsSlateStep
+OpsResultsStep = Literal[
+    "results_capture",
+    "results_ingest",
+    "results_replay",
+    "results_report",
+    "results_labels",
+]
+OpsStep = OpsBatchStep | OpsSlateStep | OpsResultsStep
 OpsStepStatus = Literal["succeeded", "failed", "skipped"]
 
 BATCH_STEPS: tuple[OpsBatchStep, ...] = get_args(OpsBatchStep)
 SLATE_STEPS: tuple[OpsSlateStep, ...] = get_args(OpsSlateStep)
-OPS_STEPS: tuple[OpsStep, ...] = BATCH_STEPS + SLATE_STEPS
+RESULTS_STEPS: tuple[OpsResultsStep, ...] = get_args(OpsResultsStep)
+OPS_STEPS: tuple[OpsStep, ...] = BATCH_STEPS + SLATE_STEPS + RESULTS_STEPS
 
 
 @dataclass(frozen=True)
@@ -249,7 +258,7 @@ def recent_runs(
     *,
     limit: int = 20,
 ) -> tuple[RecordedRun, ...]:
-    """Return the most recent recorded steps across both lanes, newest first.
+    """Return the most recent recorded steps across all lanes, newest first.
 
     The history a reader wants is "what happened last", which is neither lane's own
     ordering: a slate step and a batch step interleave in real time and must interleave

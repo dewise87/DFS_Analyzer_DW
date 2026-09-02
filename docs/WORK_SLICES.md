@@ -1616,6 +1616,22 @@ the replay already exist; this is orchestration with the lane conventions.
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green. Never run against
 > `data/db/narrative_alpha.sqlite3`; copy it to a scratch path if you need real shapes.
 
+**Implementation status (2026-09-03):** implemented. `src/narrative_alpha/ops/results.py`
+orchestrates the five append-only `results_*` steps, migration 0013 admits them to `ops_runs`,
+and `na-ops status` now reports both results-step history and the per-week/archetype label gate.
+Standings captures are hash-idempotent and preserve their original capture time on every label;
+replay mismatches retain both hashes, and reports are written only after ingest and replay pass.
+
+**Review outcome (2026-09-03):** accepted with one consolidation. The label query had been
+written twice — once in the lane's `results_labels` step and once in `na-ops status` — so
+the screen could drift from the recorded step; `status` now builds its `labels` section
+from the lane's `label_summary`. Noted, not changed: `standings` is now a capture kind, so
+the snapshots block of `status` and `na-snapshot status` list it as MISSING for the current
+week until Tuesday — a true statement, not a warning. Contest matching is by the external
+contest id in the export's filename, which the failure text explains; the real DK layout is
+still unverified (Phase 0 exit checklist) and the header-row failure text is what to paste
+back when it differs. Suite 596 → 602.
+
 ### Slice 26 — Batch lane finishes with episodes; the key from the Keychain in-process; narrative counts in status
 
 **Goal:** three small closures found in operation. Episodes are built at the end of every

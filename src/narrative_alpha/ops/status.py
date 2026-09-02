@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
 from narrative_alpha.ingest.slates import SlateSummary, list_slates
@@ -25,8 +26,10 @@ from narrative_alpha.narrative import (
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import DEFAULT_PRICING_PATH
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
+from narrative_alpha.ops.results import label_summary
 from narrative_alpha.ops.runs import (
     BATCH_STEPS,
+    RESULTS_STEPS,
     SLATE_STEPS,
     OpsStep,
     last_run,
@@ -104,6 +107,25 @@ class SlateLaneStatus:
 
 
 @dataclass(frozen=True)
+class LabelCohortStatus:
+    """One season/week/archetype label population."""
+
+    season: int
+    week: int
+    contest_archetype: str
+    label_rows: int
+    distinct_contests: int
+
+
+@dataclass(frozen=True)
+class LabelsStatus:
+    """The accumulated ownership-label gate for the first fitted model."""
+
+    weeks_with_labels: int
+    by_week_and_archetype: tuple[LabelCohortStatus, ...]
+
+
+@dataclass(frozen=True)
 class OpsStatus:
     """The whole screen as data, so `--json` and the text render never diverge."""
 
@@ -112,6 +134,7 @@ class OpsStatus:
     config_path: Path
     steps: tuple[StepHistory, ...]
     slate_steps: tuple[StepHistory, ...]
+    results_steps: tuple[StepHistory, ...]
     dead_feed_count: int | None
     dead_feed_source_ids: tuple[str, ...]
     last_collection_at: datetime | None
@@ -127,6 +150,7 @@ class OpsStatus:
     snapshot_week: SnapshotWeekStatus | None
     snapshot_problems: tuple[str, ...]
     slate: SlateLaneStatus | None
+    labels: LabelsStatus
     month_to_date_spend_usd: str
     monthly_budget_usd: str
     budget_remaining_usd: str
@@ -156,7 +180,7 @@ class OpsStatus:
                 f"{self.inflight_attempts} extraction attempt(s) are in flight: rerun the "
                 "batch to resume, or `na-extract abandon` a stuck one"
             )
-        for step in (*self.steps, *self.slate_steps):
+        for step in (*self.steps, *self.slate_steps, *self.results_steps):
             if step.last_failure_at is not None and (
                 step.last_success_at is None or step.last_failure_at > step.last_success_at
             ):
@@ -185,6 +209,7 @@ def collect_ops_status(
 
     steps = tuple(_step_history(connection, step=step) for step in BATCH_STEPS)
     slate_steps = tuple(_step_history(connection, step=step) for step in SLATE_STEPS)
+    results_steps = tuple(_step_history(connection, step=step) for step in RESULTS_STEPS)
     collect_run = last_run(connection, step="collect", status="succeeded")
     latest_collect = max(
         (
@@ -246,6 +271,7 @@ def collect_ops_status(
         config_path=config.path,
         steps=steps,
         slate_steps=slate_steps,
+        results_steps=results_steps,
         dead_feed_count=dead_count,
         dead_feed_source_ids=dead_ids,
         last_collection_at=None if latest_collect is None else latest_collect.started_at,
@@ -265,6 +291,7 @@ def collect_ops_status(
         snapshot_week=snapshot_week,
         snapshot_problems=snapshot_problems,
         slate=slate,
+        labels=_label_status(connection),
         month_to_date_spend_usd=_usd(spent),
         monthly_budget_usd=_usd(budget),
         budget_remaining_usd=_usd(max(budget - spent, 0)),
@@ -541,6 +568,30 @@ def _count(
     return int(connection.execute(sql, parameters).fetchone()[0])
 
 
+def _label_status(connection: sqlite3.Connection) -> LabelsStatus:
+    """The label gate, from the one query the results lane records it with.
+
+    `results_labels` writes the same numbers into its step summary; sharing the query is
+    what keeps the screen and the recorded step from ever disagreeing about them.
+    """
+
+    summary = label_summary(connection)
+    cohorts = tuple(
+        LabelCohortStatus(
+            season=int(row["season"]),
+            week=int(row["week"]),
+            contest_archetype=str(row["contest_archetype"]),
+            label_rows=int(row["label_rows"]),
+            distinct_contests=int(row["distinct_contests"]),
+        )
+        for row in cast("list[dict[str, object]]", summary["by_week_and_archetype"])
+    )
+    return LabelsStatus(
+        weeks_with_labels=int(cast("int", summary["weeks_with_labels"])),
+        by_week_and_archetype=cohorts,
+    )
+
+
 def _usd(nanos: int) -> str:
     return f"{Decimal(nanos) / Decimal(NANOS_PER_USD):.2f}"
 
@@ -625,6 +676,28 @@ def render_status(status: OpsStatus) -> str:
             )
             lines.append(f"  {'':<18}   {step.last_failure_text}")
     lines.extend(_render_slate_week(status))
+
+    lines.extend(("", "RESULTS LANE (`na-ops results`)"))
+    for step in status.results_steps:
+        lines.append(
+            f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}"
+        )
+        if step.last_failure_at is not None:
+            lines.append(
+                f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}"
+            )
+            lines.append(f"  {'':<18}   {step.last_failure_text}")
+
+    lines.extend(("", "RESULT LABELS"))
+    lines.append(f"  weeks with labels       {status.labels.weeks_with_labels} of 3 needed")
+    if not status.labels.by_week_and_archetype:
+        lines.append("  no actual-ownership labels ingested")
+    else:
+        for cohort in status.labels.by_week_and_archetype:
+            lines.append(
+                f"  {cohort.season} week {cohort.week:02d} {cohort.contest_archetype:<18} "
+                f"{cohort.label_rows} row(s), {cohort.distinct_contests} contest(s)"
+            )
 
     if status.warnings:
         lines.extend(("", "WARNINGS"))
@@ -720,6 +793,17 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
             }
             for step in status.slate_steps
         ],
+        "results_steps": [
+            {
+                "step": step.step,
+                "last_success_at": _optional_stamp(step.last_success_at),
+                "last_success_age_seconds": _age_seconds(step.last_success_at, status.as_of),
+                "last_failure_at": _optional_stamp(step.last_failure_at),
+                "last_failure_age_seconds": _age_seconds(step.last_failure_at, status.as_of),
+                "last_failure_text": step.last_failure_text,
+            }
+            for step in status.results_steps
+        ],
         "slate": None
         if status.slate is None
         else {
@@ -753,6 +837,19 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                     "decision_at": _optional_stamp(row.decision_at),
                 }
                 for row in status.slate.slates
+            ],
+        },
+        "labels": {
+            "weeks_with_labels": status.labels.weeks_with_labels,
+            "by_week_and_archetype": [
+                {
+                    "season": row.season,
+                    "week": row.week,
+                    "contest_archetype": row.contest_archetype,
+                    "label_rows": row.label_rows,
+                    "distinct_contests": row.distinct_contests,
+                }
+                for row in status.labels.by_week_and_archetype
             ],
         },
         "collection": {

@@ -325,6 +325,8 @@ def test_status_page_shows_every_section_of_the_status_payload(seeded_client: _C
         "extraction",
         "identity",
         "manual actions",
+        "labels",
+        "results steps",
         "slate",
         "slate steps",
         "snapshots",

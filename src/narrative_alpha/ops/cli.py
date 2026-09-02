@@ -1,5 +1,4 @@
-"""`na-ops`: one command per lane — the week's batch, the slate's decision — and one
-screen for the state of both."""
+"""`na-ops`: the weekly batch, slate decision, Tuesday results, and one status screen."""
 
 from __future__ import annotations
 
@@ -35,6 +34,12 @@ from narrative_alpha.ops.dashboard import (
     build_dashboard,
     serve_dashboard,
 )
+from narrative_alpha.ops.results import (
+    DEFAULT_RESULTS_DEPENDENCIES,
+    ResultsDependencies,
+    ResultsReport,
+    run_results,
+)
 from narrative_alpha.ops.schedule import (
     LaunchctlRunner,
     ScheduleError,
@@ -69,8 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="na-ops",
         description=(
-            "Operator console: run the weekly batch lane, run a slate end to end, "
-            "and read the state of both."
+            "Operator console: run the weekly batch, slate, and results lanes, "
+            "and read their state."
         ),
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_OPS_CONFIG_PATH)
@@ -156,9 +161,34 @@ def build_parser() -> argparse.ArgumentParser:
     slate.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
     slate.add_argument("--json", action="store_true", help="print the report as JSON")
 
+    results = commands.add_parser(
+        "results",
+        help="capture standings, ingest labels, verify replay, and write the baseline report",
+    )
+    results.add_argument("--season", type=_positive_int, required=True)
+    results.add_argument("--week", type=_positive_int, required=True)
+    results.add_argument("--site", choices=("dk", "fd"), required=True)
+    results.add_argument(
+        "standings_files",
+        metavar="STANDINGS_FILE",
+        nargs="+",
+        type=Path,
+        help="site-exported standings CSV(s), with the external contest id in each filename",
+    )
+    results.add_argument(
+        "--artifact-directory",
+        "--artifact-dir",
+        "--artifact-root",
+        dest="artifact_directory",
+        type=Path,
+        default=DEFAULT_ARTIFACT_DIRECTORY,
+    )
+    results.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+    results.add_argument("--json", action="store_true", help="print the report as JSON")
+
     dashboard = commands.add_parser(
         "dashboard",
-        help="serve the same screen, the queues, and the two lanes as one local web page",
+        help="serve the same screen, queues, and two interactive lanes as one local web page",
     )
     dashboard.add_argument("--port", type=_port, default=DEFAULT_PORT)
     dashboard.add_argument(
@@ -210,6 +240,7 @@ def main(
     *,
     dependencies: BatchDependencies = DEFAULT_DEPENDENCIES,
     slate_dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES,
+    results_dependencies: ResultsDependencies = DEFAULT_RESULTS_DEPENDENCIES,
     dashboard_dependencies: DashboardDependencies = DEFAULT_DASHBOARD_DEPENDENCIES,
 ) -> int:
     arguments = build_parser().parse_args(argv)
@@ -221,6 +252,8 @@ def main(
             return _batch(arguments, config, dependencies)
         if arguments.command == "slate":
             return _slate(arguments, config, slate_dependencies)
+        if arguments.command == "results":
+            return _results(arguments, config, results_dependencies)
         if arguments.command == "dashboard":
             return _dashboard(arguments, config, dashboard_dependencies)
         return _status(arguments, config)
@@ -295,6 +328,32 @@ def _slate(
         print(json.dumps(_slate_payload(report), indent=2, sort_keys=True))
     else:
         print(_render_slate(report), end="")
+    return EXIT_OK if report.ok else EXIT_STEP_FAILED
+
+
+def _results(
+    arguments: argparse.Namespace,
+    config: OpsConfig,
+    dependencies: ResultsDependencies,
+) -> int:
+    database = _database(arguments, config)
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        report = run_results(
+            connection,
+            config=config,
+            season=arguments.season,
+            week=arguments.week,
+            site=arguments.site,
+            standings_files=arguments.standings_files,
+            artifact_directory=arguments.artifact_directory,
+            report_directory=arguments.report_directory,
+            dependencies=dependencies,
+        )
+    if arguments.json:
+        print(json.dumps(_results_payload(report), indent=2, sort_keys=True))
+    else:
+        print(_render_results(report), end="")
     return EXIT_OK if report.ok else EXIT_STEP_FAILED
 
 
@@ -469,6 +528,49 @@ def _slate_payload(report: SlateReport) -> dict[str, object]:
         "upload_csv": None if report.upload_csv_path is None else str(report.upload_csv_path),
         "memo": None if report.memo_path is None else str(report.memo_path),
         "replay_command": report.replay_command,
+        "steps": [
+            {
+                "step": step.step,
+                "status": step.status,
+                "started_at": utc_timestamp(step.started_at),
+                "finished_at": utc_timestamp(step.finished_at),
+                "summary": step.summary,
+                "error_text": step.error_text,
+            }
+            for step in report.steps
+        ],
+    }
+
+
+def _render_results(report: ResultsReport) -> str:
+    lines = [
+        f"results {report.results_run_id}  {report.season} week {report.week:02d} {report.site}",
+        f"  evaluation as of {utc_timestamp(report.evaluation_as_of)}",
+    ]
+    for step in report.steps:
+        seconds = (step.finished_at - step.started_at).total_seconds()
+        lines.append(f"  {step.step:<18} {step.status:<9} {seconds:6.1f}s")
+        if step.error_text:
+            for line in step.error_text.splitlines():
+                lines.append(f"  {'':<18} {line}")
+    lines.append("")
+    lines.append(f"  baseline report  {_or_none(report.report_path)}")
+    lines.append("  " + ("all steps ok" if report.ok else "one or more steps FAILED"))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _results_payload(report: ResultsReport) -> dict[str, object]:
+    return {
+        "results_run_id": report.results_run_id,
+        "ok": report.ok,
+        "season": report.season,
+        "week": report.week,
+        "site": report.site,
+        "evaluation_as_of": utc_timestamp(report.evaluation_as_of),
+        "started_at": utc_timestamp(report.started_at),
+        "finished_at": utc_timestamp(report.finished_at),
+        "report": None if report.report_path is None else str(report.report_path),
         "steps": [
             {
                 "step": step.step,

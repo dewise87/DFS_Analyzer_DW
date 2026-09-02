@@ -955,7 +955,7 @@ def _runs_page(context: DashboardContext) -> str:
         "<th>run</th><th>detail</th></tr>"
     )
     note = (
-        f'<p class="note">The last {RECENT_RUN_LIMIT} recorded steps of both lanes, newest '
+        f'<p class="note">The last {RECENT_RUN_LIMIT} recorded steps of all lanes, newest '
         "first. The store keeps every row; this is the window, not the whole history.</p>"
     )
     return _page(
