@@ -109,9 +109,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7]
+    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert second == ()
-    assert len(records) == 7
+    assert len(records) == 8
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -224,7 +224,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6, 7]
+    assert [migration.version for migration in applied] == [6, 7, 8]
     assert counts == {
         "source_keys": 1,
         "sources": 1,

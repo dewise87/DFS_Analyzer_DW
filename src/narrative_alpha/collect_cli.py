@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from narrative_alpha.ingest.timestamps import utc_timestamp
@@ -17,7 +17,7 @@ from narrative_alpha.narrative import (
     SourceSeedPlan,
     apply_source_seed,
     check_catalog_feeds,
-    collect_source,
+    collect_enabled_sources,
     feed_check_payload,
     load_source_catalog,
     plan_source_seed,
@@ -163,87 +163,38 @@ def _dry_run_seed_plan(arguments: argparse.Namespace) -> SourceSeedPlan:
 def _run(arguments: argparse.Namespace) -> int:
     if arguments.policy_max_age_days < 0:
         raise ValueError("policy max age must not be negative")
-    observed_at = arguments.observed_at or datetime.now(UTC)
-    reports: list[dict[str, object]] = []
-    errors: list[dict[str, str]] = []
     with connect_database(arguments.database) as connection:
         apply_migrations(connection)
-        if arguments.source_id:
-            source_ids = list(dict.fromkeys(arguments.source_id))
-        else:
-            cutoff = utc_timestamp(observed_at)
-            source_ids = [
-                str(row[0])
-                for row in connection.execute(
-                    """
-                    SELECT source_id
-                    FROM (
-                        SELECT
-                            source_id,
-                            enabled,
-                            row_number() OVER (
-                                PARTITION BY source_id
-                                ORDER BY observed_at DESC, source_record_id DESC
-                            ) AS version_rank
-                        FROM sources
-                        WHERE rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
-                          AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
-                          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
-                    )
-                    WHERE version_rank = 1 AND enabled = 1
-                    ORDER BY source_id
-                    """,
-                    (cutoff, cutoff, cutoff),
-                )
-            ]
-        for source_id in source_ids:
-            try:
-                report = collect_source(
-                    connection,
-                    source_id,
-                    observed_at=observed_at,
-                    policy_max_age=timedelta(days=arguments.policy_max_age_days),
-                )
-            except CollectionError as error:
-                errors.append({"source_id": source_id, "message": str(error)})
-                continue
-            except sqlite3.OperationalError as error:
-                # A locked database is almost always a second collection running against the
-                # same file. Every remaining source would hit the same lock and burn its full
-                # busy timeout, so stop here and keep what already committed.
-                connection.rollback()
-                errors.append({"source_id": source_id, "message": _store_message(error)})
-                break
-            except sqlite3.Error as error:
-                connection.rollback()
-                errors.append({"source_id": source_id, "message": _store_message(error)})
-                continue
-            # Commit per source: a whole-run transaction would hold an exclusive write lock
-            # across every fetch, and one late failure would discard every source before it.
-            connection.commit()
-            reports.append(
-                {
-                    "attempts": report.attempts,
-                    "duplicate_items": report.duplicate_items,
-                    "fetched_items": report.fetched_items,
-                    "inserted_items": report.inserted_items,
-                    "observed_at": utc_timestamp(report.observed_at),
-                    "source_id": report.source_id,
-                }
-            )
-    print(json.dumps({"errors": errors, "reports": reports}, indent=2, sort_keys=True))
-    return 2 if errors else 0
-
-
-def _store_message(error: sqlite3.Error) -> str:
-    """Name the likely cause; "database is locked" alone tells an operator nothing."""
-
-    if isinstance(error, sqlite3.OperationalError) and "locked" in str(error).casefold():
-        return (
-            "database is locked — another na-collect run is probably still in progress "
-            "against the same database; sources already collected were kept"
+        run = collect_enabled_sources(
+            connection,
+            observed_at=arguments.observed_at,
+            source_ids=arguments.source_id,
+            policy_max_age=timedelta(days=arguments.policy_max_age_days),
         )
-    return f"store write failed: {error}"
+    print(
+        json.dumps(
+            {
+                "errors": [
+                    {"source_id": error.source_id, "message": error.message}
+                    for error in run.errors
+                ],
+                "reports": [
+                    {
+                        "attempts": report.attempts,
+                        "duplicate_items": report.duplicate_items,
+                        "fetched_items": report.fetched_items,
+                        "inserted_items": report.inserted_items,
+                        "observed_at": utc_timestamp(report.observed_at),
+                        "source_id": report.source_id,
+                    }
+                    for report in run.reports
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 2 if run.errors else 0
 
 
 def _purge(arguments: argparse.Namespace) -> int:

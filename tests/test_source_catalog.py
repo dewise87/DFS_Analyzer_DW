@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 import narrative_alpha.collect_cli as collect_cli
+import narrative_alpha.narrative.collectors as collectors
 from narrative_alpha.collect_cli import main
 from narrative_alpha.narrative import (
     CatalogError,
@@ -216,7 +217,7 @@ def test_a_locked_database_keeps_already_collected_sources_and_explains_itself(
             return CollectionReport(source_id, datetime(2026, 9, 1, tzinfo=UTC), 3, 3, 0, 1)
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(collect_cli, "collect_source", fake_collect)
+    monkeypatch.setattr(collectors, "collect_source", fake_collect)
     exit_code = collect_cli.main(["run", "--database", str(database)])
 
     assert exit_code == 2
@@ -229,8 +230,8 @@ def test_a_locked_database_keeps_already_collected_sources_and_explains_itself(
 
 
 def test_locked_database_message_names_the_likely_cause() -> None:
-    message = collect_cli._store_message(sqlite3.OperationalError("database is locked"))
-    assert "another na-collect run" in message
+    message = collectors.store_error_message(sqlite3.OperationalError("database is locked"))
+    assert "another collection run" in message
     assert "were kept" in message
 
 
@@ -330,7 +331,7 @@ def test_run_isolates_one_source_failure_and_returns_nonzero(
             raise CollectionError("HTTP 404")
         return CollectionReport(source_id, SEEDED_AT, 2, 2, 0, 1)
 
-    monkeypatch.setattr(collect_cli, "collect_source", fake_collect)
+    monkeypatch.setattr(collectors, "collect_source", fake_collect)
     exit_code = main(
         [
             "run",
@@ -391,7 +392,7 @@ def test_run_selects_only_latest_source_version_once(
         calls.append(source_id)
         return CollectionReport(source_id, SEEDED_AT, 1, 1, 0, 1)
 
-    monkeypatch.setattr(collect_cli, "collect_source", fake_collect)
+    monkeypatch.setattr(collectors, "collect_source", fake_collect)
     exit_code = main(
         [
             "run",

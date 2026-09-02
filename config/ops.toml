@@ -1,0 +1,30 @@
+# Operator console settings for `na-ops` (Slice 18).
+#
+# The manual capture times are NOT here: design-doc §9.0 fixes them at Sat 6:00 p.m.,
+# Sun 9:00 a.m., and Sun 11:00 a.m. Eastern, and `na-ops schedule` converts them to the
+# local timezone below. Change this file, then rerun `na-ops schedule install`.
+
+# IANA zone for schedule wall-clock times and for calendar-month budget boundaries.
+timezone = "America/New_York"
+
+# Season used by the report-only nflverse refresh check.
+season = 2026
+
+# Stage 1 spend ceiling per calendar month. The batch lane refuses to submit when
+# month-to-date spend plus the worst-case estimate for the pending batch exceeds it.
+monthly_llm_budget_usd = "50.00"
+
+# macOS Keychain generic-password service holding the Anthropic API key. Create it once:
+#   security add-generic-password -s narrative-alpha-anthropic -a "$USER" -w
+keychain_service = "narrative-alpha-anthropic"
+
+[batch]
+# Design-doc §5.3 batch lane: Wed–Fri.
+weekdays = ["wed", "thu", "fri"]
+local_time = "09:30"
+
+[paths]
+database = "data/db/narrative_alpha.sqlite3"
+snapshot_root = "data/snapshots"
+nflverse_archive = "data/archive/nflverse"
+log_directory = "data/logs"

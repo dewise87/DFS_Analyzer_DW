@@ -100,6 +100,42 @@ class PurgeReport:
     source_items_purged: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class SourceCollectionError:
+    """One source that failed; the rest of the run is unaffected."""
+
+    source_id: str
+    message: str
+
+
+@dataclass(frozen=True)
+class CollectionRunReport:
+    """Outcome of one pass over the enabled sources."""
+
+    observed_at: datetime
+    reports: tuple[CollectionReport, ...]
+    errors: tuple[SourceCollectionError, ...]
+    attempted_source_ids: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    @property
+    def failed_entirely(self) -> bool:
+        """True when nothing at all was collected, so downstream stages have no new input."""
+
+        return not self.reports
+
+    @property
+    def inserted_items(self) -> int:
+        return sum(report.inserted_items for report in self.reports)
+
+    @property
+    def fetched_items(self) -> int:
+        return sum(report.fetched_items for report in self.reports)
+
+
 class RssAtomCollector:
     """Deterministic RSS 2.x and Atom parser with no interpretation step."""
 
@@ -255,6 +291,102 @@ def collect_source(
         duplicate_items=len(batch.items) - inserted,
         attempts=batch.attempts,
     )
+
+
+def enabled_source_ids(connection: sqlite3.Connection, *, as_of: datetime) -> tuple[str, ...]:
+    """Return the sources whose latest version at ``as_of`` is enabled."""
+
+    cutoff = utc_timestamp(as_of)
+    rows = connection.execute(
+        """
+        SELECT source_id
+        FROM (
+            SELECT
+                source_id,
+                enabled,
+                row_number() OVER (
+                    PARTITION BY source_id
+                    ORDER BY observed_at DESC, source_record_id DESC
+                ) AS version_rank
+            FROM sources
+            WHERE rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
+              AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
+              AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
+        )
+        WHERE version_rank = 1 AND enabled = 1
+        ORDER BY source_id
+        """,
+        (cutoff, cutoff, cutoff),
+    )
+    return tuple(str(row[0]) for row in rows)
+
+
+def collect_enabled_sources(
+    connection: sqlite3.Connection,
+    *,
+    observed_at: datetime | None = None,
+    source_ids: Sequence[str] | None = None,
+    policy_max_age: timedelta = DEFAULT_POLICY_MAX_AGE,
+) -> CollectionRunReport:
+    """Collect every enabled source, isolating each failure to its own source.
+
+    This commits per source. A whole-run transaction would hold an exclusive write lock
+    across every fetch, and one late failure would discard every source before it.
+    """
+
+    if policy_max_age < timedelta(0):
+        raise ValueError("policy max age must not be negative")
+    capture_time = ensure_utc(observed_at or datetime.now(UTC))
+    selected = (
+        tuple(dict.fromkeys(source_ids))
+        if source_ids is not None
+        else enabled_source_ids(connection, as_of=capture_time)
+    )
+
+    reports: list[CollectionReport] = []
+    errors: list[SourceCollectionError] = []
+    for source_id in selected:
+        try:
+            report = collect_source(
+                connection,
+                source_id,
+                observed_at=capture_time,
+                policy_max_age=policy_max_age,
+            )
+        except CollectionError as error:
+            errors.append(SourceCollectionError(source_id, str(error)))
+            continue
+        except sqlite3.OperationalError as error:
+            # A locked database is almost always a second collection running against the
+            # same file. Every remaining source would hit the same lock and burn its full
+            # busy timeout, so stop here and keep what already committed.
+            connection.rollback()
+            errors.append(SourceCollectionError(source_id, store_error_message(error)))
+            break
+        except sqlite3.Error as error:
+            connection.rollback()
+            errors.append(SourceCollectionError(source_id, store_error_message(error)))
+            continue
+        connection.commit()
+        reports.append(report)
+
+    return CollectionRunReport(
+        observed_at=capture_time,
+        reports=tuple(reports),
+        errors=tuple(errors),
+        attempted_source_ids=selected,
+    )
+
+
+def store_error_message(error: sqlite3.Error) -> str:
+    """Name the likely cause; "database is locked" alone tells an operator nothing."""
+
+    if isinstance(error, sqlite3.OperationalError) and "locked" in str(error).casefold():
+        return (
+            "database is locked — another collection run is probably still in progress "
+            "against the same database; sources already collected were kept"
+        )
+    return f"store write failed: {error}"
 
 
 def purge_expired_content(

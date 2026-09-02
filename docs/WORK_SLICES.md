@@ -985,6 +985,31 @@ existing library functions plus a text report.
 > `schedule uninstall` removes only files it wrote. No network in tests. Run
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Delivered 2026-09-02.** `na-ops batch` runs collect -> purge -> Stage 1 -> report-only
+nflverse refresh with every step isolated and recorded in append-only `ops_runs` (migration
+0008, canonical UTC-Z enforced at insert, no updates or deletes). Purge always runs;
+extraction is skipped with a stated reason only when collection failed entirely, and a
+partial feed failure still extracts. The extraction window advances only on a successful
+run and is overridable with `--window-start`. Before any submission the lane prices the
+batch and refuses the whole thing if month-to-date spend plus the worst-case estimate
+exceeds `monthly_llm_budget_usd` in the new `config/ops.toml`, recording the refusal as a
+failed step with the numbers. `na-ops status` renders the one screen — per-step
+success/failure ages, dead feeds, 7-day collection, Stage 1 backlog priced from the real
+plan, review flags, in-flight attempts, pending receipts, unresolved identities, an empty
+roster as a sentence rather than a zero, this week's snapshot coverage, and spend against
+budget — in under a second against the 3,852-item store (backlog priced at $40.46
+worst-case, matching the Slice 17 review). `na-ops schedule install|show|uninstall` manages
+launchd agents: the batch lane on the configured days, plus notification-only reminders at
+the §9.0 Eastern capture times converted to local against a mid-season anchor. Wrappers
+read the API key from the login Keychain at run time; no plist mentions `ANTHROPIC`, and
+uninstall removes only files carrying our marker and matching `Label`/`ProgramArguments`.
+The enabled-source loop moved out of `collect_cli` into
+`collectors.collect_enabled_sources`, so `na-collect run` and `na-ops batch` share one
+implementation. README "Weekly operations" is now install-once, `na-ops status`, and what
+stays manual. Suite 435 -> 458.
+
+---
+
 ### Slice 19 — First live Stage 1 run + extraction eval set
 
 **Goal:** run Stage 1 for real over the collected backlog (3,852 items as of 2026-09-02;

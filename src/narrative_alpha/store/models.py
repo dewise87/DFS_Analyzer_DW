@@ -1349,3 +1349,38 @@ class DecisionSnapshotRow(StoreRow):
         values = super().db_values()
         values["manifest_hashes_json"] = canonical_manifest_hashes(self.manifest_hashes_json)
         return values
+
+
+class OpsRunRow(StoreRow):
+    """One recorded ``na-ops batch`` step attempt; append-only operational history."""
+
+    ops_run_id: int = Field(gt=0)
+    batch_run_id: str = Field(min_length=1)
+    step: Literal["collect", "purge", "extract", "nflverse_refresh"]
+    status: Literal["succeeded", "failed", "skipped"]
+    started_at: datetime
+    finished_at: datetime
+    summary_json: dict[str, object]
+    code_version: str = Field(min_length=1)
+    error_text: str | None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def normalize_timestamps(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("summary_json", mode="before")
+    @classmethod
+    def decode_summary(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must not precede started_at")
+        if self.status == "succeeded":
+            if self.error_text is not None:
+                raise ValueError("a succeeded ops run carries no error text")
+        elif not (self.error_text or "").strip():
+            raise ValueError(f"a {self.status} ops run must explain itself in error_text")
+        return self

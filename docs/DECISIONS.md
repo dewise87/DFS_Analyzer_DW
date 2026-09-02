@@ -2,6 +2,62 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slice 18 operator console
+
+- **`na-ops` is the UI for season one, and the CLI stays the source of truth.** The batch
+  lane calls the existing library functions directly — never a subprocess, never a second
+  copy of their logic. The one piece that had to move is the enabled-source enumeration and
+  per-source isolation loop, which lived inside `collect_cli._run`; it is now
+  `collectors.collect_enabled_sources`, and `na-collect run` is a thin renderer over it.
+  The queued dashboard and the Phase 3 MCP tools wrap the same calls, so they can only ever
+  render functions that already work from the terminal.
+- **Every step is isolated and every outcome is recorded, including the ones that did not
+  run.** `ops_runs` (migration 0008) is append-only with the same canonical UTC-Z insert
+  trigger the narrative tables use, and each step commits its own row before the next step
+  starts, so a later rollback cannot take an earlier step's history with it. Purge always
+  runs — retention is a legal obligation, not a consequence of a good fetch. Extraction is
+  skipped, with a stated reason, only when collection failed *entirely*; a partial feed
+  failure still extracts. A `skipped` step is not a failure for the exit code but is shown
+  as the latest non-success on the status screen, because an operator who cannot see the
+  skip will assume the window was covered. A still-processing provider batch is recorded as
+  a failed extract step rather than earning a fourth status word: `na-extract` already has
+  exit 3 for that, but at the lane level the fact that matters is identical to a failure —
+  the window is not covered, so the watermark must not advance and the screen must not
+  imply it did. The recorded text says the next run resumes it without re-billing.
+- **The extraction watermark advances only on success.** The next window starts at the
+  `window_end` of the last *succeeded* extract step; a failed or budget-refused run leaves
+  the watermark where it was, so a bad week is retried rather than silently stepped over.
+  With no recorded run the window opens at the earliest retained item, not at "now".
+- **The budget guard is all-or-nothing on purpose.** Submitting "what fits" under the
+  monthly ceiling would make the covered window a function of the budget, which no later
+  replay could reconstruct. Over budget, the lane refuses the whole batch, records a failed
+  step, and prints month-to-date spend, the worst-case estimate, and the ceiling. The
+  estimate is the plan's worst case (input plus the full output ceiling for every item):
+  measured against the real store today that is $40.46 for the 3,852-item backlog, which is
+  the number the default $50 budget was chosen against. Month boundaries are calendar
+  months in the operator's configured zone, and spend is keyed to `ingested_at` — when the
+  attempt was billed — not `observed_at`, which is when the news broke.
+- **The API key is never written anywhere the repository or launchd can keep it.** The
+  batch wrapper reads it from the login Keychain at run time; no plist contains the string
+  `ANTHROPIC` at all, and the reminder jobs neither touch a credential nor open a database.
+  Wrappers live under gitignored `data/ops/bin/` and carry a marker line; `schedule
+  uninstall` removes a plist only when it parses as ours (matching `Label` and
+  `ProgramArguments` pointing at our wrapper path) and a wrapper only when the marker is
+  present — anything hand-edited or foreign is reported and left alone.
+- **The §9.0 capture times are constants, not configuration.** Sat 6:00 p.m., Sun 9:00
+  a.m., Sun 11:00 a.m. Eastern are converted to the operator's local zone against a
+  mid-season anchor date, so a DST-transition install cannot shift them by an hour. Only
+  the timezone, the batch days, and the batch time are configurable. launchd, unlike cron,
+  runs a job missed while the Mac was asleep at the next wake — that is why a sleeping
+  laptop delays the Wednesday batch instead of skipping the week, and it is stated in the
+  README rather than left as folklore.
+- **Status refuses to report a healthy-looking zero.** An empty `players` table renders as
+  "NOT SEEDED", not as `0`. The extraction backlog is the real `plan_extraction` result —
+  the same policy, retention, and injection gates the lane applies — rather than a row
+  count that would flatter the operator; if the plan cannot be built, the screen says the
+  backlog is unknown and why. The whole screen renders in under a second against the
+  3,852-item store.
+
 ## 2026-09-02 — Slice 17 review outcomes
 
 - **Canonical UTC-Z is enforced by the database, not by a registered SQL function.** The

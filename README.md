@@ -32,6 +32,7 @@ src/narrative_alpha/
   narrative/        L4: evidence extraction, episode clustering, signal registry
   portfolio/        L5: contest selection, simulation, optimizer adapter, late swap
   interface/        L6: MCP tools, slate memo, dashboard, alerts
+  ops/              L6: operator console (na-ops): batch lane, status, launchd
 data/               Local data (gitignored except structure docs)
 tests/              pytest; property tests for roster rules; golden-file CSV tests
 ```
@@ -48,12 +49,87 @@ uv run pytest
 
 ## Weekly operations
 
-See Appendix D of the design doc for the in-season checklist. Phase −1 rule: **every week the snapshot capture doesn't run destroys irreplaceable training data.**
+One command runs the week and one screen reports it. Everything below the two commands is
+what a person still has to do by hand.
 
-### Narrative feed collection
+**Install once.** Put the Anthropic API key in the login Keychain (the scheduled jobs read
+it at run time; it is never written into a plist, a log, or this repository), then install
+the launchd user agents:
 
-Review the tier terms in `config/narrative_sources.toml`, then explicitly attest that review
-when seeding. The timestamp is never inferred from the file or current time:
+```bash
+security add-generic-password -s narrative-alpha-anthropic -a "$USER" -w
+```
+
+```bash
+uv run na-ops schedule install
+```
+
+That schedules the batch lane on the days and local time in `config/ops.toml` (default
+Wed–Fri 09:30, per design-doc §5.3) plus three notification-only reminders at the §9.0
+manual capture times — Sat 6:00 p.m., Sun 9:00 a.m., Sun 11:00 a.m. Eastern, converted to
+your local zone. Each reminder also appends the exact `na-snapshot` commands to
+`data/logs/<job>.log`. `na-ops schedule show` lists what is installed; `na-ops schedule
+uninstall` removes only the files `install` wrote and leaves anything else alone. **Unlike
+cron, launchd runs a job missed while the Mac was asleep at the next wake**, so a closed
+laptop delays the Wednesday batch rather than skipping the week.
+
+**Read the screen any time.**
+
+```bash
+uv run na-ops status
+```
+
+One page: per-step last success and last failure with age, dead feeds from the last
+collection, items collected in the last 7 days, the Stage 1 backlog and what it would cost
+to clear, review flags, in-flight attempts, pending accepted-batch receipts, the crosswalk
+unresolved queue, whether a roster is seeded at all, this week's snapshot coverage, and
+Stage 1 spend month-to-date against `monthly_llm_budget_usd`. `--json` prints the same
+data. It answers "did this week run, and what do I need to do by hand" without any other
+command.
+
+**Run the lane by hand** when you want it now rather than on Wednesday:
+
+```bash
+uv run na-ops batch
+```
+
+It collects enabled feeds, purges expired raw text, runs Stage 1 over the window from the
+last successful extraction to now (`--window-start` overrides it), and checks the nflverse
+refresh in report-only mode. Each step is isolated: a failed step is recorded and the next
+safe step still runs — purge always runs, and extraction is skipped with a stated reason
+only when collection failed entirely. Every step writes an `ops_runs` row, so `status` can
+show history, and nothing is retried silently. It exits nonzero if any step failed.
+
+Before submitting anything to Stage 1 the lane prices the batch and compares month-to-date
+spend plus that estimate against `monthly_llm_budget_usd`. Over budget, it refuses the
+whole batch, records the refusal as a failed step, and prints the numbers. There is no
+partial "submit what fits": that would make the covered window a function of the budget,
+which no later replay could reconstruct.
+
+### What is still manual
+
+- **Saturday 6:00 p.m. ET** — download DK/FD salaries, purchased projections, and baseline
+  ownership; capture each with `na-snapshot capture`, then `na-snapshot fetch` odds and
+  weather and `na-snapshot verify` the week.
+- **Sunday 9:00 a.m. and 11:00 a.m. ET** — re-capture projections and ownership and
+  refresh odds and weather. The 11:00 a.m. capture is irreplaceable: after lock the
+  pre-lock state is gone.
+- **Sunday post-slate** — export contest standings for every probe contest.
+- **Whenever `status` says so** — clear the crosswalk unresolved queue
+  (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
+  reviewed nflverse pin when the refresh check reports a changed roster.
+
+Phase −1 rule: **every week the snapshot capture doesn't run destroys irreplaceable
+training data.** See Appendix D of the design doc for the full checklist.
+
+## Narrative feed collection
+
+`na-ops batch` runs collection and purge on the weekly cadence. These commands are the
+same library calls for one-off use: seeding a reviewed catalog, checking feed health, or
+re-running one source after a failure.
+
+Review the tier terms in `config/narrative_sources.toml`, then explicitly attest that
+review when seeding. The timestamp is never inferred from the file or current time:
 
 ```bash
 uv run na-collect seed --catalog config/narrative_sources.toml \
@@ -63,27 +139,26 @@ uv run na-collect seed --catalog config/narrative_sources.toml \
 uv run na-collect seed --catalog config/narrative_sources.toml --check-feeds
 ```
 
-Run `uv run na-collect run` on the Wed–Fri batch cadence. It attempts every enabled source,
-reports failures by source, and exits nonzero if any feed failed. Run
-`uv run na-collect purge` on the same schedule. Purge uses the earliest deadline implied by
-the capture policy, the current policy when one exists, and every exact policy version cited by
-an extraction attempt. A later, longer policy cannot extend earlier authorization; an item whose
-capture policy cannot be reconstructed receives zero retention.
+`na-collect run` attempts every enabled source, reports failures by source, commits per
+source, and exits nonzero if any feed failed. `na-collect purge` uses the earliest deadline
+implied by the capture policy, the current policy when one exists, and every exact policy
+version cited by an extraction attempt. A later, longer policy cannot extend earlier
+authorization; an item whose capture policy cannot be reconstructed receives zero retention.
 
-### Structured claim extraction
+## Structured claim extraction
 
-Run Stage 1 inside the raw-text retention window. Always dry-run first: it renders the plan,
+Stage 1 must run inside the raw-text retention window; `na-ops batch` does that on the
+cadence and enforces the monthly budget. Run `na-extract` directly to dry-run a window, to
+bound a smoke test, or to work a review queue. Always dry-run first: it renders the plan,
 lists ineligible items with reasons, and prices the batch without building an API client or
-writing to the database (`--show-prompts` adds every rendered prompt; `--max-items N` bounds a
-smoke test):
+writing to the database (`--show-prompts` adds every rendered prompt; `--max-items N`
+bounds a smoke test):
 
 ```bash
 uv run na-extract --database data/db/narrative_alpha.sqlite3 \
   --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --dry-run
 ANTHROPIC_API_KEY=... uv run na-extract --database data/db/narrative_alpha.sqlite3 \
   --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --max-items 20
-ANTHROPIC_API_KEY=... uv run na-extract --database data/db/narrative_alpha.sqlite3 \
-  --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z
 ```
 
 Exit codes: `0` done (review flags are an expected outcome, not a failure); `3` the provider
@@ -101,14 +176,15 @@ The live command uses Anthropic Message Batches with strict structured output an
 It checks the current source policy before sending text, rejects visible prompt-injection markers,
 verifies every evidence span character-for-character, and resolves model-returned names only through
 the deterministic player crosswalk. Batch pricing is versioned in `config/model_pricing.toml`; actual
-provider token usage and integer USD-nanocost are stored on the extraction attempt. Reservations are
-committed before the single-shot provider POST, the accepted trace is fsynced to a sibling
+provider token usage and integer USD-nanocost are stored on the extraction attempt, and
+`na-ops status` sums them for the month. Reservations are committed before the single-shot
+provider POST, the accepted trace is fsynced to a sibling
 `<database>.stage1-receipts/` directory before the SQLite commit, and startup reconciles any
 surviving receipt so a crash between acceptance and commit never re-bills. Policy, retention,
 deletion, and source bytes are checked at submission and again when each result settles.
 `--run-at` is dry-run-only so a live policy or retention check cannot be backdated. A process
 killed mid-run leaves lease rows that block a second run for at most the poll timeout plus a
-few minutes; `na-extract review` shows them.
+few minutes; `na-extract review` and `na-ops status` show them.
 
 ## Salary CSV parsing
 
