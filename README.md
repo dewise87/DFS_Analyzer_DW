@@ -32,7 +32,7 @@ src/narrative_alpha/
   narrative/        L4: evidence extraction, episode clustering, signal registry
   portfolio/        L5: contest selection, simulation, optimizer adapter, late swap
   interface/        L6: MCP tools, slate memo, dashboard, alerts
-  ops/              L6: operator console (na-ops): batch and slate lanes, status, launchd
+  ops/              L6: operator console (na-ops): batch and slate lanes, status, dashboard, launchd
 data/               Local data (gitignored except structure docs)
 tests/              pytest; property tests for roster rules; golden-file CSV tests
 ```
@@ -173,6 +173,37 @@ ownership capture is a recorded failure naming its vendor, and the build step th
 for want of a projection. That is the intended behaviour — a guessed vendor schema is worse
 than a stated gap — but it means the lane cannot produce a lineup from real vendor files
 yet.
+
+**Look at the tool without a terminal.**
+
+```bash
+uv run na-ops dashboard
+```
+
+One local web page at `http://127.0.0.1:8765/`, on the standard library alone — no
+framework, no build step, no JavaScript, no external asset. Four read pages: the whole
+`na-ops status` screen, the review queues (pending flags, in-flight attempts, held leases,
+and the unresolved identities with their candidate players), the last twenty `ops_runs`
+rows across both lanes newest first, and the latest slate memo. Each one is rendered from
+the same function the CLI calls, so the page cannot drift from the terminal — the status
+page renders the `status_payload` dict itself, which is why a section added to `na-ops
+status` appears here the day it lands.
+
+It also does three things. "Run batch now" and "Run slate now" start the lane in a
+background thread through the same library call `na-ops batch` and `na-ops slate` make,
+recording `ops_runs` exactly as they do; the page refreshes itself while a lane runs, so
+the steps appear as they commit. A second start of a lane already running is refused with
+the time the first one began, never queued. And each unresolved identity offers its
+candidate players, a box for a player id that was not offered, and an ignore button, all
+calling `PlayerCrosswalk.resolve`/`ignore` — the same write `na-crosswalk resolve` makes,
+recorded as a manual override. Every write is a POST with its confirmation box ticked, so
+no stray click or stale tab can run a lane or decide an identity.
+
+It binds `127.0.0.1` and refuses anything else (`--host` accepts only a loopback address),
+because the page shows the whole store and offers those writes with no password — it has
+none to check. Reach it from another machine through an SSH tunnel, never by binding
+outward. Open it in a browser tab of its own: a form submitted from inside a sandboxed
+frame carries no usable origin, and it is refused rather than trusted.
 
 ### What is still manual
 

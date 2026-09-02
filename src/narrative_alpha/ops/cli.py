@@ -26,6 +26,15 @@ from narrative_alpha.ops.config import (
     OpsConfigError,
     load_ops_config,
 )
+from narrative_alpha.ops.dashboard import (
+    DEFAULT_DASHBOARD_DEPENDENCIES,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DashboardDependencies,
+    DashboardError,
+    build_dashboard,
+    serve_dashboard,
+)
 from narrative_alpha.ops.schedule import (
     LaunchctlRunner,
     ScheduleError,
@@ -147,6 +156,26 @@ def build_parser() -> argparse.ArgumentParser:
     slate.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
     slate.add_argument("--json", action="store_true", help="print the report as JSON")
 
+    dashboard = commands.add_parser(
+        "dashboard",
+        help="serve the same screen, the queues, and the two lanes as one local web page",
+    )
+    dashboard.add_argument("--port", type=_port, default=DEFAULT_PORT)
+    dashboard.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help="loopback address to bind (default: %(default)s); nothing else is accepted",
+    )
+    dashboard.add_argument(
+        "--artifact-directory",
+        "--artifact-dir",
+        "--artifact-root",
+        dest="artifact_directory",
+        type=Path,
+        default=DEFAULT_ARTIFACT_DIRECTORY,
+    )
+    dashboard.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+
     status = commands.add_parser("status", help="one screen: what ran, what failed, what is due")
     status.add_argument("--json", action="store_true")
 
@@ -181,6 +210,7 @@ def main(
     *,
     dependencies: BatchDependencies = DEFAULT_DEPENDENCIES,
     slate_dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES,
+    dashboard_dependencies: DashboardDependencies = DEFAULT_DASHBOARD_DEPENDENCIES,
 ) -> int:
     arguments = build_parser().parse_args(argv)
     try:
@@ -191,8 +221,11 @@ def main(
             return _batch(arguments, config, dependencies)
         if arguments.command == "slate":
             return _slate(arguments, config, slate_dependencies)
+        if arguments.command == "dashboard":
+            return _dashboard(arguments, config, dashboard_dependencies)
         return _status(arguments, config)
     except (
+        DashboardError,
         MigrationError,
         OpsConfigError,
         OSError,
@@ -263,6 +296,30 @@ def _slate(
     else:
         print(_render_slate(report), end="")
     return EXIT_OK if report.ok else EXIT_STEP_FAILED
+
+
+def _dashboard(
+    arguments: argparse.Namespace,
+    config: OpsConfig,
+    dependencies: DashboardDependencies,
+) -> int:
+    server = build_dashboard(
+        config=config,
+        database=_database(arguments, config),
+        host=arguments.host,
+        port=arguments.port,
+        dependencies=dependencies,
+        artifact_directory=arguments.artifact_directory,
+        report_directory=arguments.report_directory,
+    )
+    print(
+        f"na-ops dashboard on {server.url}\n"
+        "  It binds loopback only: nothing off this machine can reach it, and it asks for "
+        "no password because it never has one to check.\n"
+        "  Stop it with Ctrl-C."
+    )
+    serve_dashboard(server)
+    return EXIT_OK
 
 
 def _status(arguments: argparse.Namespace, config: OpsConfig) -> int:
@@ -433,6 +490,18 @@ def _timestamp(value: str) -> datetime:
         raise argparse.ArgumentTypeError("must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed
+
+
+def _port(value: str) -> int:
+    """A TCP port. 0 is allowed and means "any free port", which the banner then names."""
+
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if not 0 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be between 0 and 65535")
     return parsed
 
 

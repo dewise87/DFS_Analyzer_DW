@@ -244,6 +244,31 @@ def last_run_any_status(connection: sqlite3.Connection, *, step: OpsStep) -> Rec
     return None if row is None else _recorded(row)
 
 
+def recent_runs(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 20,
+) -> tuple[RecordedRun, ...]:
+    """Return the most recent recorded steps across both lanes, newest first.
+
+    The history a reader wants is "what happened last", which is neither lane's own
+    ordering: a slate step and a batch step interleave in real time and must interleave
+    here too.
+    """
+
+    if limit <= 0:
+        raise ValueError(f"limit must be positive, not {limit}")
+    rows = connection.execute(
+        """
+        SELECT * FROM ops_runs
+        ORDER BY started_at DESC, ops_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return tuple(_recorded(row) for row in rows)
+
+
 def _recorded(row: sqlite3.Row) -> RecordedRun:
     stored = OpsRunRow.from_db(row)
     return RecordedRun(

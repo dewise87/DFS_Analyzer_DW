@@ -14,6 +14,18 @@ from narrative_alpha.ops.config import (
     OpsConfigError,
     load_ops_config,
 )
+from narrative_alpha.ops.dashboard import (
+    DEFAULT_DASHBOARD_DEPENDENCIES,
+    DashboardContext,
+    DashboardDependencies,
+    DashboardError,
+    DashboardServer,
+    LaneBusyError,
+    LaneRunner,
+    LaneState,
+    build_dashboard,
+    serve_dashboard,
+)
 from narrative_alpha.ops.runs import (
     BATCH_STEPS,
     OPS_STEPS,
@@ -26,6 +38,7 @@ from narrative_alpha.ops.runs import (
     StepRecorder,
     last_run,
     last_run_any_status,
+    recent_runs,
     record_ops_run,
 )
 from narrative_alpha.ops.schedule import (
@@ -63,6 +76,7 @@ from narrative_alpha.ops.status import (
 __all__ = [
     "BATCH_STEPS",
     "BATCH_STEP_ERRORS",
+    "DEFAULT_DASHBOARD_DEPENDENCIES",
     "DEFAULT_DEPENDENCIES",
     "DEFAULT_OPS_CONFIG_PATH",
     "DEFAULT_SLATE_DEPENDENCIES",
@@ -72,7 +86,14 @@ __all__ = [
     "SLATE_STEP_ERRORS",
     "BatchDependencies",
     "BatchReport",
+    "DashboardContext",
+    "DashboardDependencies",
+    "DashboardError",
+    "DashboardServer",
     "JobState",
+    "LaneBusyError",
+    "LaneRunner",
+    "LaneState",
     "OpsConfig",
     "OpsConfigError",
     "OpsStatus",
@@ -90,6 +111,7 @@ __all__ = [
     "StepFailure",
     "StepOutcome",
     "StepRecorder",
+    "build_dashboard",
     "build_jobs",
     "collect_ops_status",
     "default_na_ops_executable",
@@ -102,11 +124,13 @@ __all__ = [
     "load_ops_config",
     "month_start_utc",
     "month_to_date_spend_nanos",
+    "recent_runs",
     "record_ops_run",
     "render_status",
     "replay_command",
     "run_batch",
     "run_slate",
+    "serve_dashboard",
     "status_payload",
     "uninstall_schedule",
 ]

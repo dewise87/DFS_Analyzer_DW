@@ -1507,6 +1507,42 @@ that run the lanes. No framework, no build step, no logic the CLI lacks.
 > resolve from the page persists exactly what the CLI would; the server refuses non-loopback
 > binds. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Implementation status (2026-09-02):** `src/narrative_alpha/ops/dashboard.py` and
+`na-ops dashboard [--port 8765] [--host 127.0.0.1]` serve four read pages and three writes
+on `http.server` and one inline stylesheet — no JavaScript, no framework, no external
+asset. The status page renders the `status_payload` dict *itself* rather than a
+hand-written selection of it, so a section added to `na-ops status` appears on the page the
+day it lands and none can be silently dropped; a test asserts every current section by
+name. The queues page renders `list_pending_review_flags`, `list_inflight_extractions`,
+`list_execution_leases`, and `PlayerCrosswalk.list_unresolved`; the runs page a new
+`recent_runs` in `runs.py` (both lanes interleaved, newest first, capped at 20); the memo
+page reads the path recorded by the last successful `slate_memo` step, and states the gap
+in words when that summary carries no path or the file has since gone.
+
+The two actions run the lane in a background thread through the same library call the CLI
+makes, each on its own connection, and `LaneRunner` refuses a second start of a lane
+already running with the time the first began — the other lane is unaffected. A lane that
+raises past its own step isolation is recorded and displayed rather than left to hang the
+page on "running" for ever. Resolving from the page calls `PlayerCrosswalk.resolve` /
+`ignore`; a smoke test against a live server confirms the row it writes is the CLI's —
+`manual`, confidence 1.0, `manual_override`, note carried, alias written, and
+`na-crosswalk resolve` then reports an empty queue.
+
+Fail-closed choices beyond the prompt, all cheap: every write is a POST whose confirmation
+box must be ticked; a form posted from another origin is refused, and an *opaque* origin
+(`Origin: null`, which a sandboxed frame sends — found by clicking the button in a real
+browser, not by a test) is refused with the remedy rather than trusted; the request body is
+size-capped; the response carries a CSP that forbids the external assets the page does not
+use. `--host` accepts only a loopback address and says why on refusal; `::1` binds the
+right socket family rather than promising IPv6 and failing. Migrations run once at startup,
+not per page view, so a read never waits on the write lock a running lane holds.
+
+Open items: (1) the page reports lane outcomes only for lanes started *from it* — a lane
+started in a terminal shows on the run history page but not in the LANES block, which the
+page says in words rather than implying it knows about every run. (2) There is no
+authentication, by design: the loopback bind is the whole boundary, so anything with a
+shell on this Mac can drive it. Suite 542 → 589.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** stays open until real exports exist under
