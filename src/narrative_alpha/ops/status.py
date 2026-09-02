@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
 from narrative_alpha.ingest.slates import SlateSummary, list_slates
@@ -26,7 +25,7 @@ from narrative_alpha.narrative import (
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import DEFAULT_PRICING_PATH
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
-from narrative_alpha.ops.results import label_summary
+from narrative_alpha.ops.results import label_cohorts, weeks_with_labels
 from narrative_alpha.ops.runs import (
     BATCH_STEPS,
     RESULTS_STEPS,
@@ -575,20 +574,19 @@ def _label_status(connection: sqlite3.Connection) -> LabelsStatus:
     what keeps the screen and the recorded step from ever disagreeing about them.
     """
 
-    summary = label_summary(connection)
-    cohorts = tuple(
-        LabelCohortStatus(
-            season=int(row["season"]),
-            week=int(row["week"]),
-            contest_archetype=str(row["contest_archetype"]),
-            label_rows=int(row["label_rows"]),
-            distinct_contests=int(row["distinct_contests"]),
-        )
-        for row in cast("list[dict[str, object]]", summary["by_week_and_archetype"])
-    )
+    cohorts = label_cohorts(connection)
     return LabelsStatus(
-        weeks_with_labels=int(cast("int", summary["weeks_with_labels"])),
-        by_week_and_archetype=cohorts,
+        weeks_with_labels=weeks_with_labels(cohorts),
+        by_week_and_archetype=tuple(
+            LabelCohortStatus(
+                season=cohort.season,
+                week=cohort.week,
+                contest_archetype=cohort.contest_archetype,
+                label_rows=cohort.label_rows,
+                distinct_contests=cohort.distinct_contests,
+            )
+            for cohort in cohorts
+        ),
     )
 
 

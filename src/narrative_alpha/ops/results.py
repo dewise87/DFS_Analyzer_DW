@@ -615,8 +615,19 @@ def _report(
     )
 
 
-def label_summary(connection: sqlite3.Connection) -> dict[str, object]:
-    """Return the status/report shape shared by the lane and the operator screen."""
+@dataclass(frozen=True)
+class LabelCohort:
+    """One season/week/archetype label population, as the store holds it now."""
+
+    season: int
+    week: int
+    contest_archetype: str
+    label_rows: int
+    distinct_contests: int
+
+
+def label_cohorts(connection: sqlite3.Connection) -> tuple[LabelCohort, ...]:
+    """The label gate's rows — the one query the lane records and the screen shows."""
 
     rows = connection.execute(
         """
@@ -629,20 +640,38 @@ def label_summary(connection: sqlite3.Connection) -> dict[str, object]:
         ORDER BY s.season, s.week, ao.contest_archetype
         """
     ).fetchall()
-    by_week = [
-        {
-            "season": int(row["season"]),
-            "week": int(row["week"]),
-            "contest_archetype": str(row["contest_archetype"]),
-            "label_rows": int(row["label_rows"]),
-            "distinct_contests": int(row["distinct_contests"]),
-        }
+    return tuple(
+        LabelCohort(
+            season=int(row["season"]),
+            week=int(row["week"]),
+            contest_archetype=str(row["contest_archetype"]),
+            label_rows=int(row["label_rows"]),
+            distinct_contests=int(row["distinct_contests"]),
+        )
         for row in rows
-    ]
-    weeks = {(int(row["season"]), int(row["week"])) for row in rows}
+    )
+
+
+def weeks_with_labels(cohorts: tuple[LabelCohort, ...]) -> int:
+    return len({(cohort.season, cohort.week) for cohort in cohorts})
+
+
+def label_summary(connection: sqlite3.Connection) -> dict[str, object]:
+    """Return the status/report shape shared by the lane and the operator screen."""
+
+    cohorts = label_cohorts(connection)
     return {
-        "weeks_with_labels": len(weeks),
-        "by_week_and_archetype": by_week,
+        "weeks_with_labels": weeks_with_labels(cohorts),
+        "by_week_and_archetype": [
+            {
+                "season": cohort.season,
+                "week": cohort.week,
+                "contest_archetype": cohort.contest_archetype,
+                "label_rows": cohort.label_rows,
+                "distinct_contests": cohort.distinct_contests,
+            }
+            for cohort in cohorts
+        ],
     }
 
 
