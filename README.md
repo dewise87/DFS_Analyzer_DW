@@ -26,7 +26,7 @@ docs/DECISIONS.md   Decision log
 src/narrative_alpha/
   snapshots/        Phase −1: capture & freeze perishable pre-lock data
   store/            L1: operational DB, migrations, snapshot manifests, governance
-  ingest/           L2: salary/projection/result parsers, collectors
+  ingest/           L2: slate/salary/projection/result loaders, collectors
   identity/         L2: player crosswalk (canonical IDs, aliases, overrides)
   quant/            L3: projection blend, distributions, ownership model, dependence
   narrative/        L4: evidence extraction, episode clustering, signal registry
@@ -127,10 +127,12 @@ which no later replay could reconstruct.
 
 - **Saturday 6:00 p.m. ET** — download DK/FD salaries, purchased projections, and baseline
   ownership; capture each with `na-snapshot capture`, then `na-snapshot fetch` odds and
-  weather and `na-snapshot verify` the week.
+  weather and `na-snapshot verify` the week. Then load the salary capture and read back the
+  slate ids: `na-slate ingest` → `na-slate list` (below).
 - **Sunday 9:00 a.m. and 11:00 a.m. ET** — re-capture projections and ownership and
   refresh odds and weather. The 11:00 a.m. capture is irreplaceable: after lock the
-  pre-lock state is gone.
+  pre-lock state is gone. Re-run `na-slate ingest` on the Sunday salary re-download; it
+  versions the salaries rather than overwriting Saturday's.
 - **Sunday post-slate** — export contest standings for every probe contest.
 - **Whenever `status` says so** — clear the crosswalk unresolved queue
   (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
@@ -262,8 +264,8 @@ uv run na-features build --database data/db/narrative_alpha.sqlite3 \
   --slate-id 123 --site dk --as-of 2026-09-02T16:00:00Z
 ```
 
-Slate ids come from `na-slate list` (Slice 22); until it lands there is no slate in the store to
-build features for.
+Slate ids come from [`na-slate list`](#slate-and-salary-ingestion); ingest the week's salary
+capture first, or there is no slate in the store to build features for.
 
 The heat formula, source-class half-lives, quality mappings, 0.15 soft-factor floor, and immutable
 `feature_version` live in `config/heat.toml`. A semantic config change without a version bump is
@@ -320,6 +322,39 @@ uv run na-crosswalk --database data/db/narrative_alpha.sqlite3 seed \
 verifies or fetches its content-addressed archive bytes, and idempotently seeds canonical players
 and temporal roster membership. `PlayerCrosswalk.require_all_resolved()` is the fail-closed guard
 for lineup generation.
+
+## Slate and salary ingestion
+
+A salary export is the only file that names a slate, so `na-slate` is the only writer of
+`slates` rows and the step that turns a capture into the `slate_id` that `na-build`,
+`na-features`, and `na-report` all require:
+
+```bash
+uv run na-slate ingest --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk
+uv run na-slate list --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1
+```
+
+`ingest` defaults to the newest `salaries` capture for the week under `data/snapshots/`
+(`--capture` picks a specific one). It verifies each file's hash against the manifest,
+parses it with the strict DK/FD parser, and writes one `slates` row per distinct slate plus
+one `salaries` row per player. `observed_at` is the capture's time, never now.
+
+Salary exports carry no slate id, so one is derived from site, season, week, slate type, and
+the slate's earliest kickoff — `draftkings:2026:w01:classic:20260913T170000Z`. Sunday's
+re-download of the same slate therefore resolves to the same `slate_id` and versions its
+salaries; every changed salary is reported as a diff, and nothing is ever updated in place.
+Reloading the same capture inserts nothing and says so. FanDuel classic exports omit kickoff
+times: pass `--starts-at` with the slate's first kickoff, using the same value every time,
+or the load is refused rather than guessed.
+
+Every player goes through the crosswalk with the site player id, name, team, and position.
+An unresolved player is queued and printed with the exact `na-crosswalk resolve` command;
+the slate is still written, and `require_all_resolved` stops the lineup build until the
+queue is clear. `ingest` exits 0 when clean, 1 when something is queued or rejected, and 2
+when it refuses (hash mismatch, wrong week, missing capture).
+
+`list` prints the slate ids with site, type, name, lock time, player count, the site's
+unresolved-queue count, and the last salary, projection, and ownership observation times.
 
 ## Projection and ownership ingestion
 

@@ -81,6 +81,24 @@ def test_golden_salary_exports(
         assert all(row.game_time is None for row in result.rows)
 
 
+@pytest.mark.parametrize(
+    ("filename", "home_team"),
+    [
+        ("draftkings_classic.csv", "CHI"),
+        ("draftkings_showdown.csv", "MIA"),
+        ("fanduel_classic.csv", "NYG"),
+        ("fanduel_showdown.csv", "LV"),
+    ],
+)
+def test_game_field_direction_is_parsed_as_away_at_home(
+    filename: str, home_team: str
+) -> None:
+    result = parse_salary_csv(GOLDEN_PATH / filename)
+
+    assert all(row.is_home is not None for row in result.rows)
+    assert all(row.is_home == (row.team == home_team) for row in result.rows)
+
+
 def test_format_detection_ignores_filename(tmp_path: Path) -> None:
     misleading_path = tmp_path / "fanduel_showdown.csv"
     misleading_path.write_bytes((GOLDEN_PATH / "draftkings_classic.csv").read_bytes())

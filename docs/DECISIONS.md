@@ -2,6 +2,36 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slate identity is derived, and a slate is an identity, not an observation
+
+- **The slate key is derived from what the export carries.** DK and FD salary exports have no
+  slate id, so `external_slate_id` is `site:season:wNN:type:earliest-kickoff`. Sunday's
+  re-download of the same slate therefore resolves to the same key, and a slate whose first game
+  moved resolves to a different one — which is correct, because a moved first kickoff is a
+  different slate. Revisit if a site ever publishes a stable slate id in the export.
+- **Slates, teams, and games are reused by identity; only salaries are versioned.** `slates` has
+  `UNIQUE(site, external_slate_id, observed_at)`, so the point-in-time pattern used everywhere
+  else would mint a new `slate_id` per capture and split a slate's salaries between them. The
+  loader instead inserts each of these once and reuses it whatever order captures are loaded in;
+  content that later disagrees (a slate's name, a game's kickoff) is reported as an error, never
+  updated in place. Salaries stay strictly insert-only, keyed by `(slate_id, player_id,
+  observed_at)`, and every changed salary is reported as a diff.
+- **The salary export is the only writer of `teams` and `games`.** Nothing else in the pipeline
+  writes either, and `salaries.team_id` is NOT NULL, so a franchise first appears when a slate
+  is ingested. Only what the file states is stored — the canonical code as key and name — and a
+  later source with real franchise names versions the row rather than being blocked by it. Home
+  and away come from the export's own `AWAY@HOME` field (`ParsedSalaryRow.is_home`), never from
+  the alphabetical key order; a FanDuel classic export carries no kickoff, so it writes no game
+  at all and names the affected matchups instead of inventing one.
+- **A team defense is one canonical player per franchise, keyed `dst:<code>`.** No roster
+  carries a defense and every site names it differently ("Green Bay Defense", "New York
+  Defense"), so the crosswalk queued every DST row on every slate — 32 by-hand resolutions a
+  week and a blocked lineup build. Review fix: a DST/D row resolves deterministically to the
+  franchise's defense row, inserted once on first sight with position `DST`.
+- **A missing kickoff is refused, not defaulted.** FanDuel classic omits game times, so the
+  slate's `starts_at`/`locks_at` cannot be derived and `--starts-at` is required. The same value
+  must be used for every re-download, because it is part of the slate key.
+
 ## 2026-09-02 — Slices 20 and 21 review outcomes
 
 - **Text similarity creates a Stage 2 link; direction only labels it.** The delivered

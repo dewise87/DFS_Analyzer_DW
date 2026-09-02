@@ -25,6 +25,7 @@ na-extract = "narrative_alpha.extract_cli:main"
 na-features = "narrative_alpha.features_cli:main"
 na-ops = "narrative_alpha.ops.cli:main"
 na-report = "narrative_alpha.report_cli:main"
+na-slate = "narrative_alpha.slate_cli:main"
 na-replay = "narrative_alpha.replay_cli:main"
 na-snapshot = "narrative_alpha.snapshots.cli:main"
 

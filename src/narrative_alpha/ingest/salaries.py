@@ -152,6 +152,8 @@ class ParsedSalaryRow(BaseModel):
     eligible_roster_slots: tuple[str, ...] = Field(min_length=1)
     salary: int = Field(gt=0)
     game_time: datetime | None
+    is_home: bool | None = None
+    """Whether ``team`` is the home side; both sites write the game as ``AWAY@HOME``."""
     player_status: str | None = None
 
     @field_validator("site_player_id", "name_raw", "team", "opponent", "listed_position")
@@ -403,7 +405,7 @@ def _parse_draftkings_row(
         raise ValueError("Name + ID does not match the Name and ID columns")
 
     team = _required(row, "TeamAbbrev").upper()
-    opponent, game_time = _parse_game_info(
+    opponent, is_home, game_time = _parse_game_info(
         _required(row, "Game Info"), team, kickoff_required=True
     )
     return ParsedSalaryRow(
@@ -419,6 +421,7 @@ def _parse_draftkings_row(
         eligible_roster_slots=_split_slots(_required(row, "Roster Position")),
         salary=_parse_salary(_required(row, "Salary")),
         game_time=game_time,
+        is_home=is_home,
     )
 
 
@@ -432,7 +435,9 @@ def _parse_fanduel_row(
     position = _normalize_position(SalarySite.FANDUEL, _required(row, "Position"))
     team = _required(row, "Team").upper()
     opponent_column = _required(row, "Opponent").upper()
-    opponent, game_time = _parse_game_info(_required(row, "Game"), team, kickoff_required=False)
+    opponent, is_home, game_time = _parse_game_info(
+        _required(row, "Game"), team, kickoff_required=False
+    )
     if opponent != opponent_column:
         raise ValueError("Opponent does not match the Game column")
     if slate_type is SalarySlateType.SHOWDOWN:
@@ -454,13 +459,16 @@ def _parse_fanduel_row(
         eligible_roster_slots=eligible_slots,
         salary=_parse_salary(_required(row, "Salary")),
         game_time=game_time,
+        is_home=is_home,
         player_status=_optional(row, "Injury Indicator"),
     )
 
 
 def _parse_game_info(
     value: str, team: str, *, kickoff_required: bool
-) -> tuple[str, datetime | None]:
+) -> tuple[str, bool, datetime | None]:
+    """Return ``(opponent, is_home, kickoff)`` from an ``AWAY@HOME [kickoff]`` field."""
+
     parts = value.split()
     if len(parts) not in {1, 4} or (kickoff_required and len(parts) != 4):
         expected = (
@@ -477,8 +485,9 @@ def _parse_game_info(
     if team not in {away, home}:
         raise ValueError("Team is not present in the game matchup")
     opponent = home if team == away else away
+    is_home = team == home
     if len(parts) == 1:
-        return opponent, None
+        return opponent, is_home, None
 
     _, date_text, time_text, timezone_text = parts
     timezone_name = _TIMEZONE_NAMES.get(timezone_text.upper())
@@ -490,7 +499,7 @@ def _parse_game_info(
         ).replace(tzinfo=ZoneInfo(timezone_name))
     except ValueError as error:
         raise ValueError("invalid game date/time") from error
-    return opponent, local_time.astimezone(UTC)
+    return opponent, is_home, local_time.astimezone(UTC)
 
 
 def _classic_slots(position: str) -> tuple[str, ...]:

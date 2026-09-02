@@ -1340,6 +1340,35 @@ row models, and the crosswalk all exist; this is the loader between them.
 > showdown files produce a showdown slate; `list` renders. No network. Run
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Implementation status (2026-09-02):** `src/narrative_alpha/ingest/slates.py` and `na-slate`
+(`ingest`, `list`) close the gap: the store now gets `slates`, `salaries`, `teams`, and `games`
+rows from a captured export. No migration was needed. `ingest` defaults to the newest `salaries`
+capture for the week, verifies each hash against the manifest, parses with `parse_salary_csv`,
+and writes one slate per distinct slate in the capture plus one salary row per resolved player,
+all at the manifest's capture time. `external_slate_id` is
+`draftkings:2026:w01:classic:20260913T170000Z` — site, season, week, type, earliest kickoff — so
+Sunday's re-download lands on the same `slate_id` and versions the salaries, reporting each
+changed one as a diff. Reloading a capture inserts nothing and says so; a hash mismatch, a
+wrong-week capture, or a missing capture refuses.
+
+Nothing else in the pipeline writes `teams` or `games`, and `salaries.team_id` is NOT NULL, so
+the loader records both from the export: the franchise code as its own key and name, and one game
+per matchup with home and away taken from the export's own `AWAY@HOME` field (`ParsedSalaryRow`
+now carries `is_home`). A FanDuel classic export omits kickoff times, so it needs `--starts-at`
+and leaves `game_id` NULL with the affected matchups named. Unresolved players are queued and
+printed with the exact `na-crosswalk resolve` command while the slate is still written;
+`ingest` exits 0 clean, 1 queued/rejected, 2 refused. `list` prints the slate ids with player
+count, the site's unresolved count, and the last salary/projection/ownership observation times.
+Suite 505 → 526.
+
+**Reviewed 2026-09-02** (solo review; smoke-tested against a copy of the production store with
+the golden DK export). One major: team defense rows went to the unresolved queue — 32 by-hand
+resolutions a week and a blocked build — and now resolve to one canonical `dst:<code>` player
+per franchise. Minor: the README put `--database` before the subcommand, which the parser
+rejects. Open, carried from Phase 0: real DK showdown exports may carry separate CPT and FLEX
+rows per player, which `salaries`' one-row-per-player key cannot hold; verify against the first
+real showdown export (Thursday 2026-09-10). Suite 526 → 527.
+
 ### Slice 23 — Slate lane (`na-ops slate`) end to end
 
 **Goal:** one command for Saturday and Sunday, the way `na-ops batch` is one command for the
