@@ -58,6 +58,10 @@ class RosterRefreshReport:
     removed: tuple[tuple[str, str], ...]
     changed: tuple[RosterPlayerChange, ...]
     issues: tuple[RosterSeedIssue, ...] = ()
+    # False when the newest pin's bytes could not be obtained, so no diff exists. The hash
+    # and paste entry are still real; the reviewer must read the roster file by hand.
+    prior_available: bool = True
+    prior_unavailable_reason: str | None = None
 
     def render(self) -> str:
         """Render the review summary and a syntactically valid pin entry."""
@@ -67,18 +71,24 @@ class RosterRefreshReport:
             f"url={self.url}",
             f"sha256={self.sha256}",
             f"compared_pin_reviewed_at={self.compared_with.reviewed_at.isoformat()}",
-            f"players_added={len(self.added)}",
         ]
-        lines.extend(f"  + {gsis_id} {name}" for gsis_id, name in self.added)
-        lines.append(f"players_removed={len(self.removed)}")
-        lines.extend(f"  - {gsis_id} {name}" for gsis_id, name in self.removed)
-        lines.append(f"players_changed={len(self.changed)}")
-        for change in self.changed:
-            details = "; ".join(
-                f"{field}: {before or '-'} -> {after or '-'}"
-                for field, before, after in change.fields
+        if not self.prior_available:
+            lines.append(
+                "players_diff=UNAVAILABLE: "
+                f"{self.prior_unavailable_reason or 'prior pin bytes are not available'}"
             )
-            lines.append(f"  ~ {change.gsis_id} {change.full_name}: {details}")
+        else:
+            lines.append(f"players_added={len(self.added)}")
+            lines.extend(f"  + {gsis_id} {name}" for gsis_id, name in self.added)
+            lines.append(f"players_removed={len(self.removed)}")
+            lines.extend(f"  - {gsis_id} {name}" for gsis_id, name in self.removed)
+            lines.append(f"players_changed={len(self.changed)}")
+            for change in self.changed:
+                details = "; ".join(
+                    f"{field}: {before or '-'} -> {after or '-'}"
+                    for field, before, after in change.fields
+                )
+                lines.append(f"  ~ {change.gsis_id} {change.full_name}: {details}")
         lines.append(f"rows_rejected={len(self.issues)}")
         lines.extend(f"  ! row {issue.row_number}: {issue.reason}" for issue in self.issues)
         lines.extend(
@@ -254,8 +264,13 @@ def refresh_roster_release(
     sleep: Callable[[float], None] = time.sleep,
     releases: Mapping[int, tuple[PinnedRosterRelease, ...]] = PINNED_ROSTER_RELEASES,
     today: date | None = None,
+    allow_missing_prior: bool = False,
 ) -> RosterRefreshReport:
     """Fetch and compare the rolling asset without changing the reviewed pin table.
+
+    ``allow_missing_prior`` is the bootstrap for a pin whose bytes were never archived and
+    that upstream has since overwritten: the diff is impossible, so the report says so and
+    still yields the current hash and a paste-ready entry for a by-hand review.
 
     The downloaded bytes are archived under their own sha256 so the entry this report
     prints is fetchable offline once pasted, even after upstream overwrites the rolling
@@ -284,15 +299,33 @@ def refresh_roster_release(
 
     owns_client = client is None
     http_client = client or httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True)
+    prior_path: Path | None
+    prior_unavailable_reason: str | None = None
     try:
         # Resolve this before fetching the rolling URL. If upstream already moved and the old
-        # bytes were never archived, a truthful player diff is impossible and must fail closed.
-        prior_path = fetch_pinned_roster(
-            newest,
-            archive_dir,
-            client=http_client,
-            sleep=sleep,
-        )
+        # bytes were never archived, a truthful player diff is impossible and must fail closed
+        # unless the caller explicitly accepts a diff-less bootstrap report.
+        try:
+            prior_path = fetch_pinned_roster(
+                newest,
+                archive_dir,
+                client=http_client,
+                sleep=sleep,
+            )
+        except RosterHashError as error:
+            reason = (
+                f"the newest pin ({newest.reviewed_at.isoformat()}, "
+                f"{newest.sha256[:12]}…) was never archived locally and upstream no longer "
+                "serves those bytes, so a player diff is impossible"
+            )
+            if not allow_missing_prior:
+                raise NflverseRosterError(
+                    f"{reason}. Rerun with --allow-missing-prior to get the current hash and "
+                    "a paste-ready entry without a diff, then review the roster file by hand "
+                    f"(archived under data/archive/nflverse once fetched). Cause: {error}"
+                ) from error
+            prior_path = None
+            prior_unavailable_reason = reason
         url = ROLLING_ROSTER_URL.format(season=season)
         current_bytes = _fetch_roster_bytes(http_client, url, sleep=sleep)
     finally:
@@ -302,8 +335,22 @@ def refresh_roster_release(
     current_sha256 = hashlib.sha256(current_bytes).hexdigest()
     _archive_bytes(archive_dir, current_bytes, current_sha256)
 
-    prior, _ = _roster_players(prior_path.read_bytes())
     current, issues = _roster_players(current_bytes)
+    if prior_path is None:
+        return RosterRefreshReport(
+            season=season,
+            url=url,
+            reviewed_at=reviewed_at,
+            sha256=current_sha256,
+            compared_with=newest,
+            added=(),
+            removed=(),
+            changed=(),
+            issues=issues,
+            prior_available=False,
+            prior_unavailable_reason=prior_unavailable_reason,
+        )
+    prior, _ = _roster_players(prior_path.read_bytes())
     added = tuple(
         (gsis_id, current[gsis_id].full_name) for gsis_id in sorted(current.keys() - prior.keys())
     )

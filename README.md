@@ -64,6 +64,19 @@ security add-generic-password -s narrative-alpha-anthropic -a "$USER" -w
 uv run na-ops schedule install
 ```
 
+Before installing the schedule, run the lane once by hand with a bounded smoke test and read
+the result — the scheduled run will do exactly the same thing unattended:
+
+```bash
+uv run na-ops batch --max-items 20
+uv run na-ops status
+```
+
+The lane does not extract until a roster is seeded (`status` says so): extracting first would
+send every name to the manual unresolved queue. The first scheduled run may show a macOS
+dialog asking whether `security` may read the Keychain item; choose "Always Allow", or the
+extraction step will refuse to submit and say why in `data/logs/`.
+
 That schedules the batch lane on the days and local time in `config/ops.toml` (default
 Wed–Fri 09:30, per design-doc §5.3) plus three notification-only reminders at the §9.0
 manual capture times — Sat 6:00 p.m., Sun 9:00 a.m., Sun 11:00 a.m. Eastern, converted to
@@ -117,7 +130,11 @@ which no later replay could reconstruct.
 - **Sunday post-slate** — export contest standings for every probe contest.
 - **Whenever `status` says so** — clear the crosswalk unresolved queue
   (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
-  reviewed nflverse pin when the refresh check reports a changed roster.
+  reviewed nflverse pin when the refresh check reports a moved roster:
+  `na-crosswalk nflverse-refresh --season 2026 --reviewed-at <today>` prints the hash, the
+  player diff, and the entry to paste. Add `--allow-missing-prior` when the previous pin's
+  bytes were never archived and upstream has overwritten them; the diff is then unavailable
+  and the roster file must be reviewed by hand.
 
 Phase −1 rule: **every week the snapshot capture doesn't run destroys irreplaceable
 training data.** See Appendix D of the design doc for the full checklist.

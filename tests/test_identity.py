@@ -877,3 +877,58 @@ def test_refresh_reports_malformed_and_conflicting_rows_instead_of_dropping_them
     rendered = report.render()
     assert "rows_rejected=2" in rendered
     assert "! row 2: blank team" in rendered
+
+
+def test_refresh_bootstraps_a_pin_whose_bytes_upstream_no_longer_serves(tmp_path: Path) -> None:
+    prior = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,GB,WR,ACT,Old Player,2000-01-01,00-001,1\n"
+    )
+    current = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,GB,WR,ACT,New Player,2000-01-01,00-002,2\n"
+    )
+    pin = PinnedRosterRelease(
+        season=2026,
+        url="https://example.test/roster.csv",
+        sha256=hashlib.sha256(prior).hexdigest(),
+        reviewed_at=date(2026, 9, 1),
+    )
+    archive = tmp_path / "archive"
+
+    def upstream_moved(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=current, request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(upstream_moved)) as client,
+        pytest.raises(NflverseRosterError, match="--allow-missing-prior"),
+    ):
+        refresh_roster_release(
+            2026,
+            archive,
+            reviewed_at=date(2026, 9, 2),
+            client=client,
+            releases={2026: (pin,)},
+            today=date(2026, 9, 2),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(upstream_moved)) as client:
+        report = refresh_roster_release(
+            2026,
+            archive,
+            reviewed_at=date(2026, 9, 2),
+            client=client,
+            releases={2026: (pin,)},
+            today=date(2026, 9, 2),
+            allow_missing_prior=True,
+        )
+
+    assert report.prior_available is False
+    assert report.sha256 == hashlib.sha256(current).hexdigest()
+    assert report.added == () and report.removed == () and report.changed == ()
+    rendered = report.render()
+    assert "players_diff=UNAVAILABLE" in rendered
+    assert f"sha256={report.sha256!r}" in rendered
+    # The current bytes are archived under their own hash; the lost pin is not fabricated.
+    assert roster_archive_path(archive, report.sha256).read_bytes() == current
+    assert not roster_archive_path(archive, pin.sha256).exists()

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shlex
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -9,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from narrative_alpha.identity.nflverse import RosterHashError
 from narrative_alpha.narrative import (
     CollectionError,
     CollectionReport,
@@ -165,6 +167,25 @@ def _seed_source_item(
     return int(cursor.lastrowid)
 
 
+def _seed_player(connection: sqlite3.Connection) -> None:
+    """One canonical player: extraction refuses to run against an empty roster."""
+
+    stamp = _timestamp(CAPTURE_TIME - timedelta(days=10))
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO players(
+            player_key, canonical_name, position, birth_date, source, published_at,
+            observed_at, ingested_at, effective_at, valid_from, valid_to, source_version,
+            run_id
+        ) VALUES (
+            'jordan-reed', 'Jordan Reed', 'TE', NULL, 'fixture', NULL, ?, ?, NULL, ?, NULL,
+            'fixture-v1', NULL
+        )
+        """,
+        (stamp, stamp, stamp),
+    )
+
+
 def _collection(
     *,
     reports: tuple[CollectionReport, ...] = (),
@@ -278,6 +299,7 @@ def test_partial_collection_failure_still_extracts(tmp_path: Path) -> None:
 
     with connect_database(config.database) as connection:
         apply_migrations(connection)
+        _seed_player(connection)
         report = run_batch(
             connection,
             config=config,
@@ -322,6 +344,7 @@ def test_extraction_window_derives_from_last_success_and_is_overridable(
 
     with connect_database(config.database) as connection:
         apply_migrations(connection)
+        _seed_player(connection)
         _seed_source_item(connection)
 
         # With no recorded run, the window opens at the earliest retained item.
@@ -374,6 +397,7 @@ def test_budget_guard_refuses_the_whole_batch_and_records_the_numbers(
     config = _config(tmp_path, monthly_llm_budget_usd="0.00001")
     with connect_database(config.database) as connection:
         apply_migrations(connection)
+        _seed_player(connection)
         _seed_source_item(connection)
         connection.commit()
         report = run_batch(
@@ -421,6 +445,7 @@ def test_budget_guard_allows_a_batch_inside_the_budget(tmp_path: Path) -> None:
 
     with connect_database(config.database) as connection:
         apply_migrations(connection)
+        _seed_player(connection)
         _seed_source_item(connection)
         connection.commit()
         report = run_batch(
@@ -448,6 +473,7 @@ def test_missing_credential_fails_the_step_without_reserving_anything(
     config = _config(tmp_path)
     with connect_database(config.database) as connection:
         apply_migrations(connection)
+        _seed_player(connection)
         _seed_source_item(connection)
         connection.commit()
         report = run_batch(
@@ -880,3 +906,151 @@ def test_manual_action_list_stays_one_line_per_item(tmp_path: Path) -> None:
     assert action.endswith("…")
     # The detail view keeps every character.
     assert "x" * 500 in render_status(status)
+
+
+# --- Review fixes (2026-09-02) -------------------------------------------------------------
+
+
+def _empty_plan(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+    return SimpleNamespace(
+        ready=(),
+        resumable=(),
+        submission_unknown=(),
+        injection_blocked=(),
+        ineligible=(),
+        estimated_cost_nanos_usd=0,
+    )
+
+
+def test_extraction_is_skipped_until_a_roster_is_seeded(tmp_path: Path) -> None:
+    # Extracting against an empty roster would send every name to the unresolved queue,
+    # each one a by-hand resolution; the lane waits, says why, and keeps the watermark.
+    config = _config(tmp_path)
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_source_item(connection)
+        connection.commit()
+        unseeded = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(
+                plan_extraction=_never_called, run_extraction=_never_called
+            ),
+        )
+        watermark = extraction_window_start(connection, now=NOW)
+        _seed_player(connection)
+        connection.commit()
+        seeded = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(plan_extraction=_empty_plan),
+        )
+
+    step = unseeded.step("extract")
+    assert step is not None and step.status == "skipped"
+    assert "roster not seeded" in str(step.error_text)
+    assert unseeded.ok  # a stated skip is not a failure
+    assert watermark == CAPTURE_TIME
+    seeded_step = seeded.step("extract")
+    assert seeded_step is not None and seeded_step.status == "succeeded"
+
+
+def test_extraction_window_closes_after_collection_in_production_clock_mode(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    observed: list[datetime] = []
+    windows: list[tuple[datetime, datetime]] = []
+
+    def collect(connection: sqlite3.Connection, *, observed_at: datetime) -> CollectionRunReport:
+        observed.append(observed_at)
+        _seed_source_item(connection, observed_at=observed_at, external_item_id="fresh")
+        connection.commit()
+        return CollectionRunReport(observed_at, (_report(),), (), ("source-a",))
+
+    def plan(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        windows.append((kwargs["window_start"], kwargs["window_end"]))
+        return _empty_plan(connection)
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        connection.commit()
+        run_batch(
+            connection,
+            config=config,
+            dependencies=_dependencies(collect=collect, plan_extraction=plan),
+            clock=lambda: datetime.now(UTC) + timedelta(seconds=1),
+        )
+
+    # The item this run just collected sits inside the window it extracts, not the next one.
+    assert len(observed) == 1 and len(windows) == 1
+    start, end = windows[0]
+    assert start <= observed[0] < end
+
+
+def test_nflverse_step_failures_tell_the_operator_how_to_re_pin(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    def gone(season: int, archive: Path, *, reviewed_at: date) -> Any:
+        raise RosterHashError("nflverse roster hash mismatch for 2026")
+
+    def moved(season: int, archive: Path, *, reviewed_at: date) -> Any:
+        return SimpleNamespace(
+            season=season,
+            sha256="b" * 64,
+            compared_with=SimpleNamespace(sha256="a" * 64),
+            added=(("00-0001", "New Player"),),
+            removed=(),
+            changed=(),
+            prior_available=True,
+        )
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        failed = run_batch(
+            connection, config=config, now=NOW, dependencies=_dependencies(refresh_roster=gone)
+        )
+        drifted = run_batch(
+            connection, config=config, now=NOW, dependencies=_dependencies(refresh_roster=moved)
+        )
+
+    gone_step = failed.step("nflverse_refresh")
+    assert gone_step is not None and gone_step.status == "failed"
+    assert "--allow-missing-prior" in str(gone_step.error_text)
+    assert "na-crosswalk nflverse-refresh --season 2026" in str(gone_step.error_text)
+    moved_step = drifted.step("nflverse_refresh")
+    assert moved_step is not None and moved_step.status == "failed"
+    assert "no longer matches the newest pin" in str(moved_step.error_text)
+    assert moved_step.summary["matches_pin"] is False
+    assert moved_step.summary["players_added"] == 1
+
+
+def test_reminder_notification_is_one_shell_word_even_with_quotes(tmp_path: Path) -> None:
+    from narrative_alpha.ops.schedule import ReminderSpec, _reminder_script
+
+    spec = ReminderSpec(
+        slug="quoted",
+        weekday="sun",
+        eastern_time=time(9, 0),
+        title='Don\'t "miss" this',
+        notification="It's 9 a.m.; capture \"now\"",
+        instructions=("one line",),
+    )
+    script = _reminder_script(
+        spec,
+        config=_config(tmp_path),
+        log_path=tmp_path / "quoted.log",
+        label="com.narrative-alpha.reminder-quoted",
+        local_time=time(9, 0),
+    )
+    line = next(entry for entry in script.splitlines() if entry.startswith("/usr/bin/osascript"))
+    words = shlex.split(line.removesuffix(" || true"))
+    assert words[:2] == ["/usr/bin/osascript", "-e"]
+    assert len(words) == 3
+    assert words[2] == (
+        'display notification "It\'s 9 a.m.; capture \\"now\\"" '
+        'with title "Narrative Alpha" subtitle "Don\'t \\"miss\\" this"'
+    )

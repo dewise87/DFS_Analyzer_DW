@@ -135,10 +135,18 @@ def run_batch(
     max_items: int | None = None,
     dependencies: BatchDependencies = DEFAULT_DEPENDENCIES,
     pricing_path: Path | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> BatchReport:
-    """Run the batch lane in order, isolating each step, and record every outcome."""
+    """Run the batch lane in order, isolating each step, and record every outcome.
+
+    ``now`` pins the whole lane to one instant (tests, replays). Otherwise the extraction
+    window closes at a fresh reading of ``clock`` taken *after* collection, so the items
+    this very run just collected fall inside the window instead of waiting a cadence.
+    """
 
     started_at = ensure_utc(now or datetime.now(UTC))
+    if clock is None:
+        clock = (lambda: started_at) if now is not None else (lambda: datetime.now(UTC))
     batch_run_id = f"ops-{uuid4().hex}"
     recorder = _Recorder(connection, batch_run_id=batch_run_id)
 
@@ -166,7 +174,8 @@ def run_batch(
                 connection,
                 config=config,
                 window_start=window_start,
-                now=started_at,
+                started_at=started_at,
+                window_end=ensure_utc(max(started_at, clock())),
                 max_items=max_items,
                 pricing_path=pricing_path,
             ),
@@ -314,16 +323,34 @@ def _extract(
     *,
     config: OpsConfig,
     window_start: datetime | None,
-    now: datetime,
+    started_at: datetime,
+    window_end: datetime,
     max_items: int | None,
     pricing_path: Path | None,
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
+    now = window_end
     start = window_start or extraction_window_start(connection, now=now)
+    window: dict[str, object] = {
+        "window_start": utc_timestamp(start),
+        "window_end": utc_timestamp(now),
+    }
     if start >= now:
         return (
             "skipped",
-            {"window_start": utc_timestamp(start), "window_end": utc_timestamp(now)},
+            window,
             "the last successful extraction already covers everything up to now",
+        )
+    players = int(connection.execute("SELECT count(*) FROM players").fetchone()[0])
+    if players == 0:
+        # Extracting before a roster exists would send every name to the unresolved queue,
+        # each one a by-hand `na-crosswalk resolve`; seeding afterwards does not resolve them
+        # retroactively. The watermark stays put, so nothing is stepped over.
+        return (
+            "skipped",
+            window,
+            "roster not seeded: the players table is empty, so every extracted name would "
+            "queue for manual resolution; seed the nflverse roster first, then rerun "
+            "`na-ops batch`",
         )
     pricing = dependencies.load_pricing(
         pricing_path or Path("config/model_pricing.toml"), model_id=DEFAULT_MODEL_ID
@@ -337,8 +364,7 @@ def _extract(
         max_items=max_items,
     )
     summary: dict[str, object] = {
-        "window_start": utc_timestamp(start),
-        "window_end": utc_timestamp(now),
+        **window,
         "ready_items": len(plan.ready),
         "resumable_items": len(plan.resumable),
         "ineligible_items": len(plan.ineligible),
@@ -373,7 +399,7 @@ def _extract(
         window_end=now,
         provider=factory(),
         pricing=pricing,
-        run_at=now,
+        run_at=started_at,
         max_items=max_items,
     )
     summary |= {
@@ -472,31 +498,50 @@ def _nflverse_refresh(
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     """Report-only: compare the rolling roster with the pin. It never changes the pin."""
 
-    reviewed_at: date = now.astimezone(config.timezone).date()
-    report = dependencies.refresh_roster(
-        config.season,
-        config.nflverse_archive,
-        reviewed_at=reviewed_at,
-    )
+    # UTC date: the helper rejects a review date later than today's UTC date, and a local
+    # zone east of UTC can already be on tomorrow.
+    reviewed_at: date = ensure_utc(now).date()
+    try:
+        report = dependencies.refresh_roster(
+            config.season,
+            config.nflverse_archive,
+            reviewed_at=reviewed_at,
+        )
+    except NflverseRosterError as error:
+        raise _StepFailure(
+            f"nflverse refresh check failed — {error}. To re-pin: run "
+            f"`na-crosswalk nflverse-refresh --season {config.season} --reviewed-at "
+            f"{reviewed_at.isoformat()}` (add `--allow-missing-prior` if the old bytes are "
+            "gone), review the output, and paste the entry into PINNED_ROSTER_RELEASES",
+            {"report_only": True, "season": config.season, "reviewed_at": reviewed_at.isoformat()},
+        ) from error
     added = getattr(report, "added", ())
     removed = getattr(report, "removed", ())
     changed = getattr(report, "changed", ())
     sha256 = getattr(report, "sha256", None)
     pin = getattr(report, "compared_with", None)
-    return (
-        "succeeded",
-        {
-            "report_only": True,
-            "season": config.season,
-            "reviewed_at": reviewed_at.isoformat(),
-            "rolling_sha256": sha256,
-            "matches_pin": bool(pin is not None and sha256 == pin.sha256),
-            "players_added": len(added),
-            "players_removed": len(removed),
-            "players_changed": len(changed),
-        },
-        None,
-    )
+    matches_pin = bool(pin is not None and sha256 == pin.sha256)
+    summary: dict[str, object] = {
+        "report_only": True,
+        "season": config.season,
+        "reviewed_at": reviewed_at.isoformat(),
+        "rolling_sha256": sha256,
+        "matches_pin": matches_pin,
+        "players_added": len(added),
+        "players_removed": len(removed),
+        "players_changed": len(changed),
+        "prior_available": bool(getattr(report, "prior_available", True)),
+    }
+    if not matches_pin:
+        # A moved roster is not an error, but it is a by-hand task the screen must show.
+        raise _StepFailure(
+            f"the rolling nflverse roster ({str(sha256)[:12]}…) no longer matches the newest "
+            f"pin: +{len(added)} -{len(removed)} ~{len(changed)} players. Review with "
+            f"`na-crosswalk nflverse-refresh --season {config.season} --reviewed-at "
+            f"{reviewed_at.isoformat()}` and paste the new pin entry",
+            summary,
+        )
+    return "succeeded", summary, None
 
 
 def _usd(nanos: int) -> str:

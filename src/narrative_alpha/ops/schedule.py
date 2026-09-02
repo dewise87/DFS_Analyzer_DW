@@ -383,13 +383,15 @@ def _reminder_script(
         f"printf '%s\\n' {shlex.quote(line.format(season=config.season))} >>\"$LOG\""
         for line in reminder.instructions
     )
-    notification = reminder.notification.replace('"', "'")
+    applescript = (
+        f'display notification "{_applescript_text(reminder.notification)}" '
+        f'with title "Narrative Alpha" subtitle "{_applescript_text(reminder.title)}"'
+    )
     timing = (
         f"Design-doc section 9.0 fixes this at "
         f"{reminder.eastern_time.strftime('%H:%M')} Eastern, which is "
         f"{local_time.strftime('%H:%M')} local for season {config.season}."
     )
-    title = reminder.title.replace('"', "'")
     return f"""#!/bin/sh
 {WRAPPER_MARKER} {label}
 # Written by `na-ops schedule install`. Reminder only: this job does no data work, opens
@@ -403,9 +405,14 @@ mkdir -p "$(dirname "$LOG")"
 printf '%s %s\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(reminder.title)} >>"$LOG"
 {instructions}
 printf '\\n' >>"$LOG"
-/usr/bin/osascript -e 'display notification "{notification}" with title "Narrative Alpha" \
-subtitle "{title}"' || true
+/usr/bin/osascript -e {shlex.quote(applescript)} || true
 """
+
+
+def _applescript_text(value: str) -> str:
+    """Escape a string for an AppleScript double-quoted literal."""
+
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def install_schedule(

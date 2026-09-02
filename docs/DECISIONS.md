@@ -2,6 +2,29 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slice 18 review outcomes
+
+- **The lane does not extract against an empty roster.** With zero `players` rows every
+  extracted name would land in the unresolved queue as a by-hand `na-crosswalk resolve`,
+  and seeding afterwards does not resolve them retroactively. `na-ops batch` records the
+  extract step as skipped with that reason and leaves the watermark alone. The production
+  store is in exactly this state today, so the first scheduled run would otherwise have
+  created thousands of manual tasks.
+- **The extraction window closes after collection, not at batch start.** With one shared
+  instant, items collected at `observed_at == started_at` fell outside the exclusive window
+  end and waited a whole cadence. The lane now reads the clock again after collection; an
+  injected `now` still pins everything to one instant for tests and replays.
+- **A moved roster is a recorded failure with the re-pin command in it, and the refresh
+  helper can bootstrap without the prior bytes.** The 2026 pin's bytes were never archived
+  and upstream overwrote the rolling asset on or before 2026-09-02, so the weekly check
+  would have failed closed forever while the helper refused to produce a new entry. The
+  helper now accepts `--allow-missing-prior`: it archives the current bytes, prints the
+  hash and paste entry, and states that the diff is unavailable rather than inventing one.
+  The lane also treats "rolling hash ≠ pin" as a failed step, because a roster the store
+  cannot see is a by-hand task the screen must show. Review dates are UTC dates.
+- **Reminder notifications are one shell word.** The AppleScript is escaped and
+  `shlex`-quoted, so a title or message with an apostrophe cannot break the wrapper.
+
 ## 2026-09-02 — Slice 18 operator console
 
 - **`na-ops` is the UI for season one, and the CLI stays the source of truth.** The batch

@@ -32,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--season", type=int, required=True)
     refresh.add_argument("--reviewed-at", type=date.fromisoformat, required=True)
     refresh.add_argument("--archive", type=Path, default=DEFAULT_NFLVERSE_ARCHIVE)
+    refresh.add_argument(
+        "--allow-missing-prior",
+        action="store_true",
+        help=(
+            "bootstrap when the newest pin's bytes were never archived and upstream has "
+            "moved: report the current hash and paste entry without a player diff"
+        ),
+    )
     return parser
 
 
@@ -43,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.season,
                 args.archive,
                 reviewed_at=args.reviewed_at,
+                allow_missing_prior=args.allow_missing_prior,
             )
             print(report.render(), end="")
             return 0

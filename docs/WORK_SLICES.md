@@ -1008,6 +1008,17 @@ The enabled-source loop moved out of `collect_cli` into
 implementation. README "Weekly operations" is now install-once, `na-ops status`, and what
 stays manual. Suite 435 -> 458.
 
+**Reviewed 2026-09-02** (solo review; see `DECISIONS.md` "Slice 18 review outcomes"). Three
+majors fixed: the lane would have extracted the 3,852-item backlog against an empty roster
+and created thousands of manual resolutions (extraction now waits, stated as a skip); the
+extraction window closed at batch start so the items a run had just collected waited a
+cadence (the window now closes after collection); and the weekly nflverse check would have
+failed closed forever — the 2026 pin's bytes were never archived and upstream has already
+overwritten the asset — with no way to produce a new pin (`nflverse-refresh
+--allow-missing-prior` bootstraps, and a moved roster is a recorded failure carrying the
+command). Minor: AppleScript quoting, UTC review dates. Verified `na-ops status` against a
+copy of the production store (0.8 s). Suite 461 -> 466.
+
 ---
 
 ### Slice 19 — First live Stage 1 run + extraction eval set
@@ -1038,10 +1049,14 @@ signal.
 > together with its `.stage1-receipts/` sibling before any live run (see `data/README.md`).
 >
 > 1. **Precondition: the crosswalk is unseeded.** `players` has zero rows on the production
->    database, so every name would queue as unresolved. Add `na-crosswalk seed --season 2026
->    --as-of <date>` around the existing `seed_nflverse_roster` (Slice 16 dated pins and
->    archive) if no CLI exists, run it, and record the result. Do not proceed to a live run
->    until the roster is seeded.
+>    database, so every name would queue as unresolved, and `na-ops batch` refuses to extract
+>    until it is seeded. The 2026 pin is also stale: upstream overwrote `roster_2026.csv`
+>    before its bytes were archived. First run `na-crosswalk nflverse-refresh --season 2026
+>    --reviewed-at <today> --allow-missing-prior`, review the roster file it archived, and
+>    paste the printed entry into `PINNED_ROSTER_RELEASES`. Then add `na-crosswalk seed
+>    --season 2026 --as-of <date>` around the existing `seed_nflverse_roster` if no CLI
+>    exists, run it, and record the result. Do not proceed to a live run until the roster is
+>    seeded.
 > 2. **Dry run over the whole backlog.** Report item count, estimated cost, and how many items
 >    the preflight excluded for injection markers, policy, TTL, or name/team validation.
 >    Print the excluded items' titles. On real headlines an injection false-positive rate
