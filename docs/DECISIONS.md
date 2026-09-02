@@ -262,6 +262,20 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-02 — Slice 24 review outcomes
+
+- **The dashboard trusts its loopback name, not the `Host` header it is handed.** The
+  delivered origin check compared `Origin` with `Host`, both of which a browser derives from
+  the name it navigated to. A hostile page can re-point its own name at 127.0.0.1 after it has
+  loaded (DNS rebinding), after which the browser treats this server as that page's origin:
+  every page is readable and a form post carries matching headers. The handler now refuses any
+  request whose `Host` is not `localhost`, `127.0.0.1`, or `[::1]` on the bound port, with 421
+  and the address to use instead, before the path is read. The loopback bind remains the whole
+  security boundary; this closes the one way a browser could cross it from outside.
+- **No authentication, still by design.** Anything with a shell on this Mac can drive the
+  page; that is the same trust the terminal already extends. Revisit only if the tool ever
+  leaves loopback, which the bind check forbids.
+
 ## 2026-09-02 — Slice 17 review outcomes
 
 - **Canonical UTC-Z is enforced by the database, not by a registered SQL function.** The

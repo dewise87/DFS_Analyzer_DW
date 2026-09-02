@@ -1543,6 +1543,14 @@ page says in words rather than implying it knows about every run. (2) There is n
 authentication, by design: the loopback bind is the whole boundary, so anything with a
 shell on this Mac can drive it. Suite 542 → 589.
 
+**Review outcome (2026-09-02):** one gap, fixed. The origin check compared `Origin` with
+`Host`, and a browser fills both from the name it navigated to — so a page whose own
+name is re-pointed at 127.0.0.1 after it loads (DNS rebinding) could read every page and
+post a form with the two headers agreeing. The handler now refuses, before reading the
+path, any request whose `Host` is not a loopback name on the bound port (`localhost`,
+`127.0.0.1`, `[::1]`), with HTTP 421 and the remedy. Seven tests cover it, including the
+case where `Origin` and `Host` agree under the rebound name. Suite 589 → 596.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** stays open until real exports exist under

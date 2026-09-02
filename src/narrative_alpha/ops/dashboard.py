@@ -92,6 +92,10 @@ class LaneBusyError(DashboardError):
     """A lane was asked to start while its own previous run is still going."""
 
 
+class MisdirectedHostError(DashboardError):
+    """A request reached this server under a name that is not its loopback name."""
+
+
 @dataclass(frozen=True)
 class LaneState:
     """What one lane is doing now, and what it did last."""
@@ -340,6 +344,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         try:
+            self._check_host()
             if path == "/":
                 self._html(_status_page(self.context))
             elif path == "/queues":
@@ -354,6 +359,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._empty(HTTPStatus.NO_CONTENT)
             else:
                 self._html(_not_found_page(path), status=HTTPStatus.NOT_FOUND)
+        except MisdirectedHostError as error:
+            self._html(
+                _problem_page("The request was refused", str(error)),
+                status=HTTPStatus.MISDIRECTED_REQUEST,
+            )
         except DASHBOARD_REQUEST_ERRORS as error:
             self._html(
                 _problem_page("This page could not be read", str(error)),
@@ -363,6 +373,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         try:
+            self._check_host()
             self._check_origin()
             form = self._read_form()
             _require_confirmation(form)
@@ -380,6 +391,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._html(_not_found_page(path), status=HTTPStatus.NOT_FOUND)
         except LaneBusyError as error:
             self._html(_problem_page("That lane is already running", str(error)), status=409)
+        except MisdirectedHostError as error:
+            self._html(
+                _problem_page("The request was refused", str(error)),
+                status=HTTPStatus.MISDIRECTED_REQUEST,
+            )
         except (CrosswalkError, DashboardError, ValueError) as error:
             self._html(
                 _problem_page("The action was refused", str(error)),
@@ -390,6 +406,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _problem_page("The action failed", f"{type(error).__name__}: {error}"),
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+    def _check_host(self) -> None:
+        """Refuse a request whose ``Host`` names anything but this loopback server.
+
+        The origin check below compares ``Origin`` with ``Host``, and a browser fills in
+        both from the name it navigated to. A hostile page can arrange for its own name to
+        resolve to 127.0.0.1 after it has loaded (DNS rebinding); the browser then talks
+        to this server as if it were that page's origin, reads every page, and the two
+        headers agree. The name is the tell: nothing legitimate reaches this server by any
+        name but the loopback ones, so any other name is refused before the path is read.
+        """
+
+        raw = self.headers.get("Host")
+        if raw is None:
+            raise MisdirectedHostError(
+                "refusing a request that named no Host: every browser sends one, and this "
+                "page trusts the loopback name it is served under and nothing else"
+            )
+        host, port = _split_host(raw)
+        bound_port = cast("DashboardServer", self.server).port
+        if _is_loopback_name(host) and port == bound_port:
+            return
+        raise MisdirectedHostError(
+            f"refusing a request addressed to {raw!r}: this server answers only to "
+            f"127.0.0.1:{bound_port}, localhost:{bound_port}, or [::1]:{bound_port}. A "
+            "browser that reached it under another name resolved that name to this "
+            "machine, which is what a rebinding attack looks like. Open "
+            f"http://127.0.0.1:{bound_port}/ by that address"
+        )
 
     def _check_origin(self) -> None:
         """Refuse a form post that another origin sent to this port.
@@ -463,6 +508,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
 # What a request may raise while reading the store or the filesystem: a bad state, not a
 # broken program. Anything else propagates and http.server logs it as the bug it is.
 DASHBOARD_REQUEST_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError)
+
+
+def _split_host(raw: str) -> tuple[str, int | None]:
+    """The name and the port of a ``Host`` header; an IPv6 literal keeps its brackets off."""
+
+    value = raw.strip()
+    if value.startswith("["):
+        end = value.find("]")
+        if end == -1:
+            return value, None
+        host, rest = value[1:end], value[end + 1 :]
+    else:
+        host, _, rest = value.partition(":")
+        rest = f":{rest}" if rest else ""
+    if not rest:
+        return host, 80
+    if not rest.startswith(":") or not rest[1:].isdigit():
+        return host, None
+    return host, int(rest[1:])
+
+
+def _is_loopback_name(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _require_confirmation(form: Mapping[str, list[str]]) -> None:

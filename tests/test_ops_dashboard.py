@@ -198,6 +198,20 @@ class _Client:
     def get(self, path: str) -> tuple[int, str]:
         return self._request("GET", path, body=None, headers={})
 
+    def get_with_host(self, path: str, host: str | None) -> tuple[int, str]:
+        """GET with the `Host` header set to `host`, or sent without one when None."""
+
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            connection.putrequest("GET", path, skip_host=True)
+            if host is not None:
+                connection.putheader("Host", host)
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, response.read().decode("utf-8")
+        finally:
+            connection.close()
+
     def post(
         self,
         path: str,
@@ -574,6 +588,66 @@ def test_a_write_from_this_pages_own_origin_is_allowed(
     assert status == 303, body
     with connect_database(seeded.database) as connection:
         assert not PlayerCrosswalk(connection).list_unresolved()
+
+
+def test_a_request_under_another_name_is_refused(seeded_client: _Client) -> None:
+    """DNS rebinding: a hostile page's own name resolving to 127.0.0.1 after it loaded."""
+
+    status, body = seeded_client.get_with_host("/", f"attacker.example:{seeded_client.port}")
+
+    assert status == 421
+    assert "attacker.example" in body
+    assert "rebinding" in body
+    assert f"http://127.0.0.1:{seeded_client.port}/" in body
+    assert "Unresolved identities" not in body
+
+
+def test_a_write_under_another_name_is_refused_even_when_origin_agrees(
+    seeded: Any,
+    seeded_client: _Client,
+) -> None:
+    """Under a rebound name, Origin and Host agree — so the origin check alone would pass."""
+
+    with connect_database(seeded.database) as connection:
+        unresolved_id = PlayerCrosswalk(connection).list_unresolved()[0].unresolved_id
+    name = f"attacker.example:{seeded_client.port}"
+
+    status, body = seeded_client.post(
+        "/queues/resolve",
+        f"unresolved_id={unresolved_id}&decision=ignore&confirm=yes",
+        headers={"Host": name, "Origin": f"http://{name}"},
+    )
+
+    assert status == 421, body
+    with connect_database(seeded.database) as connection:
+        assert len(PlayerCrosswalk(connection).list_unresolved()) == 1
+
+
+@pytest.mark.parametrize("name", ["localhost", "127.0.0.1", "[::1]"])
+def test_every_loopback_name_on_the_bound_port_is_accepted(
+    seeded_client: _Client,
+    name: str,
+) -> None:
+    status, body = seeded_client.get_with_host("/", f"{name}:{seeded_client.port}")
+
+    assert status == 200, body
+    assert "Lanes" in body
+
+
+def test_the_loopback_name_on_another_port_is_refused(seeded_client: _Client) -> None:
+    """A rebinding page may run on a port of its own; the name and the port both matter."""
+
+    status, body = seeded_client.get_with_host("/", "127.0.0.1:1")
+
+    assert status == 421
+    assert "127.0.0.1:1" in body
+
+
+def test_a_request_naming_no_host_is_refused(seeded_client: _Client) -> None:
+    status, body = seeded_client.get_with_host("/", None)
+
+    assert status == 421
+    assert "named no Host" in body
 
 
 def test_the_favicon_is_answered_without_a_body(empty_client: _Client) -> None:

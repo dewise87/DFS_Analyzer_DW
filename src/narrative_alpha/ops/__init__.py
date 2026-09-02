@@ -23,6 +23,7 @@ from narrative_alpha.ops.dashboard import (
     LaneBusyError,
     LaneRunner,
     LaneState,
+    MisdirectedHostError,
     build_dashboard,
     serve_dashboard,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "LaneBusyError",
     "LaneRunner",
     "LaneState",
+    "MisdirectedHostError",
     "OpsConfig",
     "OpsConfigError",
     "OpsStatus",

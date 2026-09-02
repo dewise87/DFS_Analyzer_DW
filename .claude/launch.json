@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "na-ops-dashboard",
+      "runtimeExecutable": "/Users/danielwise/.local/bin/uv",
+      "runtimeArgs": ["run", "na-ops", "dashboard", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}
