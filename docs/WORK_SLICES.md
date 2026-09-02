@@ -1419,6 +1419,52 @@ existing commands, mirroring `ops/batch.py`.
 > slate section on an empty store and a seeded one. No network. Run
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Implementation status (2026-09-02):** `src/narrative_alpha/ops/slate.py` and
+`na-ops slate` run the Saturday/Sunday session as six isolated steps recorded in
+`ops_runs`: `slate_salaries` → `slate_projections` → `slate_episodes` → `slate_features` →
+`slate_build` → `slate_memo`. Migration `0012_ops_runs_slate_steps.sql` rebuilds `ops_runs`
+to widen the `step` CHECK; the four batch names are unchanged and every existing row is
+copied verbatim, and `batch_run_id` keeps its name while now holding `ops-…` or `slate-…`.
+The step recorder, the isolation, and `StepOutcome` moved out of `batch.py` into `runs.py`
+so both lanes share one implementation; the recorder gained a `base_summary` that is merged
+under every row, which is how `decision_at`, season, week, and site reach *every* step's
+summary — including a step that failed before it had a summary of its own.
+
+`decision_at` defaults to now and is the single cutoff passed to the episode build, the
+feature build, and the decision build. A cutoff earlier than the run is refused up front
+rather than left to fail four times: the lane stamps `ingested_at` at now, and Stage 3's
+point-in-time reads require `ingested_at <= as_of`, so a past cutoff cannot see what the
+lane just wrote. Episodes are slate-independent and run even when no slate resolved, so a
+bad salary export costs only the slate steps. A week with two slates for the site refuses
+to guess and names the candidates for `--slate-id`.
+
+Fail-closed gates sit in front of the build: pending identities for the site stop it with
+one `na-crosswalk resolve` line per player, and no point-in-time-eligible projection stops
+it naming which capture kinds are missing for the week. A capture whose vendor has no
+registered `SourceFormat` is a recorded failure naming the vendor and is not partly loaded;
+the lane continues. `build.py` gained `BuildDuplicateError` (code `decision_already_exists`)
+so a rerun at the same instant reloads and replay-verifies the frozen decision instead of
+refusing — the id is a hash of the request bytes and the cutoff, so an identical id is
+provably the identical decision, and a different `--lineups` builds a new one.
+`report_cli`'s `load_build_result`, `default_report_path`, and `write_report_atomic` are
+public for that reuse. `na-ops status` gained a SLATE LANE section: per-step history, how
+many captured files of each kind actually reached the store (proved by the file's own
+sha256 appearing on a row), each slate with its lock time/players/unresolved count and
+latest observations, features at the latest decision instant, and the frozen decision. The
+launchd reminders now name `na-ops slate` as the command after the captures.
+
+Open items: (1) no vendor `SourceFormat` adapter exists (Slice 9), so today every real
+projection/ownership capture is a recorded failure and the build then refuses for want of a
+projection — the lane cannot yet produce a lineup from real vendor files. (2) The projection
+loader has no team-defence path: `slates.py` resolves DSTs to a canonical `dst:<code>`
+player, but `load_projection_capture` sends a vendor's DST rows through the ordinary
+crosswalk, which has no candidate pool for them. Unless the seeded roster carries a defence
+row per franchise, all 32 defences queue every week and the build stops — decide this
+against the first real vendor file, with Slice 9. (3) The lane opens no `model_runs` row, so
+the rows it ingests carry a NULL `run_id`, as `na-slate ingest` does today; a run is traced
+through `ops_runs` and each row's `source_file_sha256`. Two pre-existing `ruff` findings
+(under the newer pinned ruff) were fixed so `ruff check .` is green. Suite 527 → 541.
+
 ### Slice 24 — Local dashboard (read-mostly, one page)
 
 **Goal:** the "not pretty, but simple" UI: a single local web page that shows `na-ops status`,

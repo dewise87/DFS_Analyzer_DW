@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    output_path = arguments.output or _default_output(arguments.decision_snapshot_id)
+    output_path = arguments.output or default_report_path(arguments.decision_snapshot_id)
     try:
         thresholds = BaselineThresholds(
             minimum_sample_size=arguments.minimum_sample_size,
@@ -106,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         with connect_database(arguments.database) as connection:
             apply_migrations(connection)
-            build_result = _load_build_result(
+            build_result = load_build_result(
                 connection,
                 decision_snapshot_id=arguments.decision_snapshot_id,
                 decision_at=arguments.decision_at,
@@ -129,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         bundle = render_report_bundle(memo, baseline)
-        _write_atomic(output_path, bundle)
+        write_report_atomic(output_path, bundle)
     except (
         BaselineReportError,
         MigrationError,
@@ -179,13 +179,20 @@ def render_report_bundle(
     )
 
 
-def _load_build_result(
+def load_build_result(
     connection: sqlite3.Connection,
     *,
     decision_snapshot_id: str,
     decision_at: datetime,
     artifact_root: Path,
 ) -> BuildResult:
+    """Reconstruct a frozen decision, refusing unless the replay reproduces its bytes.
+
+    Public because the slate lane reuses it: an already-frozen decision is reloaded and
+    re-verified here rather than rebuilt, so the memo it writes is backed by the same
+    checks `na-report` applies.
+    """
+
     root = artifact_root.resolve()
     session = PointInTimeSession(connection)
     snapshot = session.decision_snapshot(decision_snapshot_id, as_of=decision_at)
@@ -276,7 +283,9 @@ def _safe_artifact_path(root: Path, artifact: DecisionManifestHash) -> Path:
     return candidate
 
 
-def _write_atomic(path: Path, content: str) -> None:
+def write_report_atomic(path: Path, content: str) -> None:
+    """Write a report bundle so a reader never sees a half-written file."""
+
     destination = path.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -296,11 +305,17 @@ def _write_atomic(path: Path, content: str) -> None:
         raise
 
 
-def _default_output(decision_snapshot_id: str) -> Path:
+def default_report_path(
+    decision_snapshot_id: str,
+    *,
+    directory: Path = DEFAULT_REPORT_DIRECTORY,
+) -> Path:
+    """Where a decision's bundle is written when no explicit output path is given."""
+
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", decision_snapshot_id).strip("._")
     if not safe_name:
         safe_name = "decision-report"
-    return DEFAULT_REPORT_DIRECTORY / f"{safe_name}.txt"
+    return directory / f"{safe_name}.txt"
 
 
 def _timestamp(value: str) -> datetime:

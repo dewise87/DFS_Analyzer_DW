@@ -32,7 +32,7 @@ src/narrative_alpha/
   narrative/        L4: evidence extraction, episode clustering, signal registry
   portfolio/        L5: contest selection, simulation, optimizer adapter, late swap
   interface/        L6: MCP tools, slate memo, dashboard, alerts
-  ops/              L6: operator console (na-ops): batch lane, status, launchd
+  ops/              L6: operator console (na-ops): batch and slate lanes, status, launchd
 data/               Local data (gitignored except structure docs)
 tests/              pytest; property tests for roster rules; golden-file CSV tests
 ```
@@ -49,8 +49,9 @@ uv run pytest
 
 ## Weekly operations
 
-One command runs the week and one screen reports it. Everything below the two commands is
-what a person still has to do by hand.
+Two commands run the week — `na-ops batch` mid-week, `na-ops slate` on Saturday and Sunday
+— and one screen reports both. Everything below them is what a person still has to do by
+hand.
 
 **Install once.** Put the Anthropic API key in the login Keychain (the scheduled jobs read
 it at run time; it is never written into a plist, a log, or this repository), then install
@@ -92,13 +93,18 @@ laptop delays the Wednesday batch rather than skipping the week.
 uv run na-ops status
 ```
 
-One page: per-step last success and last failure with age, dead feeds from the last
-collection, items collected in the last 7 days, the Stage 1 backlog and what it would cost
-to clear, review flags, in-flight attempts, pending accepted-batch receipts, the crosswalk
-unresolved queue, whether a roster is seeded at all, this week's snapshot coverage, and
-Stage 1 spend month-to-date against `monthly_llm_budget_usd`. `--json` prints the same
-data. It answers "did this week run, and what do I need to do by hand" without any other
-command.
+One page: per-step last success and last failure with age for both lanes, dead feeds from
+the last collection, items collected in the last 7 days, the Stage 1 backlog and what it
+would cost to clear, review flags, in-flight attempts, pending accepted-batch receipts, the
+crosswalk unresolved queue, whether a roster is seeded at all, this week's snapshot
+coverage, and Stage 1 spend month-to-date against `monthly_llm_budget_usd`. Its SLATE LANE
+section adds, for the current week: how many captured files of each kind have actually
+reached the store (proved by the file's own hash appearing on a row, not by a step
+reporting success), each ingested slate with its lock time, player count and unresolved
+count, the latest salary/projection/ownership observation, how many features exist at the
+latest decision instant, and the decision snapshot frozen against it. `--json` prints the
+same data. It answers "did this week run, and what do I need to do by hand" without any
+other command.
 
 **Run the lane by hand** when you want it now rather than on Wednesday:
 
@@ -123,16 +129,60 @@ whole batch, records the refusal as a failed step, and prints the numbers. There
 partial "submit what fits": that would make the covered window a function of the budget,
 which no later replay could reconstruct.
 
+**Run the slate** on Saturday and on Sunday, after the captures:
+
+```bash
+uv run na-ops slate --season 2026 --week 1 --site dk --lineups 20
+```
+
+One command from captured files to an upload CSV. Six isolated steps, each recorded in
+`ops_runs` exactly as the batch lane records its own: ingest the newest salary capture →
+ingest every projection and ownership capture of the week that has a registered vendor
+adapter → build Stage 2 episodes → build Stage 3 features for the slate → freeze the
+decision snapshot with its upload CSV → write the memo. It prints the memo path, the upload
+CSV path, the decision snapshot id, and the one-line `na-replay` command that reproduces
+the bytes.
+
+`--decision-at` is the single cutoff handed to the episode build, the feature build, and
+the decision build, and it is written into every step's summary, so the whole run replays
+from one instant. It defaults to now. A cutoff *earlier* than the run is refused up front:
+the lane ingests as of now, so nothing it loads would be visible at that instant — use
+`na-build --decision-at` to rebuild an earlier decision and `na-replay` to reproduce a
+frozen one.
+
+The lane fails closed where the Minimum Lovable Pipeline requires it. Unresolved players
+stop the build step and print the exact `na-crosswalk resolve` command for each one. No
+point-in-time-eligible projection stops the build and says which capture kinds are missing
+for the week. A capture whose vendor has no registered `SourceFormat` adapter is a recorded
+failure naming the vendor — nothing is guessed, that capture is not partly loaded, and the
+lane continues. Everything else still records, and the run exits nonzero if any step
+failed.
+
+Rerunning at the same `--decision-at` is a no-op that re-verifies: salaries and vendor rows
+are duplicates, the episode and feature snapshots are reused, and the already-frozen
+decision is reloaded and replay-checked rather than rebuilt. Give it a different
+`--lineups` and it is a different request, so it builds a new decision.
+
+Use `--slate-id` only when the week holds more than one slate for the site (a classic and a
+showdown export captured together); without it the lane refuses to guess and names the
+candidates. `--starts-at` is needed for FanDuel classic exports, which omit kickoff times.
+
+**No vendor adapter has landed yet.** The `SourceFormatRegistry` the lane hands to the
+projection loader is empty, so until the first adapter exists every real projection or
+ownership capture is a recorded failure naming its vendor, and the build step then refuses
+for want of a projection. That is the intended behaviour — a guessed vendor schema is worse
+than a stated gap — but it means the lane cannot produce a lineup from real vendor files
+yet.
+
 ### What is still manual
 
 - **Saturday 6:00 p.m. ET** — download DK/FD salaries, purchased projections, and baseline
   ownership; capture each with `na-snapshot capture`, then `na-snapshot fetch` odds and
-  weather and `na-snapshot verify` the week. Then load the salary capture and read back the
-  slate ids: `na-slate ingest` → `na-slate list` (below).
+  weather and `na-snapshot verify` the week. Then run `na-ops slate` (above).
 - **Sunday 9:00 a.m. and 11:00 a.m. ET** — re-capture projections and ownership and
   refresh odds and weather. The 11:00 a.m. capture is irreplaceable: after lock the
-  pre-lock state is gone. Re-run `na-slate ingest` on the Sunday salary re-download; it
-  versions the salaries rather than overwriting Saturday's.
+  pre-lock state is gone. Re-run `na-ops slate`; it versions the salaries rather than
+  overwriting Saturday's, and the 11:00 a.m. run is the one you upload.
 - **Sunday post-slate** — export contest standings for every probe contest.
 - **Whenever `status` says so** — clear the crosswalk unresolved queue
   (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
@@ -327,7 +377,8 @@ for lineup generation.
 
 A salary export is the only file that names a slate, so `na-slate` is the only writer of
 `slates` rows and the step that turns a capture into the `slate_id` that `na-build`,
-`na-features`, and `na-report` all require:
+`na-features`, and `na-report` all require. `na-ops slate` runs this step for you; reach
+for `na-slate` directly when you want to ingest or inspect without running the whole lane:
 
 ```bash
 uv run na-slate ingest --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk

@@ -1,10 +1,10 @@
-"""L6: the operator console — one command for the week, one screen for its state."""
+"""L6: the operator console — one command per lane, one screen for their state."""
 
 from narrative_alpha.ops.batch import (
+    BATCH_STEP_ERRORS,
     DEFAULT_DEPENDENCIES,
     BatchDependencies,
     BatchReport,
-    StepOutcome,
     extraction_window_start,
     run_batch,
 )
@@ -15,10 +15,15 @@ from narrative_alpha.ops.config import (
     load_ops_config,
 )
 from narrative_alpha.ops.runs import (
+    BATCH_STEPS,
     OPS_STEPS,
+    SLATE_STEPS,
     OpsStep,
     OpsStepStatus,
     RecordedRun,
+    StepFailure,
+    StepOutcome,
+    StepRecorder,
     last_run,
     last_run_any_status,
     record_ops_run,
@@ -36,19 +41,35 @@ from narrative_alpha.ops.schedule import (
     install_schedule,
     uninstall_schedule,
 )
+from narrative_alpha.ops.slate import (
+    DEFAULT_SLATE_DEPENDENCIES,
+    SLATE_STEP_ERRORS,
+    SlateDependencies,
+    SlateReport,
+    replay_command,
+    run_slate,
+)
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.ops.status import (
     OpsStatus,
+    SlateCaptureStatus,
+    SlateLaneStatus,
+    SlateStatus,
     collect_ops_status,
     render_status,
     status_payload,
 )
 
 __all__ = [
+    "BATCH_STEPS",
+    "BATCH_STEP_ERRORS",
     "DEFAULT_DEPENDENCIES",
     "DEFAULT_OPS_CONFIG_PATH",
+    "DEFAULT_SLATE_DEPENDENCIES",
     "OPS_STEPS",
     "REMINDERS",
+    "SLATE_STEPS",
+    "SLATE_STEP_ERRORS",
     "BatchDependencies",
     "BatchReport",
     "JobState",
@@ -61,7 +82,14 @@ __all__ = [
     "ScheduleChange",
     "ScheduleError",
     "ScheduledJob",
+    "SlateCaptureStatus",
+    "SlateDependencies",
+    "SlateLaneStatus",
+    "SlateReport",
+    "SlateStatus",
+    "StepFailure",
     "StepOutcome",
+    "StepRecorder",
     "build_jobs",
     "collect_ops_status",
     "default_na_ops_executable",
@@ -76,7 +104,9 @@ __all__ = [
     "month_to_date_spend_nanos",
     "record_ops_run",
     "render_status",
+    "replay_command",
     "run_batch",
+    "run_slate",
     "status_payload",
     "uninstall_schedule",
 ]

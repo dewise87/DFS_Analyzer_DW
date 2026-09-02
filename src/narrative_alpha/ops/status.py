@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
+from narrative_alpha.ingest.slates import SlateSummary, list_slates
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.narrative import (
     ExtractionError,
@@ -24,9 +25,16 @@ from narrative_alpha.narrative import (
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import DEFAULT_PRICING_PATH
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
-from narrative_alpha.ops.runs import OPS_STEPS, OpsStep, last_run
+from narrative_alpha.ops.runs import (
+    BATCH_STEPS,
+    SLATE_STEPS,
+    OpsStep,
+    last_run,
+    last_run_any_status,
+)
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
-from narrative_alpha.snapshots.core import collect_status
+from narrative_alpha.snapshots import MANIFEST_FILENAME, load_manifest
+from narrative_alpha.snapshots.core import collect_status, snapshot_week_path
 from narrative_alpha.snapshots.models import CaptureKind
 
 RECEIPT_DIRECTORY_SUFFIX = ".stage1-receipts"
@@ -55,6 +63,47 @@ class SnapshotWeekStatus:
 
 
 @dataclass(frozen=True)
+class SlateCaptureStatus:
+    """How much of one capture kind for the week has actually reached the store."""
+
+    kind: str
+    files_captured: int
+    files_ingested: int
+
+
+@dataclass(frozen=True)
+class SlateStatus:
+    """One ingested slate and the state of the decision built against it."""
+
+    slate_id: int
+    external_slate_id: str
+    site: str
+    slate_type: str
+    name: str
+    locks_at: datetime
+    player_count: int
+    unresolved_count: int
+    latest_salary_at: datetime | None
+    latest_projection_at: datetime | None
+    latest_ownership_at: datetime | None
+    feature_rows_at_decision: int
+    decision_snapshot_id: str | None
+    decision_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SlateLaneStatus:
+    """The slate lane's week: what is captured, what is ingested, what was decided."""
+
+    season: int
+    week: int
+    captures: tuple[SlateCaptureStatus, ...]
+    slates: tuple[SlateStatus, ...]
+    decision_at: datetime | None
+    episode_rows_at_decision: int
+
+
+@dataclass(frozen=True)
 class OpsStatus:
     """The whole screen as data, so `--json` and the text render never diverge."""
 
@@ -62,6 +111,7 @@ class OpsStatus:
     database: Path
     config_path: Path
     steps: tuple[StepHistory, ...]
+    slate_steps: tuple[StepHistory, ...]
     dead_feed_count: int | None
     dead_feed_source_ids: tuple[str, ...]
     last_collection_at: datetime | None
@@ -76,6 +126,7 @@ class OpsStatus:
     player_rows: int
     snapshot_week: SnapshotWeekStatus | None
     snapshot_problems: tuple[str, ...]
+    slate: SlateLaneStatus | None
     month_to_date_spend_usd: str
     monthly_budget_usd: str
     budget_remaining_usd: str
@@ -105,7 +156,7 @@ class OpsStatus:
                 f"{self.inflight_attempts} extraction attempt(s) are in flight: rerun the "
                 "batch to resume, or `na-extract abandon` a stuck one"
             )
-        for step in self.steps:
+        for step in (*self.steps, *self.slate_steps):
             if step.last_failure_at is not None and (
                 step.last_success_at is None or step.last_failure_at > step.last_success_at
             ):
@@ -132,7 +183,8 @@ def collect_ops_status(
     as_of = ensure_utc(now or datetime.now(UTC))
     warnings: list[str] = []
 
-    steps = tuple(_step_history(connection, step=step) for step in OPS_STEPS)
+    steps = tuple(_step_history(connection, step=step) for step in BATCH_STEPS)
+    slate_steps = tuple(_step_history(connection, step=step) for step in SLATE_STEPS)
     collect_run = last_run(connection, step="collect", status="succeeded")
     latest_collect = max(
         (
@@ -174,6 +226,11 @@ def collect_ops_status(
     snapshot_week, snapshot_problems = _snapshot_status(config.snapshot_root)
     warnings.extend(snapshot_problems)
 
+    slate, slate_problems = _slate_status(
+        connection, snapshot_root=config.snapshot_root, week=snapshot_week
+    )
+    warnings.extend(slate_problems)
+
     month_start = month_start_utc(as_of, timezone=config.timezone)
     spent = month_to_date_spend_nanos(connection, since=month_start)
     budget = config.monthly_llm_budget_nanos
@@ -188,6 +245,7 @@ def collect_ops_status(
         database=database,
         config_path=config.path,
         steps=steps,
+        slate_steps=slate_steps,
         dead_feed_count=dead_count,
         dead_feed_source_ids=dead_ids,
         last_collection_at=None if latest_collect is None else latest_collect.started_at,
@@ -206,6 +264,7 @@ def collect_ops_status(
         player_rows=player_rows,
         snapshot_week=snapshot_week,
         snapshot_problems=snapshot_problems,
+        slate=slate,
         month_to_date_spend_usd=_usd(spent),
         monthly_budget_usd=_usd(budget),
         budget_remaining_usd=_usd(max(budget - spent, 0)),
@@ -299,6 +358,181 @@ def _snapshot_status(
     )
 
 
+# Where each capture kind lands, and the column that proves one file reached the store.
+_INGEST_TARGETS: dict[CaptureKind, str] = {
+    CaptureKind.SALARIES: "salaries",
+    CaptureKind.PROJECTIONS: "projection_snapshots",
+    CaptureKind.OWNERSHIP: "ownership_baselines",
+}
+
+
+def _slate_status(
+    connection: sqlite3.Connection,
+    *,
+    snapshot_root: Path,
+    week: SnapshotWeekStatus | None,
+) -> tuple[SlateLaneStatus | None, tuple[str, ...]]:
+    """The slate lane's week. Reads only; a gap is stated, never inferred away."""
+
+    if week is None:
+        return None, ()
+    try:
+        captures = _capture_ingest_status(connection, snapshot_root, week.season, week.week)
+    except (OSError, ValueError) as error:
+        return None, (
+            f"cannot read this week's captures under {snapshot_root}: {error}",
+        )
+
+    decision_at = _latest_decision_instant(connection, season=week.season, week=week.week)
+    episode_rows = (
+        0
+        if decision_at is None
+        else _count(
+            connection,
+            "SELECT count(*) FROM narrative_episodes WHERE as_of = ?",
+            (utc_timestamp(decision_at),),
+        )
+    )
+    slates = tuple(
+        _slate_row(connection, summary, decision_at=decision_at)
+        for summary in list_slates(connection, season=week.season, week=week.week)
+    )
+    return (
+        SlateLaneStatus(
+            season=week.season,
+            week=week.week,
+            captures=captures,
+            slates=slates,
+            decision_at=decision_at,
+            episode_rows_at_decision=episode_rows,
+        ),
+        (),
+    )
+
+
+def _slate_row(
+    connection: sqlite3.Connection,
+    summary: SlateSummary,
+    *,
+    decision_at: datetime | None,
+) -> SlateStatus:
+    decision = connection.execute(
+        """
+        SELECT decision_snapshot_id, decision_at FROM decision_snapshots
+        WHERE slate_id = ?
+        ORDER BY rtrim(decision_at, 'Z') DESC, decision_snapshot_id DESC
+        LIMIT 1
+        """,
+        (summary.slate_id,),
+    ).fetchone()
+    features = (
+        0
+        if decision_at is None
+        else _count(
+            connection,
+            "SELECT count(*) FROM narrative_features "
+            "WHERE slate_id = ? AND site = ? AND as_of = ?",
+            (summary.slate_id, summary.site, utc_timestamp(decision_at)),
+        )
+    )
+    decided_at = (
+        None
+        if decision is None
+        else _parse_stamp(str(decision["decision_at"]))
+    )
+    return SlateStatus(
+        slate_id=summary.slate_id,
+        external_slate_id=summary.external_slate_id,
+        site=summary.site,
+        slate_type=summary.slate_type,
+        name=summary.name,
+        locks_at=summary.locks_at,
+        player_count=summary.player_count,
+        unresolved_count=summary.unresolved_count,
+        latest_salary_at=summary.latest_salary_at,
+        latest_projection_at=summary.latest_projection_at,
+        latest_ownership_at=summary.latest_ownership_at,
+        feature_rows_at_decision=features,
+        decision_snapshot_id=None if decision is None else str(decision["decision_snapshot_id"]),
+        decision_at=decided_at,
+    )
+
+
+def _capture_ingest_status(
+    connection: sqlite3.Connection,
+    snapshot_root: Path,
+    season: int,
+    week: int,
+) -> tuple[SlateCaptureStatus, ...]:
+    """Count, per kind, the week's captured files and how many reached the store.
+
+    "Ingested" is proved by the file's own sha256 appearing on a row, not by a lane
+    having reported success: a step can succeed and still have loaded nothing.
+    """
+
+    captured: dict[CaptureKind, list[str]] = {kind: [] for kind in _INGEST_TARGETS}
+    week_path = snapshot_week_path(snapshot_root, season, week)
+    if week_path.is_dir():
+        for capture_path in sorted(path for path in week_path.iterdir() if path.is_dir()):
+            manifest_path = capture_path / MANIFEST_FILENAME
+            if not manifest_path.is_file():
+                continue
+            for record in load_manifest(manifest_path).files:
+                if record.kind in captured:
+                    captured[record.kind].append(record.sha256)
+    return tuple(
+        SlateCaptureStatus(
+            kind=kind.value,
+            files_captured=len(hashes),
+            files_ingested=sum(
+                1
+                for file_sha256 in hashes
+                if connection.execute(
+                    f"SELECT 1 FROM {_INGEST_TARGETS[kind]} WHERE source_file_sha256 = ? LIMIT 1",
+                    (file_sha256,),
+                ).fetchone()
+                is not None
+            ),
+        )
+        for kind, hashes in captured.items()
+    )
+
+
+def _latest_decision_instant(
+    connection: sqlite3.Connection,
+    *,
+    season: int,
+    week: int,
+) -> datetime | None:
+    """The newest cutoff the slate lane worked at, whether or not it froze a decision."""
+
+    candidates: list[datetime] = []
+    for step in SLATE_STEPS:
+        recorded = last_run_any_status(connection, step=step)
+        if recorded is None:
+            continue
+        if recorded.summary.get("season") != season or recorded.summary.get("week") != week:
+            continue
+        stored = recorded.summary.get("decision_at")
+        if isinstance(stored, str):
+            candidates.append(_parse_stamp(stored))
+    frozen = connection.execute(
+        """
+        SELECT max(rtrim(d.decision_at, 'Z')) FROM decision_snapshots AS d
+        JOIN slates AS s ON s.slate_id = d.slate_id
+        WHERE s.season = ? AND s.week = ?
+        """,
+        (season, week),
+    ).fetchone()[0]
+    if isinstance(frozen, str) and frozen:
+        candidates.append(_parse_stamp(f"{frozen}Z"))
+    return max(candidates, default=None)
+
+
+def _parse_stamp(value: str) -> datetime:
+    return ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+
+
 def _count(
     connection: sqlite3.Connection,
     sql: str,
@@ -380,6 +614,18 @@ def render_status(status: OpsStatus) -> str:
         lines.append(f"  {week.season} week {week.week:02d}")
         lines.extend(f"    {kind:<14} {stamp}" for kind, stamp in week.captured)
 
+    lines.extend(("", "SLATE LANE (`na-ops slate`)"))
+    for step in status.slate_steps:
+        lines.append(
+            f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}"
+        )
+        if step.last_failure_at is not None:
+            lines.append(
+                f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}"
+            )
+            lines.append(f"  {'':<18}   {step.last_failure_text}")
+    lines.extend(_render_slate_week(status))
+
     if status.warnings:
         lines.extend(("", "WARNINGS"))
         lines.extend(f"  ! {warning}" for warning in status.warnings)
@@ -392,6 +638,57 @@ def render_status(status: OpsStatus) -> str:
         lines.extend(f"  - {action}" for action in actions)
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_slate_week(status: OpsStatus) -> list[str]:
+    """The slate half of the screen: captures in, decision out, nothing summarized away."""
+
+    slate = status.slate
+    if slate is None:
+        return ["", "  no snapshot week is initialized, so no slate week can be shown"]
+
+    lines = ["", f"  {slate.season} week {slate.week:02d}"]
+    for capture in slate.captures:
+        state = (
+            "none captured"
+            if capture.files_captured == 0
+            else f"{capture.files_ingested} of {capture.files_captured} file(s) ingested"
+        )
+        lines.append(f"    {capture.kind:<14} {state}")
+    if slate.decision_at is None:
+        lines.append("    decision       never — `na-ops slate` has not run for this week")
+    else:
+        lines.append(f"    decision at    {utc_timestamp(slate.decision_at)}")
+        lines.append(f"    episodes       {slate.episode_rows_at_decision} at that instant")
+    if not slate.slates:
+        lines.append("    slates         none ingested — run `na-ops slate`")
+        return lines
+    for row in slate.slates:
+        lines.append(
+            f"    slate {row.slate_id}  {row.site} {row.slate_type}  "
+            f"locks {utc_timestamp(row.locks_at)}  players {row.player_count}  "
+            f"unresolved {row.unresolved_count}"
+        )
+        lines.append(
+            f"      observed  salaries {_slot(row.latest_salary_at)}  "
+            f"projections {_slot(row.latest_projection_at)}  "
+            f"ownership {_slot(row.latest_ownership_at)}"
+        )
+        lines.append(
+            f"      features  {row.feature_rows_at_decision} at the decision instant"
+        )
+        # The id and its cutoff come from one row, so either both are present or neither.
+        decision = (
+            "none frozen"
+            if row.decision_snapshot_id is None or row.decision_at is None
+            else f"{row.decision_snapshot_id} at {utc_timestamp(row.decision_at)}"
+        )
+        lines.append(f"      decision  {decision}")
+    return lines
+
+
+def _slot(value: datetime | None) -> str:
+    return "MISSING" if value is None else utc_timestamp(value)
 
 
 def status_payload(status: OpsStatus) -> dict[str, object]:
@@ -412,6 +709,52 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
             }
             for step in status.steps
         ],
+        "slate_steps": [
+            {
+                "step": step.step,
+                "last_success_at": _optional_stamp(step.last_success_at),
+                "last_success_age_seconds": _age_seconds(step.last_success_at, status.as_of),
+                "last_failure_at": _optional_stamp(step.last_failure_at),
+                "last_failure_age_seconds": _age_seconds(step.last_failure_at, status.as_of),
+                "last_failure_text": step.last_failure_text,
+            }
+            for step in status.slate_steps
+        ],
+        "slate": None
+        if status.slate is None
+        else {
+            "season": status.slate.season,
+            "week": status.slate.week,
+            "decision_at": _optional_stamp(status.slate.decision_at),
+            "episode_rows_at_decision": status.slate.episode_rows_at_decision,
+            "captures": [
+                {
+                    "kind": capture.kind,
+                    "files_captured": capture.files_captured,
+                    "files_ingested": capture.files_ingested,
+                }
+                for capture in status.slate.captures
+            ],
+            "slates": [
+                {
+                    "slate_id": row.slate_id,
+                    "external_slate_id": row.external_slate_id,
+                    "site": row.site,
+                    "slate_type": row.slate_type,
+                    "name": row.name,
+                    "locks_at": utc_timestamp(row.locks_at),
+                    "player_count": row.player_count,
+                    "unresolved_count": row.unresolved_count,
+                    "latest_salary_at": _optional_stamp(row.latest_salary_at),
+                    "latest_projection_at": _optional_stamp(row.latest_projection_at),
+                    "latest_ownership_at": _optional_stamp(row.latest_ownership_at),
+                    "feature_rows_at_decision": row.feature_rows_at_decision,
+                    "decision_snapshot_id": row.decision_snapshot_id,
+                    "decision_at": _optional_stamp(row.decision_at),
+                }
+                for row in status.slate.slates
+            ],
+        },
         "collection": {
             "dead_feed_count": status.dead_feed_count,
             "dead_feed_source_ids": list(status.dead_feed_source_ids),

@@ -34,7 +34,15 @@ DEFAULT_PROMPT_VERSION_ID = "stage1-extraction-v1"
 # Headline boilerplate dominates token-set Jaccard on 50-150 character items. Function
 # words and team references carry no story identity and are dropped before comparison.
 _STOP_WORDS = frozenset(
-    ["a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from", "has", "have", "he", "her", "him", "his", "i", "if", "in", "into", "is", "it", "its", "of", "on", "or", "our", "she", "that", "the", "their", "them", "then", "there", "these", "they", "this", "those", "to", "was", "we", "were", "what", "when", "where", "which", "who", "will", "with", "would", "you", "your", "nfl", "week", "season", "team", "teams", "game", "games", "says", "said", "say", "report", "reports", "reported", "per", "source", "sources"]
+    [
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from", "has",
+        "have", "he", "her", "him", "his", "i", "if", "in", "into", "is", "it", "its", "of",
+        "on", "or", "our", "she", "that", "the", "their", "them", "then", "there", "these",
+        "they", "this", "those", "to", "was", "we", "were", "what", "when", "where", "which",
+        "who", "will", "with", "would", "you", "your", "nfl", "week", "season", "team", "teams",
+        "game", "games", "says", "said", "say", "report", "reports", "reported", "per",
+        "source", "sources",
+    ]
 )
 
 _TEAM_REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {

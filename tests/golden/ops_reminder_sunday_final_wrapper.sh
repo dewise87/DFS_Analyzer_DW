@@ -18,6 +18,9 @@ printf '%s\n' '  na-snapshot fetch --season 2026 --week <WEEK> --kind odds' >>"$
 printf '%s\n' '  na-snapshot fetch --season 2026 --week <WEEK> --kind weather \' >>"$LOG"
 printf '%s\n' '      --games <games.csv>' >>"$LOG"
 printf '%s\n' '  na-snapshot verify --season 2026 --week <WEEK>' >>"$LOG"
+printf '%s\n' 'Then make the decision — this is the run you upload:' >>"$LOG"
+printf '%s\n' '  na-ops slate --season 2026 --week <WEEK> --site dk --lineups <N>' >>"$LOG"
+printf '%s\n' 'It prints the memo, the upload CSV, and the replay command.' >>"$LOG"
 printf '%s\n' 'After the slate settles, export contest standings for every probe contest.' >>"$LOG"
 printf '\n' >>"$LOG"
-/usr/bin/osascript -e 'display notification "Final pre-lock capture: projections, ownership, odds, weather. This is the one that cannot be redone." with title "Narrative Alpha" subtitle "Sunday 11:00 a.m. ET final pre-lock capture"' || true
+/usr/bin/osascript -e 'display notification "Final pre-lock capture, then na-ops slate. This is the one that cannot be redone." with title "Narrative Alpha" subtitle "Sunday 11:00 a.m. ET final pre-lock capture"' || true

@@ -69,6 +69,21 @@ class BuildInputError(BuildError):
     code = "invalid_build_input"
 
 
+class BuildDuplicateError(BuildInputError):
+    """Raised when this exact decision — same request bytes, same ``decision_at`` — exists.
+
+    It carries its own code and the existing id so a caller such as the slate lane can
+    tell "you already froze this decision" apart from "your request was invalid", and
+    reuse the frozen decision instead of re-deriving one that would hash identically.
+    """
+
+    code = "decision_already_exists"
+
+    def __init__(self, message: str, decision_snapshot_id: str) -> None:
+        super().__init__(message)
+        self.decision_snapshot_id = decision_snapshot_id
+
+
 class BuildDataError(BuildError):
     """Raised when bounded store rows cannot form a candidate scenario."""
 
@@ -242,9 +257,10 @@ def _build_in_transaction(
         ).fetchone()
         is not None
     ):
-        raise BuildInputError(
+        raise BuildDuplicateError(
             f"decision {decision_snapshot_id!r} already exists for this exact "
-            "request and decision_at; a different decision needs different inputs"
+            "request and decision_at; a different decision needs different inputs",
+            decision_snapshot_id,
         )
 
     lineups = adapter.build_lineups(request)

@@ -1,4 +1,5 @@
-"""`na-ops`: one command for the week's batch lane, and one screen for its state."""
+"""`na-ops`: one command per lane — the week's batch, the slate's decision — and one
+screen for the state of both."""
 
 from __future__ import annotations
 
@@ -10,6 +11,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
+from narrative_alpha.ingest.slates import SlateIngestError
+from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.ops.batch import (
     DEFAULT_DEPENDENCIES,
     BatchDependencies,
@@ -31,7 +35,15 @@ from narrative_alpha.ops.schedule import (
     run_launchctl,
     uninstall_schedule,
 )
+from narrative_alpha.ops.slate import (
+    DEFAULT_SLATE_DEPENDENCIES,
+    SlateDependencies,
+    SlateReport,
+    run_slate,
+)
 from narrative_alpha.ops.status import collect_ops_status, render_status, status_payload
+from narrative_alpha.portfolio import ContestArchetype
+from narrative_alpha.report_cli import DEFAULT_REPORT_DIRECTORY
 from narrative_alpha.store import (
     MigrationError,
     StoreConfigurationError,
@@ -47,7 +59,10 @@ EXIT_ERROR = 2
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="na-ops",
-        description="Operator console: run the weekly batch lane and read its state.",
+        description=(
+            "Operator console: run the weekly batch lane, run a slate end to end, "
+            "and read the state of both."
+        ),
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_OPS_CONFIG_PATH)
     parser.add_argument(
@@ -75,6 +90,62 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     batch.add_argument("--json", action="store_true", help="print the report as JSON")
+
+    slate = commands.add_parser(
+        "slate",
+        help="ingest, build episodes and features, freeze the decision, write the memo",
+    )
+    slate.add_argument("--season", type=_positive_int, required=True)
+    slate.add_argument("--week", type=_positive_int, required=True)
+    slate.add_argument("--site", choices=("dk", "fd"), required=True)
+    slate.add_argument(
+        "--decision-at",
+        type=_timestamp,
+        help=(
+            "the one cutoff handed to episodes, features, and the build "
+            "(default: now, so the decision is replayable at the instant it was made)"
+        ),
+    )
+    slate.add_argument(
+        "--lineups",
+        type=_positive_int,
+        default=1,
+        help="lineups to generate (default: 1)",
+    )
+    slate.add_argument(
+        "--contest-archetype",
+        choices=tuple(archetype.value for archetype in ContestArchetype),
+        default=ContestArchetype.CASH.value,
+    )
+    slate.add_argument(
+        "--slate-id",
+        type=_positive_int,
+        help="required only when the week has more than one slate for the site",
+    )
+    slate.add_argument(
+        "--capture",
+        type=Path,
+        help="salary capture directory (default: the newest salaries capture for the week)",
+    )
+    slate.add_argument("--slate-name", help="operator label for the slate")
+    slate.add_argument(
+        "--starts-at",
+        type=_timestamp,
+        help=(
+            "first kickoff, required only for exports that omit game times (FanDuel "
+            "classic); use the same value for every re-download of the slate"
+        ),
+    )
+    slate.add_argument(
+        "--artifact-directory",
+        "--artifact-dir",
+        "--artifact-root",
+        dest="artifact_directory",
+        type=Path,
+        default=DEFAULT_ARTIFACT_DIRECTORY,
+    )
+    slate.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+    slate.add_argument("--json", action="store_true", help="print the report as JSON")
 
     status = commands.add_parser("status", help="one screen: what ran, what failed, what is due")
     status.add_argument("--json", action="store_true")
@@ -109,6 +180,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     dependencies: BatchDependencies = DEFAULT_DEPENDENCIES,
+    slate_dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES,
 ) -> int:
     arguments = build_parser().parse_args(argv)
     try:
@@ -117,12 +189,15 @@ def main(
             return _schedule(arguments, config)
         if arguments.command == "batch":
             return _batch(arguments, config, dependencies)
+        if arguments.command == "slate":
+            return _slate(arguments, config, slate_dependencies)
         return _status(arguments, config)
     except (
         MigrationError,
         OpsConfigError,
         OSError,
         ScheduleError,
+        SlateIngestError,
         StoreConfigurationError,
         ValueError,
         sqlite3.Error,
@@ -154,6 +229,39 @@ def _batch(
         print(json.dumps(_batch_payload(report), indent=2, sort_keys=True))
     else:
         print(_render_batch(report), end="")
+    return EXIT_OK if report.ok else EXIT_STEP_FAILED
+
+
+def _slate(
+    arguments: argparse.Namespace,
+    config: OpsConfig,
+    dependencies: SlateDependencies,
+) -> int:
+    database = _database(arguments, config)
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        report = run_slate(
+            connection,
+            config=config,
+            database=database,
+            season=arguments.season,
+            week=arguments.week,
+            site=arguments.site,
+            decision_at=arguments.decision_at,
+            number_of_lineups=arguments.lineups,
+            contest_archetype=arguments.contest_archetype,
+            slate_id=arguments.slate_id,
+            capture=arguments.capture,
+            slate_name=arguments.slate_name,
+            starts_at=arguments.starts_at,
+            artifact_directory=arguments.artifact_directory,
+            report_directory=arguments.report_directory,
+            dependencies=dependencies,
+        )
+    if arguments.json:
+        print(json.dumps(_slate_payload(report), indent=2, sort_keys=True))
+    else:
+        print(_render_slate(report), end="")
     return EXIT_OK if report.ok else EXIT_STEP_FAILED
 
 
@@ -255,6 +363,61 @@ def _batch_payload(report: BatchReport) -> dict[str, object]:
                 "status": step.status,
                 "started_at": step.started_at.isoformat().replace("+00:00", "Z"),
                 "finished_at": step.finished_at.isoformat().replace("+00:00", "Z"),
+                "summary": step.summary,
+                "error_text": step.error_text,
+            }
+            for step in report.steps
+        ],
+    }
+
+
+def _render_slate(report: SlateReport) -> str:
+    lines = [
+        f"slate {report.slate_run_id}  {report.season} week {report.week:02d} {report.site}",
+        f"  decision at      {utc_timestamp(report.decision_at)}",
+    ]
+    for step in report.steps:
+        seconds = (step.finished_at - step.started_at).total_seconds()
+        lines.append(f"  {step.step:<18} {step.status:<9} {seconds:6.1f}s")
+        if step.error_text:
+            for line in step.error_text.splitlines():
+                lines.append(f"  {'':<18} {line}")
+    lines.append("")
+    lines.append(f"  slate id         {_or_none(report.slate_id)}")
+    lines.append(f"  decision         {_or_none(report.decision_snapshot_id)}")
+    lines.append(f"  upload CSV       {_or_none(report.upload_csv_path)}")
+    lines.append(f"  memo             {_or_none(report.memo_path)}")
+    lines.append(f"  replay           {_or_none(report.replay_command)}")
+    lines.append("  " + ("all steps ok" if report.ok else "one or more steps FAILED"))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _or_none(value: object) -> str:
+    return "none — the step that produces it did not succeed" if value is None else str(value)
+
+
+def _slate_payload(report: SlateReport) -> dict[str, object]:
+    return {
+        "slate_run_id": report.slate_run_id,
+        "ok": report.ok,
+        "season": report.season,
+        "week": report.week,
+        "site": report.site,
+        "decision_at": utc_timestamp(report.decision_at),
+        "started_at": utc_timestamp(report.started_at),
+        "finished_at": utc_timestamp(report.finished_at),
+        "slate_id": report.slate_id,
+        "decision_snapshot_id": report.decision_snapshot_id,
+        "upload_csv": None if report.upload_csv_path is None else str(report.upload_csv_path),
+        "memo": None if report.memo_path is None else str(report.memo_path),
+        "replay_command": report.replay_command,
+        "steps": [
+            {
+                "step": step.step,
+                "status": step.status,
+                "started_at": utc_timestamp(step.started_at),
+                "finished_at": utc_timestamp(step.finished_at),
                 "summary": step.summary,
                 "error_text": step.error_text,
             }

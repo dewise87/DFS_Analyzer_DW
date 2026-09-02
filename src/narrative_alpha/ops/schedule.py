@@ -64,8 +64,8 @@ REMINDERS: tuple[ReminderSpec, ...] = (
         eastern_time=time(18, 0),
         title="Saturday 6:00 p.m. ET capture",
         notification=(
-            "Download DK/FD salaries, projections, and baseline ownership, then run "
-            "na-snapshot capture."
+            "Download DK/FD salaries, projections, and baseline ownership, run "
+            "na-snapshot capture, then na-ops slate."
         ),
         instructions=(
             "Download, for every slate you may play:",
@@ -83,7 +83,10 @@ REMINDERS: tuple[ReminderSpec, ...] = (
             "  na-snapshot fetch --season {season} --week <WEEK> --kind odds",
             "  na-snapshot fetch --season {season} --week <WEEK> --kind weather \\",
             "      --games <games.csv>",
-            "Finish with: na-snapshot verify --season {season} --week <WEEK>",
+            "Verify the week: na-snapshot verify --season {season} --week <WEEK>",
+            "Then run the slate end to end (ingest, episodes, features, build, memo):",
+            "  na-ops slate --season {season} --week <WEEK> --site dk",
+            "It prints the memo, the upload CSV, and the replay command.",
         ),
     ),
     ReminderSpec(
@@ -91,7 +94,10 @@ REMINDERS: tuple[ReminderSpec, ...] = (
         weekday="sun",
         eastern_time=time(9, 0),
         title="Sunday 9:00 a.m. ET capture",
-        notification="Re-capture projections and ownership; refresh odds and weather.",
+        notification=(
+            "Re-capture projections and ownership, refresh odds and weather, rerun "
+            "na-ops slate."
+        ),
         instructions=(
             "Re-download projections and ownership (they have moved overnight), then:",
             "  na-snapshot capture --season {season} --week <WEEK> \\",
@@ -101,6 +107,8 @@ REMINDERS: tuple[ReminderSpec, ...] = (
             "  na-snapshot fetch --season {season} --week <WEEK> --kind odds",
             "  na-snapshot fetch --season {season} --week <WEEK> --kind weather \\",
             "      --games <games.csv>",
+            "Then rerun the lane; it versions rather than overwrites:",
+            "  na-ops slate --season {season} --week <WEEK> --site dk",
         ),
     ),
     ReminderSpec(
@@ -109,8 +117,8 @@ REMINDERS: tuple[ReminderSpec, ...] = (
         eastern_time=time(11, 0),
         title="Sunday 11:00 a.m. ET final pre-lock capture",
         notification=(
-            "Final pre-lock capture: projections, ownership, odds, weather. This is the "
-            "one that cannot be redone."
+            "Final pre-lock capture, then na-ops slate. This is the one that cannot be "
+            "redone."
         ),
         instructions=(
             "This capture is irreplaceable: after lock the pre-lock state is gone.",
@@ -122,6 +130,9 @@ REMINDERS: tuple[ReminderSpec, ...] = (
             "  na-snapshot fetch --season {season} --week <WEEK> --kind weather \\",
             "      --games <games.csv>",
             "  na-snapshot verify --season {season} --week <WEEK>",
+            "Then make the decision — this is the run you upload:",
+            "  na-ops slate --season {season} --week <WEEK> --site dk --lineups <N>",
+            "It prints the memo, the upload CSV, and the replay command.",
             "After the slate settles, export contest standings for every probe contest.",
         ),
     ),

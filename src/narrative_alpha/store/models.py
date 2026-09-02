@@ -1648,11 +1648,24 @@ class DecisionSnapshotRow(StoreRow):
 
 
 class OpsRunRow(StoreRow):
-    """One recorded ``na-ops batch`` step attempt; append-only operational history."""
+    """One recorded operator-lane step attempt; append-only operational history."""
 
     ops_run_id: int = Field(gt=0)
     batch_run_id: str = Field(min_length=1)
-    step: Literal["collect", "purge", "extract", "nflverse_refresh"]
+    step: Literal[
+        # Batch lane (`na-ops batch`), Wed-Fri.
+        "collect",
+        "purge",
+        "extract",
+        "nflverse_refresh",
+        # Slate lane (`na-ops slate`), Saturday and Sunday.
+        "slate_salaries",
+        "slate_projections",
+        "slate_episodes",
+        "slate_features",
+        "slate_build",
+        "slate_memo",
+    ]
     status: Literal["succeeded", "failed", "skipped"]
     started_at: datetime
     finished_at: datetime

@@ -45,7 +45,14 @@ from narrative_alpha.narrative.anthropic_provider import (
     AnthropicBatchProvider,
 )
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
-from narrative_alpha.ops.runs import OpsStep, OpsStepStatus, last_run, record_ops_run
+from narrative_alpha.ops.runs import (
+    OpsStep,
+    OpsStepStatus,
+    StepFailure,
+    StepOutcome,
+    StepRecorder,
+    last_run,
+)
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.store import MigrationError, StoreConfigurationError
 
@@ -79,7 +86,7 @@ class BatchDependencies:
 DEFAULT_DEPENDENCIES = BatchDependencies()
 
 # Errors a step may raise that describe a bad week, not a broken program.
-_STEP_ERRORS = (
+BATCH_STEP_ERRORS: tuple[type[BaseException], ...] = (
     anthropic.AnthropicError,
     CollectionError,
     ExtractionError,
@@ -91,22 +98,6 @@ _STEP_ERRORS = (
     httpx.HTTPError,
     sqlite3.Error,
 )
-
-
-@dataclass(frozen=True)
-class StepOutcome:
-    """One recorded step of the lane."""
-
-    step: OpsStep
-    status: OpsStepStatus
-    started_at: datetime
-    finished_at: datetime
-    summary: dict[str, object]
-    error_text: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status != "failed"
 
 
 @dataclass(frozen=True)
@@ -148,7 +139,7 @@ def run_batch(
     if clock is None:
         clock = (lambda: started_at) if now is not None else (lambda: datetime.now(UTC))
     batch_run_id = f"ops-{uuid4().hex}"
-    recorder = _Recorder(connection, batch_run_id=batch_run_id)
+    recorder = StepRecorder(connection, run_id=batch_run_id, step_errors=BATCH_STEP_ERRORS)
 
     collection = recorder.run(
         "collect",
@@ -194,78 +185,6 @@ def run_batch(
     )
 
 
-class _StepFailure(Exception):
-    """A step decided it failed for a reason it can state; not an unexpected error."""
-
-    def __init__(self, message: str, summary: dict[str, object]) -> None:
-        super().__init__(message)
-        self.summary = summary
-
-
-class _Recorder:
-    """Runs each step, isolates its failure, and appends its `ops_runs` row."""
-
-    def __init__(self, connection: sqlite3.Connection, *, batch_run_id: str) -> None:
-        self._connection = connection
-        self._batch_run_id = batch_run_id
-        self.outcomes: list[StepOutcome] = []
-
-    def run(
-        self,
-        step: OpsStep,
-        action: Callable[[], tuple[OpsStepStatus, dict[str, object], str | None]],
-    ) -> StepOutcome:
-        started_at = ensure_utc(datetime.now(UTC))
-        try:
-            status, summary, error_text = action()
-        except _StepFailure as failure:
-            status, summary, error_text = "failed", failure.summary, str(failure)
-        except _STEP_ERRORS as error:
-            status, summary, error_text = "failed", {}, f"{type(error).__name__}: {error}"
-        return self._record(step, status, started_at, summary, error_text)
-
-    def skip(self, step: OpsStep, reason: str) -> StepOutcome:
-        started_at = ensure_utc(datetime.now(UTC))
-        return self._record(step, "skipped", started_at, {}, reason)
-
-    def _record(
-        self,
-        step: OpsStep,
-        status: OpsStepStatus,
-        started_at: datetime,
-        summary: dict[str, object],
-        error_text: str | None,
-    ) -> StepOutcome:
-        finished_at = ensure_utc(datetime.now(UTC))
-        outcome = StepOutcome(
-            step=step,
-            status=status,
-            started_at=started_at,
-            finished_at=finished_at,
-            summary=summary,
-            error_text=error_text,
-        )
-        # History is the whole point of the lane; commit it on its own so a later step's
-        # rollback can never take an earlier step's record with it.
-        try:
-            record_ops_run(
-                self._connection,
-                batch_run_id=self._batch_run_id,
-                step=step,
-                status=status,
-                started_at=started_at,
-                finished_at=finished_at,
-                summary=summary,
-                error_text=error_text,
-            )
-            self._connection.commit()
-        except (sqlite3.Error, ValueError):
-            self._connection.rollback()
-            raise
-        self.outcomes.append(outcome)
-        return outcome
-
-
 def _collect(
     dependencies: BatchDependencies,
     connection: sqlite3.Connection,
@@ -283,7 +202,7 @@ def _collect(
         "observed_at": utc_timestamp(run.observed_at),
     }
     if not run.attempted_source_ids:
-        raise _StepFailure(
+        raise StepFailure(
             "no source is enabled: `na-collect seed` has never run against this database, "
             "or every source version is disabled",
             summary,
@@ -291,7 +210,7 @@ def _collect(
     if run.errors:
         detail = "; ".join(f"{error.source_id}: {error.message}" for error in run.errors[:5])
         more = "" if len(run.errors) <= 5 else f" (+{len(run.errors) - 5} more)"
-        raise _StepFailure(
+        raise StepFailure(
             f"{len(run.errors)} of {len(run.attempted_source_ids)} sources failed — {detail}{more}",
             summary,
         )
@@ -382,7 +301,7 @@ def _extract(
     guard = _budget_guard(connection, config=config, plan=plan, now=now)
     summary |= guard.summary
     if guard.refused:
-        raise _StepFailure(guard.message or "budget guard refused the batch", summary)
+        raise StepFailure(guard.message or "budget guard refused the batch", summary)
 
     if not (plan.ready or plan.resumable or plan.submission_unknown or plan.injection_blocked):
         return "succeeded", summary | {"submitted_items": 0, "claims_stored": 0}, None
@@ -392,7 +311,7 @@ def _extract(
     ):
         # Same refusal as `na-extract`, before any item is reserved: a missing credential
         # must never leave reservations behind.
-        raise _StepFailure(
+        raise StepFailure(
             "ANTHROPIC_API_KEY is not set for this process; a scheduled run reads it from "
             "the macOS Keychain through the wrapper `na-ops schedule install` writes",
             summary,
@@ -421,14 +340,14 @@ def _extract(
         "pending": report.pending,
     }
     if report.pending:
-        raise _StepFailure(
+        raise StepFailure(
             "the provider batch is still processing; rerun `na-ops batch` and it resumes "
             "the accepted batch without re-billing",
             summary,
         )
     if not report.ok:
         detail = "; ".join(f"item {error.source_item_id}: {error.code}" for error in report.errors)
-        raise _StepFailure(f"extraction reported item failures — {detail}", summary)
+        raise StepFailure(f"extraction reported item failures — {detail}", summary)
     return "succeeded", summary, None
 
 
@@ -516,7 +435,7 @@ def _nflverse_refresh(
             reviewed_at=reviewed_at,
         )
     except NflverseRosterError as error:
-        raise _StepFailure(
+        raise StepFailure(
             f"nflverse refresh check failed — {error}. To re-pin: run "
             f"`na-crosswalk nflverse-refresh --season {config.season} --reviewed-at "
             f"{reviewed_at.isoformat()}` (add `--allow-missing-prior` if the old bytes are "
@@ -542,7 +461,7 @@ def _nflverse_refresh(
     }
     if not matches_pin:
         # A moved roster is not an error, but it is a by-hand task the screen must show.
-        raise _StepFailure(
+        raise StepFailure(
             f"the rolling nflverse roster ({str(sha256)[:12]}…) no longer matches the newest "
             f"pin: +{len(added)} -{len(removed)} ~{len(changed)} players. Review with "
             f"`na-crosswalk nflverse-refresh --season {config.season} --reviewed-at "

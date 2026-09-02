@@ -719,7 +719,7 @@ def test_changed_input_at_the_same_as_of_conflicts_loudly(tmp_path: Path) -> Non
 
 
 def test_zero_variance_channels_standardize_to_zero(tmp_path: Path) -> None:
-    database, player_ids = _feature_database(tmp_path, "origin", player_count=3)
+    database, _ = _feature_database(tmp_path, "origin", player_count=3)
     as_of = BASE_TIME + timedelta(hours=8)
     with connect_database(database) as connection:
         build_episodes(connection, as_of=as_of, built_at=as_of + timedelta(minutes=5))
