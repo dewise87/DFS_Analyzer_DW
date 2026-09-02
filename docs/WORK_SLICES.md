@@ -273,9 +273,9 @@ close against real-world data, tracked here until done:
 - [ ] **DK/FD-dependent items are blocked until Daniel returns to the US** (site logins are
   geo-unavailable): real salary/standings exports, probe-contest entries, and the manual
   upload checklist all wait; Stokastic exports (Slice 9) are the interim data source.
-- [ ] **Re-pin nflverse to a dated artifact.** The current pin targets a rolling
-  `roster_2026.csv` release asset that upstream overwrites weekly; the hash check fails
-  closed but will break on every refresh. Archive fetched bytes locally.
+- [x] **Re-pin nflverse to a dated artifact.** Done (Slice 16, 2026-09-02): pins are
+  append-only dated entries selected as-of the decision date, and successfully verified bytes
+  live in a content-addressed local archive so later runs avoid the rolling upstream URL.
 - [ ] Deferred minors (fast-follow, none block operation): snapshot `verify` doesn't bind
   directory name to `captured_at`; capture dir names contain colons (Windows-hostile);
   fetch failure records can pair an earlier HTTP status with a later error type; showdown
@@ -784,6 +784,17 @@ open Phase 0 exit-checklist item.
 > mutating `PINNED_ROSTER_RELEASES`. Use local fixtures, no network in tests. Run
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Status note (2026-09-02):** landed. `PinnedRosterRelease` now carries `reviewed_at`, seasons
+hold append-only pin histories, and as-of selection refuses look-ahead. Verified bytes archive
+under their full sha256 and bypass the network thereafter. `na-crosswalk nflverse-refresh`
+prints the rolling asset hash, an added/removed/changed player diff, and a paste-ready pin entry
+without mutating the reviewed table. **Reviewed 2026-09-02:** three majors fixed — refresh
+discarded the bytes it had just hashed (so a pasted pin could fail closed on the next fetch;
+it now archives them under their own hash), a same-day re-pin was never selected (`max` kept
+the first tie), and a future `reviewed_at` was accepted. Minors: corrupt archive files are
+named as local corruption rather than an upstream mismatch, archive writes fsync, and the diff
+reports blank/duplicate rows instead of dropping them. Suite 402 → 406.
+
 ### Slice 17 — Stage 1 structured extraction
 
 **Goal:** turn collected feed items into structured, provenance-bearing claims. This is the
@@ -843,6 +854,315 @@ first time.
 > claim; unresolved player names queue rather than guess; schema violations fail loudly;
 > `--dry-run` makes no API call. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` —
 > all green.
+
+**Status note (2026-09-02):** landed. Migration 0007 adds immutable prompt artifacts, extraction
+attempts, review flags, normalized claims, deterministic player/unresolved references, and exact
+evidence spans. `na-extract` policy-gates and preflights retained canonical text, uses tool-free
+strict Anthropic Message Batches on the pinned Haiku model, and has a no-write/no-API dry run with
+versioned pricing estimates. Durable in-flight reservations prevent duplicate submissions and resume
+accepted batches after timeout/crash with their original policy, request, and pricing lineage. The
+authorization/reservation transaction installs scoped source/policy/item/tombstone fences and commits
+before both submit and poll network I/O. Accepted traces are fsynced to the sibling receipt directory
+before SQLite persistence.
+Completed empty/flagged results are terminal; definite failures remain retryable, ambiguous create
+outcomes fail closed, and tombstones redact reconstructive model/evidence text while preserving
+non-reconstructive audit hashes and offsets. Batch create is single-shot and limit-aware; accepted
+contract failures remain reconcilable without rebilling, and policy/TTL/source integrity is rechecked
+immediately before create and atomically at result settlement so revoked or expired output is
+accounted for but never retained as claims. Expiring create/recovery leases serialize concurrent
+workers without holding a write transaction during polling. Recovery leases are renewed through item
+settlement, stale owners cannot write after takeover, and complete multi-run lineage is stored in
+`model_run_parents`. A transient `settling` state makes the claim graph append-proof after success,
+and validated accepted results remain resumable across an interrupted or contended accepted-ID
+SQLite commit.
+
+**Reviewed 2026-09-02** (four parallel reviewers + core review; see `DECISIONS.md` "Slice 17
+review outcomes"). Two blockers: a missing `ANTHROPIC_API_KEY` or a dropped connection at
+create stranded every item in the window as `creating` with no operator escape; both are now
+definite rejections, the CLI refuses to start without a key, and `na-extract abandon` /
+`na-extract review` exist. Majors fixed: the Python-registered timestamp comparator and the
+four-table rebuild were removed in favour of canonical UTC-Z enforced at insert (verified: the
+rewritten migration upgrades a copy of the 3,852-item production database with identical rows,
+clean integrity and foreign-key checks, and a bare `sqlite3` connection can write again); one
+expired/tombstoned item aborted the whole window (now per-item ineligibility with reasons);
+the injection detector flagged 13 of 28 realistic headlines (re-cut; 21 real headlines are
+now must-pass tests, 20 attacks still caught); 2048 output tokens could not hold the schema's
+12 claims and failed attempts retried forever (4096 and a three-attempt cap); team lexicon
+lacked WSH/JAC and nicknames; receipt-write failures were swallowed (now a report warning);
+dry-run printed 8.9 MB (prompts now behind `--show-prompts`, `--max-items` for smoke tests);
+flags made the run exit nonzero (now 0; pending batch is 3). Still open, carried into Slice 19:
+prompt taxonomy glosses, golden snapshot lacks offsets/resolution fields, hot-path full scans,
+`model_run_parents` has no timestamps, fence triggers join on the provenance `source` column.
+Suite 402 → 435.
+
+---
+
+## Operator UX direction (added 2026-09-02)
+
+The finished tool must be simple to run by one person, and it does not need to be pretty.
+The plan is layered so nothing is built twice:
+
+1. **Slice 18 — a one-command batch lane and a one-screen status report** (`na-ops`). This
+   is the "UI" for the rest of season one: `na-ops batch` runs the weekly collection →
+   purge → extraction chain, `na-ops status` shows what ran, what failed, what is pending,
+   and what Stage 1 has cost. launchd schedules it so the weekly news collection happens
+   without anyone remembering to run it.
+2. **A local web dashboard (queued, not yet prompted)** that wraps the same library calls the
+   CLI uses: status page, review queues (unresolved players, flagged items), the slate memo,
+   and one-click "run batch now". It is deliberately after `na-ops`, so the dashboard only
+   renders functions that already work from the terminal.
+3. **MCP tools** (design doc §7.1) come in Phase 3 and expose the same functions to Claude.
+
+Rule for every UI slice: the CLI stays the source of truth; a UI never contains logic that the
+CLI lacks.
+
+### Slice 18 — Operator console: `na-ops batch`, `na-ops status`, launchd schedule
+
+**Goal:** collapse weekly operation into one command and one status screen, and schedule the
+batch lane so collection does not depend on the operator remembering it. This is the
+solo-operator budget (§1.6) made concrete: "cron before workers", and the boring version of a
+UI first.
+
+**Design doc:** §1.6 (weekly time budget, complexity budget), §5.3 (collection cadence), §9.0
+(fixed capture times), §10.3 (cost guardrails), Appendix D (weekly checklist).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse: orchestration over
+existing library functions plus a text report.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `README.md` "Weekly operations", `docs/DECISIONS.md`, Appendix D of
+> `docs/design/narrative-alpha-design-doc-v0_3.md`, and the existing CLIs:
+> `src/narrative_alpha/collect_cli.py`, `src/narrative_alpha/extract_cli.py`,
+> `src/narrative_alpha/snapshots/cli.py`, `src/narrative_alpha/identity/cli.py`. The library
+> functions those CLIs call are the building blocks; call them directly, never via
+> `subprocess`, and never duplicate their logic.
+>
+> Build `src/narrative_alpha/ops/` and a `na-ops` entry point in `pyproject.toml`.
+>
+> 1. **`na-ops batch`** runs the Wed–Fri batch lane in order: collect enabled feeds → purge
+>    expired raw text → Stage 1 extraction over the window from the last successful
+>    extraction end (or `--window-start`) to now → nflverse refresh check in report-only mode.
+>    Each step is isolated: a failed step is recorded and the next safe step still runs
+>    (purge and status recording always run; extraction is skipped if collection failed
+>    entirely, and says so). Exit nonzero if any step failed. Every step writes an `ops_runs`
+>    row (migration `0008_ops_runs.sql`, or the next free number: step name, started/finished
+>    UTC, status, JSON summary, code version, error text) so status can show history. Nothing
+>    is retried silently.
+> 2. **`na-ops status`** prints one screen of plain text (and `--json`): per step, last
+>    success and last failure with age; dead-feed count from the last collection run;
+>    items collected in the last 7 days; extraction backlog (eligible but not yet
+>    extracted), items awaiting review flags, and pending accepted-batch receipts;
+>    crosswalk unresolved-queue length and whether the roster is seeded at all (zero
+>    `players` rows is a loud warning, not a number); `na-snapshot status` for the current
+>    season/week; Stage 1 spend month-to-date from `source_item_extractions` cost columns
+>    against `monthly_llm_budget_usd` in a new `config/ops.toml`. The screen must answer
+>    "did this week run, and what do I need to do by hand" without any other command.
+> 3. **Budget guard.** Before submitting any batch, `na-ops batch` runs the extraction
+>    dry-run estimate; if month-to-date spend plus the estimate exceeds the budget it
+>    refuses to submit, records the refusal as a failed step, and prints the numbers. No
+>    partial "submit what fits" behaviour.
+> 4. **`na-ops schedule install|show|uninstall`** manages macOS launchd user agents under
+>    `~/Library/LaunchAgents/com.narrative-alpha.*.plist`: `batch` on Wed/Thu/Fri at a
+>    local time from `config/ops.toml`, plus reminder-only jobs (a macOS notification via
+>    `osascript`, no data work) at the §9.0 manual capture times — Sat 6:00 p.m., Sun
+>    9:00 a.m., Sun 11:00 a.m. ET, converted to local time — telling the operator which
+>    downloads to make and the exact `na-snapshot capture` command. Jobs call a small shell
+>    wrapper the command writes, which uses the absolute venv path, sets `PATH`, logs to
+>    `data/logs/<job>.log`, and exports `ANTHROPIC_API_KEY` at run time from the macOS
+>    Keychain (`security find-generic-password -s narrative-alpha-anthropic -w`). The key
+>    must never be written into a plist, a log, or the repo. Note in the README that launchd
+>    runs a missed job at next wake, unlike cron, and how to install the Keychain item once.
+> 5. `README.md`: replace the scattered weekly commands with a "Weekly operations" section
+>    that is exactly: install once, `na-ops status` any time, and what remains manual.
+>
+> Tests (pytest, `tmp_path`, `HOME` monkeypatched for launchd): a failing collect step does
+> not prevent purge and status recording, and the exit code is nonzero; the extraction window
+> derives from the last successful run and is overridable; status renders on an empty
+> database and on a seeded one with a pending receipt directory; the budget guard refuses
+> and records; plist and wrapper rendering are golden-tested and contain no key material;
+> `schedule uninstall` removes only files it wrote. No network in tests. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Slice 19 — First live Stage 1 run + extraction eval set
+
+**Goal:** run Stage 1 for real over the collected backlog (3,852 items as of 2026-09-02;
+the review dry-run priced it at $1.02 input plus a $39 worst-case output ceiling, and flagged
+zero real headlines as injection),
+build the labeled evaluation set that gates every future prompt or model change (§7.5), and
+fix whatever real headlines break. Slice 15 did this for collectors; this does it for the
+first LLM stage. Daniel is in the loop: he supplies the API key, reviews samples, and
+approves prompt v2 if one is needed.
+
+**Design doc:** §7.5 (prompt and model evaluation), §5.6 (cheapest model that passes the
+golden-set threshold), §7.6 (injection flags are for source review, not silent drops), §10.3
+(cost per useful classified episode), §4.6 (retention: labeled text stays local under the same
+TTL — never committed).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: judging extraction
+quality and revising the prompt is where a subtle mistake propagates into every downstream
+signal.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read the
+> Slice 17 entries in `docs/DECISIONS.md`, `src/narrative_alpha/narrative/extraction.py`,
+> `src/narrative_alpha/extract_cli.py`, `tests/golden/stage1_claims.json`, and §7.5/§7.6 of
+> the design doc. The production database is `data/db/narrative_alpha.sqlite3`; back it up
+> together with its `.stage1-receipts/` sibling before any live run (see `data/README.md`).
+>
+> 1. **Precondition: the crosswalk is unseeded.** `players` has zero rows on the production
+>    database, so every name would queue as unresolved. Add `na-crosswalk seed --season 2026
+>    --as-of <date>` around the existing `seed_nflverse_roster` (Slice 16 dated pins and
+>    archive) if no CLI exists, run it, and record the result. Do not proceed to a live run
+>    until the roster is seeded.
+> 2. **Dry run over the whole backlog.** Report item count, estimated cost, and how many items
+>    the preflight excluded for injection markers, policy, TTL, or name/team validation.
+>    Print the excluded items' titles. On real headlines an injection false-positive rate
+>    above about 1% is a detector bug: fix the patterns, and add every real false positive to
+>    the tests as a must-pass. Do the same for the person-name and team-lexicon validators
+>    (they must accept real NFL names such as "Amon-Ra St. Brown", "Ja'Marr Chase",
+>    "T.J. Hockenson", "Kenneth Walker III", and common team nicknames/abbreviations).
+> 3. **Live run on a bounded window first** (about 200 items), then the rest of the backlog
+>    if the sample looks right. Daniel exports `ANTHROPIC_API_KEY` in his shell; never read it
+>    from anywhere else and never print it. Record estimated versus actual cost in the
+>    slice status note.
+> 4. **Review sample and eval set.** Add `na-extract sample --size 50 --output <dir>` that
+>    writes a review CSV of stored results (claims, zero-claim items, flagged items —
+>    stratified) with the canonical text, the claim fields, and blank label columns. The
+>    labeled file lives under `data/eval/stage1/` (gitignored, same retention TTL as the
+>    source text; the purge command must clear rows whose items are tombstoned). Daniel fills
+>    the labels. Committed test fixtures stay synthetic.
+> 5. **Eval harness.** `na-extract eval --labels <file>` scores stored claims against labels:
+>    per-item claim presence, player-reference resolution, claim dimension and both
+>    directions, evidence-span exactness, and injection-flag precision. It writes a
+>    `model_evals` row (next free migration number: prompt version, model id, label-set hash,
+>    metrics JSON, run id, point-in-time fields) and prints a table. This is the gate: a
+>    prompt or model change ships only if its eval is not worse.
+> 6. **Prompt v2 only if the eval says so.** A new `prompt_versions` row, never an edit of v1;
+>    the active version is a config value; the golden test gets a v2 fixture. Every claim
+>    already stored keeps its v1 lineage.
+> 7. Status note in `docs/WORK_SLICES.md`: items processed, claims stored, zero-claim share,
+>    flag counts, unresolved-name top ten, cost, and the eval numbers.
+>
+> Tests: `sample` stratification and CSV shape; `eval` metrics on a fixture label set,
+> including the zero-claim and flagged cases; the real false positives found in step 2; seed
+> CLI refuses without `--as-of`. No live API calls in tests. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Slice 20 — Narrative episodes (Stage 2, deterministic)
+
+**Goal:** stop treating each headline as an independent event. Cluster stored claims into
+narrative episodes, label each item's relation to the episode (origin, independent,
+corroborating, derivative, contradicting), and compute reach that a copied report raises while
+the event count stays flat. No LLM in this slice: the deterministic version ships first and an
+LLM synthesis pass is added only if evaluation shows it is needed.
+
+**Design doc:** §5.2 (episode model), §5.4 Stage 2, §1.5 rule 2 (prospective signals only),
+Phase 2 acceptance "duplicate copies do not increase statistical event count", §12.3 step 2
+(deduplicate and author-cap).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: the clustering rule
+defines the unit of analysis for every statistic that follows (§12.4.1).
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md`, migration 0007 (`claims`, `claim_player_refs`,
+> `claim_evidence_refs`, `source_items`, `sources`), `src/narrative_alpha/narrative/`, §5.2
+> and §12.3 of the design doc, and `config/narrative_sources.toml` (`source_family` is the
+> audience class).
+>
+> 1. **Migration** (next free number): `narrative_episodes` (episode id, subject: resolved
+>    player id or team code, claim dimension, opened at, last item at, origin claim id,
+>    method version, point-in-time fields) and `episode_claims` (episode id, claim id, source
+>    item id, relation ∈ origin | independent | corroborating | derivative | contradicting,
+>    similarity score, method, point-in-time fields). Rows are append-only under a given
+>    `(method_version, as_of)`; a rebuild at a new as-of inserts new rows, it never edits.
+> 2. **Deterministic clustering** in `narrative/episodes.py`: group claims by subject and
+>    claim dimension within a rolling window (72 hours default, configurable); link by
+>    normalized-text similarity on the canonical source text (token-set Jaccard or MinHash —
+>    pick one, justify it in `DECISIONS.md`) and direction agreement. `derivative` means
+>    near-duplicate text from a different source after the origin; `corroborating` means
+>    same direction, distinct text; `contradicting` means opposite direction; `independent`
+>    means same subject and dimension but no textual link. Ties break by claim id so a
+>    rebuild at the same as-of is byte-identical.
+> 3. **Episode features**, computed only from items with `observed_at <= as_of`:
+>    unique source count, unique source-family count, source entropy, reach proxy (unique
+>    sources, never raw post count), velocity (items per 6 hours), recency (hours since last
+>    non-derivative item), and `n_events` = origin + independent + corroborating items
+>    (derivatives excluded). Store them on the episode row with their `as_of`.
+> 4. **CLI** `na-episodes build --as-of <ts>` (refuses a missing as-of; refuses items after
+>    it) and `na-episodes show --player <id> | --episode <id>` listing the episode with its
+>    items and relations so the operator can audit a cluster by eye.
+> 5. Unresolved-player claims (no `player_id`) form team-scoped or unclustered rows and are
+>    reported, never silently dropped.
+>
+> Tests: the same headline from two sources becomes one episode with reach 2 and
+> `n_events` 1; opposite directions link as contradicting; a claim outside the window opens a
+> new episode; an item after `as_of` is excluded; two builds at one as-of are identical;
+> unresolved-player claims are counted in the report. Run `~/.local/bin/uv run pytest -q`,
+> `ruff check .`, `mypy` — all green.
+
+### Slice 21 — Deterministic heat features (Stage 3) + Appendix B feature rows
+
+**Goal:** turn episodes into the Appendix B feature vector per player and slate at an as-of
+time, with the §12.2.2 heat construction, the zero-gate floors, and standardization — so the
+first ownership model (queued Slice 22) has features with provenance and nothing else to
+invent. Features only: no ownership adjustment is computed or stored here.
+
+**Design doc:** §12.2.2 (episode heat, zero-gate caution, feature list), §5.4 Stage 3, §1.5
+rule 4 (self-reported model scores are metadata), Appendix B (feature contract), §8.3
+(provenance).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: statistics.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md`, the episode tables from the previous slice, `claims` (evidence class,
+> basis, specificity/actionability metadata), `sources.source_family`, the slate and
+> ownership-baseline tables from migration 0001, §12.2.2 and Appendix B of the design doc.
+>
+> 1. **Heat per episode** exactly as §12.2.2: direction × quality × specificity × novelty ×
+>    audience-independence × log(1 + reach) × half-life decay by source class. Map
+>    quality, specificity, and independence from [0, 1] to [0.15, 1] (the zero-gate floor);
+>    direction and novelty keep true zeros. Half-lives per source class and the floor live
+>    in `config/heat.toml` with a `feature_version`; any change to the formula or config
+>    bumps the version. Novelty is 1.0 in this slice unless a vendor-ownership baseline change
+>    is available for the window (document the placeholder in `DECISIONS.md`).
+> 2. **Feature rows** (next free migration, `narrative_features`): one row per
+>    (player, slate, site, as_of, feature_version) holding every Appendix B field that can be
+>    computed from episodes — the `H_*` features, unique counts, source overlap index — plus
+>    baseline fields joined from the latest ownership snapshot with `observed_at <= as_of`
+>    when present, else NULL (never zero). Standardize within slate and source class, then
+>    winsorize at ±4, and store both raw and standardized values. Each row records the
+>    episode ids it used (JSON array) so a feature is traceable to evidence.
+> 3. **CLI** `na-features build --slate-id N --site dk|fd --as-of <ts>`; refuses a missing
+>    as-of and any input observed after it. Two builds at the same as-of are identical.
+> 4. Velocity and acceleration need earlier feature points: compute them from the episode
+>    timeline within the as-of window, not from previously stored rows, so a first build is
+>    correct on its own.
+>
+> Tests: golden heat values for a hand-computed episode set (including a floored factor and a
+> zero-novelty episode); derivative items change reach but not `n_events`; point-in-time
+> exclusion; standardization and winsorization on a fixture slate; NULL baseline when no
+> ownership snapshot precedes as-of; `feature_version` mismatch is refused, not overwritten.
+> Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Queued, not yet prompted (in order)
+
+- **Slice 22 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
+  §12.2.5–§12.2.8): prompt when there are at least three weeks of actual ownership labels and
+  the Stokastic ownership baseline (Slice 9) is ingesting. Fitting on synthetic labels would
+  violate rule 1.5.2.
+- **Slice 23 — Local dashboard** over the `na-ops` functions: status, review queues
+  (unresolved players, flagged items), slate memo, "run batch now". Thin; no logic of its own.
+- **Slice 24 — Sunday fast lane** (Phase 3, §7.4): pre-approved `fast_lane_rules.yaml`,
+  single-item synchronous extraction, official-inactive bypass.
+- **Slice 9 — Stokastic adapter** stays open until real exports exist under
+  `data/snapshots/`; its prompt is unchanged.
 
 ---
 

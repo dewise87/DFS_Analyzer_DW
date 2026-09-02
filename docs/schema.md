@@ -14,6 +14,12 @@ The filename and SHA-256 detect edited migration history; `version` makes reruns
 Tracks ingestion, model, replay, simulation, and optimizer executions with status and code version.  
 Optional parent-run and configuration-hash fields preserve derived-run lineage and failures.
 
+## `model_run_parents`
+
+Preserves complete many-parent Stage 1 recovery lineage. Immutable `stage1_recovery` and
+`stage1_recovery_takeover` relationships supplement `model_runs.parent_run_id`, which remains only
+the convenience field for a run with one predecessor.
+
 ## `teams`
 
 Stores versioned canonical NFL franchise identities and abbreviations from an identified source.  
@@ -121,17 +127,101 @@ It contains identity only; collection uses the latest point-in-time-valid row fr
 ## `source_policies`
 
 Records the reviewed rights, retention, deletion, redistribution, processing, and commercial terms.
-Collection fails closed when no current policy exists or its `terms_reviewed_at` is stale.
+Collection fails closed when no current policy exists or its `terms_reviewed_at` is stale. Exact
+versions cannot be edited or deleted; the only allowed mutation closes a current validity interval.
+Timestamps must be canonical UTC-Z (27 characters) at insert, so lexical ordering is exact.
+Purge uses the minimum TTL across the capture policy, the current policy when present, and every
+policy version that authorized an extraction attempt.
 
 ## `source_items`
 
 Stores inert feed bytes, separately cleaned visible text, item/capture times, and a content hash.
-Hash uniqueness is source-scoped so cross-source copies remain separate evidence of reach.
+Hash uniqueness is source-scoped so cross-source copies remain separate evidence of reach. Identity,
+hash, timestamps, and provenance are immutable, and delete/replace is forbidden. Only an exact
+matching tombstone may clear title, raw bytes, and cleaned text. Timestamps must be canonical
+UTC-Z at insert. Migration 0007 adds triggers to these tables in place; it does not rebuild them.
 
 ## `content_tombstones`
 
 Durably records retention expiry or a platform deletion after reconstructive item text is cleared.
 One tombstone per item makes purge and deletion handling idempotent without silently deleting rows.
+The item ID, source ID, and content hash must match exactly; tombstones cannot be edited or deleted.
+
+## `prompt_versions`
+
+Stores the exact Stage 1 system prompt, user template, provider-compatible strict schema, and their
+joint SHA-256. A stable ID cannot be reused for changed prompt bytes or a changed schema.
+
+## `source_item_extractions`
+
+Records every provider attempt, including successful zero-claim results, security blocks, and
+retryable failures. `creating` reservations plus scoped submission fences close the concurrent
+double-submit and authorization-mutation races without keeping a transaction open over the POST;
+`submitted` rows carry the accepted batch ID and resume instead of rebilling. The exact authorizing policy,
+source-content hash/family, request hash, max-output limit, batch/message/request trace, token usage,
+submission-time pricing rates, cost, and §3.2 fields make the terminal result replayable without
+calling the model again. Request, policy, batch, and pricing lineage is immutable across the explicit
+lifecycle transitions; accepted contract errors remain submitted for reconciliation. Canonical
+validated output JSON is hash-checked until tombstone-authorized compliance redaction. A successful
+writer passes through a transaction-local `settling` state while inserting the claim graph, then
+becomes `succeeded`; child rows can be inserted only during that settlement, so terminal graphs
+cannot be appended later. A validated, already-paid result that hits a local settlement error stays
+submitted for recovery rather than authorizing another batch create.
+
+`succeeded` and `flagged` are terminal for that (item, prompt version, model): a dismissed review
+flag does not reopen the item; a new prompt version does. `na-extract abandon` moves a stuck
+`creating`/`submitted` attempt to `failed` with `error_code = 'operator_abandoned'`, which makes the
+item retryable. The planner lists an item as ineligible after three `failed` attempts so a
+deterministic provider failure is never billed indefinitely.
+
+## `stage1_execution_leases`
+
+Operational (not external point-in-time) leases serialize the non-idempotent batch-create window and
+batch-result recovery. An active owner prevents a concurrent run from polling or superseding it;
+accepted-ID persistence atomically hands ownership from submission leases to a batch-recovery lease.
+The owner renews that lease around retrieval and before each terminal item write; ownership loss
+rejects the stale writer, while expiry permits an atomic takeover and lineage record. A displaced run
+with another active lease is not terminalized. Normal exits release owned leases and abrupt process
+loss is recovered after expiry. Lease rows contain only operation/run identifiers and timestamps,
+are intentionally mutable/deletable, and never carry source or model content.
+
+## Accepted-batch recovery receipts
+
+These are fsynced filesystem artifacts, not a table. After provider acceptance, the trace is written
+to `<database>.stage1-receipts/` before SQLite persistence; startup promotes a complete temporary
+receipt, verifies its integrity, and reconciles the accepted IDs without another create POST. The
+database and sibling directory are one backup/move/restore unit until all receipts are reconciled.
+
+## `source_item_review_flags`
+
+Queues prompt-injection, prohibited-output, missing-provider-trace, and result-time policy/retention
+findings against their exact source item, authorizing policy, and source. Preflight flags truthfully
+carry no provider ID; output flags retain their batch trace for review. Provenance is immutable;
+only the pending-to-reviewed control transition is writable.
+
+## `claims`
+
+Stores Stage 1 claim taxonomy, separate outcome and roster-behavior directions, evidence class and
+basis, falsifiability, qualitative channel routing, uncertainty metadata, exact model, prompt, and
+provider trace. It deliberately has no projection- or ownership-adjustment field.
+The graph is immutable after insertion except that reconstructive context is cleared on tombstone.
+
+## `claim_player_refs`
+
+Links each name copied from source text either to a deterministic canonical-player match or to the
+durable unresolved queue, never both. Resolved references retain crosswalk method and confidence.
+The `manual_override` bit distinguishes human identity decisions from automatic exact matches.
+
+## `claim_evidence_refs`
+
+Stores zero-based Unicode character offsets with an exclusive end, the canonical-source hash, and
+the bounded verbatim extract. Offsets index the canonical Stage 1 string
+`normalize_item_text(title, cleaned_text)`, not `cleaned_text` alone; its SHA-256 is the item's
+`content_sha256`, copied here as `source_text_sha256`. The Stage 1 writer validates the whole claim set atomically against
+the NFKC canonical source string before insertion and rechecks that source under the same savepoint.
+SQLite additionally binds the reference to the retained item/hash and forbids later mutation. A
+tombstone clears the reconstructive extract and output JSON while retaining hashes, offsets, claim
+taxonomy, and provider/policy lineage.
 
 ## `decision_snapshots`
 

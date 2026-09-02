@@ -2,6 +2,98 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slice 17 review outcomes
+
+- **Canonical UTC-Z is enforced by the database, not by a registered SQL function.** The
+  delivered migration rebuilt four narrative tables to drop their lexical interval CHECKs and
+  routed every comparison through a Python-registered `na_timestamp_after`, on the premise that
+  stored timestamps might carry differing offsets. They cannot: every writer goes through the
+  canonical chokepoint, and all 3,852 production rows are canonical. The function made every
+  write from a bare `sqlite3` connection fail at prepare time. The migration now adds triggers in
+  place (no rebuild), the narrative tables refuse non-canonical timestamps at insert, and every
+  comparison is lexical. The store must never again depend on a connection-registered function.
+- **Ineligibility is per item; ambiguity is narrow; failure is capped.** One tombstoned or
+  retention-expired item no longer aborts the whole window — it is listed with a reason and
+  skipped. A missing credential (`TypeError` from the SDK) or an undelivered request
+  (`APIConnectionError` that is not a timeout) is a definite rejection, so the reservation is
+  retryable instead of stranded as `creating` forever; the CLI also refuses to start without a
+  key before opening the database. Three `failed` attempts under one prompt/model make an item
+  ineligible until reviewed. `na-extract abandon` is the sanctioned exit for a stuck attempt.
+- **Review flags are outcomes, not failures.** A flagged item is a terminal success of the
+  gate; the run exits 0. Exit 3 means the batch is still processing and the identical command
+  resumes it. The injection detector was re-cut for precision after 13 of 28 realistic headlines
+  matched (e.g. "Mark Andrews claims he is healthy"): weak nouns like "rules" now require a
+  co-occurring steering verb, and bare "claims" never matches. Recall on the attack set is
+  unchanged. Output cap is 4096 tokens (12 claims did not fit in 2048). Lease grace is five
+  minutes, not thirty, because the leases defend against concurrent workers this project does
+  not run.
+
+## 2026-09-02 — Stage 1 extraction boundary and replay contract
+
+- **The model sees only canonical visible headline-plus-summary text, inside a unique delimiter.**
+  Current reviewed source policy must allow third-party processing; visible injection markers stop
+  before the API. Returned player names are bounded as plausible person names, team references
+  must belong to the reviewed NFL lexicon, and every entity/evidence string is checked against that
+  same canonical text; one bad span rejects the whole item claim set. The exact authorizing
+  `source_policy_id` follows the request, claim, and review flag; text at or beyond its raw TTL and
+  any tombstoned item fail closed. Current policy, source enablement, retention, tombstones, and
+  source hash are checked again in a short `BEGIN IMMEDIATE` authorization/reservation transaction
+  and inside each atomic result-settlement snapshot. That transaction installs scoped fences for the
+  relevant policies, source, item, and tombstone, then commits before create; unrelated database
+  work remains available and no transaction spans network I/O. The capture policy, current policy
+  when present, and every exact policy cited by an extraction attempt constrain retention to their
+  minimum TTL. A later policy cannot retroactively extend it. An already accepted result that loses
+  authorization is retrieved for accounting but terminally quarantined without storing its text.
+- **The native Anthropic batch lane has no tools and uses the exact snapshot model.** Successful
+  batch items have no per-item HTTP request ID, so provenance truthfully stores the shared batch
+  submission request ID alongside batch ID, custom ID, and message ID; it does not fabricate a
+  per-item ID. Prompt text and the transformed strict schema are hashed as one immutable version.
+  Per-item reservations are committed before create. After acceptance, the trace is fsynced to the
+  sibling `<database>.stage1-receipts/` recovery directory before the accepted IDs and recovery lease
+  are committed atomically to SQLite. Startup reconciles a surviving receipt before planning. The
+  non-idempotent create POST disables SDK retries and large windows are partitioned below provider
+  request-count/byte limits. Timeouts resume the same batch; an ambiguous create stops further fresh
+  creates, and neither it nor an accepted result-contract failure is automatically resubmitted.
+  Result validity begins when JSONL is received, not when the batch was submitted. The owner renews
+  its recovery lease around retrieval and before every terminal item write; losing ownership fences
+  a stale worker. Expiry permits atomic takeover, complete lineage capture, and supersession only
+  when the displaced run has no other active lease.
+- **Player resolution never trusts model metadata.** Stage 1 accepts only names as written. An exact
+  canonical name or durable alias can supply one deterministic historical team to the existing
+  crosswalk; a missing or ambiguous team uses `UNK`, disables fuzzy acceptance, and creates an
+  unresolved queue link on the stored claim. Match method, confidence, and manual-override status
+  are preserved on the claim reference.
+- **An extraction attempt is separate from its zero-or-more claims.** Successful empty responses and
+  security blocks are durable terminal outcomes, while definite transport/schema failures remain
+  retryable. Canonical output JSON, claim ordering, request bytes, and hashes make replay a
+  stored-result operation, not a second model call. Submission-time rates and request/batch lineage
+  are store-immutable, so a resumed batch cannot be redirected or repriced by a later config. A
+  transaction-local `settling` state is the only time claims and references may be inserted; after
+  success the graph cannot be appended. Valid accepted output that encounters any local settlement
+  failure remains submitted and resumable, never newly billable. Recovery records every originating
+  or displaced run in immutable `model_run_parents`; `model_runs.parent_run_id` is only the
+  one-parent convenience field. Tombstones alone authorize redaction of
+  output/evidence/context text; hashes, offsets, taxonomy, and provider/policy lineage remain, and
+  audit rows cannot be deleted. Source-item identity, source/hash, timestamps, and provenance are
+  likewise immutable; only an exact matching tombstone may clear title, raw bytes, and cleaned text.
+
+## 2026-09-02 — Dated nflverse roster pins and byte archive
+
+- **Roster pins are append-only observations selected by review date.** A season can carry
+  multiple `(url, sha256, reviewed_at)` entries, and callers must supply an as-of date. This
+  prevents an earlier replay from silently resolving identities through a later roster.
+- **A successfully verified roster is content-addressed locally by its full sha256.** Archive
+  hits are re-verified and require no network. Bytes that fail the reviewed hash are never
+  written; losing an old archive after the rolling URL moves therefore fails closed rather
+  than manufacturing a historical roster.
+- **Refresh is review assistance, not authority.** The helper downloads the rolling asset and
+  reports its hash plus player additions, removals, field changes, and malformed or conflicting
+  rows, but it never changes `PINNED_ROSTER_RELEASES`. A maintainer reviews and pastes the
+  emitted entry. (Review fix, 2026-09-02:) the helper does archive the downloaded bytes under
+  their own sha256 — self-verifying, and not a pin — so the entry it prints is fetchable
+  offline once pasted even if upstream overwrites the asset again before the next seed. It
+  rejects a future `reviewed_at`, and a same-day re-pin later in the table wins ties.
+
 ## 2026-09-02 — Collection run durability (found in first live operation)
 
 - **`na-collect run` commits per source, not once for the whole batch.** A full run takes

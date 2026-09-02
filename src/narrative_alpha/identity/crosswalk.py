@@ -99,9 +99,17 @@ class PlayerCrosswalk:
         if len(exact) > 1:
             return self._unresolved(identity, exact)
 
-        aliases = self._alias_candidates(identity, candidates, normalized_input)
+        aliases, manual_alias_ids = self._alias_candidates(
+            identity, candidates, normalized_input
+        )
         if len(aliases) == 1:
-            return self._accept(identity, aliases[0], MatchMethod.DETERMINISTIC_ALIAS, 1.0)
+            return self._accept(
+                identity,
+                aliases[0],
+                MatchMethod.DETERMINISTIC_ALIAS,
+                1.0,
+                manual_override=aliases[0].player_id in manual_alias_ids,
+            )
         if len(aliases) > 1:
             return self._unresolved(identity, aliases)
 
@@ -338,7 +346,7 @@ class PlayerCrosswalk:
         identity: PlayerIdentityInput,
         candidates: tuple[_PlayerCandidate, ...],
         normalized_input: str,
-    ) -> tuple[_PlayerCandidate, ...]:
+    ) -> tuple[tuple[_PlayerCandidate, ...], set[int]]:
         observed_at = _timestamp(identity.observed_at)
         rows = self.connection.execute(
             """
@@ -354,7 +362,10 @@ class PlayerCrosswalk:
         ).fetchall()
         manual_ids = {int(row["player_id"]) for row in rows if bool(row["manual_override"])}
         alias_ids = manual_ids or {int(row["player_id"]) for row in rows}
-        return tuple(candidate for candidate in candidates if candidate.player_id in alias_ids)
+        return (
+            tuple(candidate for candidate in candidates if candidate.player_id in alias_ids),
+            manual_ids,
+        )
 
     def _suffix_tolerant_candidates(
         self,
@@ -420,6 +431,7 @@ class PlayerCrosswalk:
         confidence: float,
         *,
         persist_alias: bool = True,
+        manual_override: bool = False,
     ) -> IdentityMatchResult:
         self._persist_mapping(
             identity,
@@ -433,6 +445,7 @@ class PlayerCrosswalk:
             player_id=candidate.player_id,
             method=method,
             confidence=confidence,
+            manual_override=manual_override,
             candidates=(replace(candidate, score=confidence).public(),),
         )
 

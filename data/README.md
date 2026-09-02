@@ -6,6 +6,8 @@ Local data only — nothing in here is committed except this file and `.gitkeep`
 
 ```
 data/
+  archive/nflverse/sha256/<prefix>/<sha256>.csv
+                            # exact hash-verified roster bytes; fetched once, replayed locally
   snapshots/<season>/week_<NN>/<capture_ts_utc>/
     manifest.json          # file list, sha256 hashes, observed_at, source labels
     salaries/              # raw DK/FD salary CSVs as downloaded
@@ -18,6 +20,8 @@ data/
     contest_standings/     # post-settlement standings/lineup exports for entered contests
     actuals/               # nflverse or equivalent outcome data
   db/                      # SQLite operational store (WAL mode)
+    narrative_alpha.sqlite3.stage1-receipts/
+                            # fsynced accepted-batch recovery receipts, when present
 ```
 
 ## Rules
@@ -28,6 +32,16 @@ data/
 - Fixed capture times (ET), per design doc §9.0: Sat 6:00 p.m., Sun 9:00 a.m., Sun 11:00 a.m.
 - Post-lock exports (standings, actuals) are labels, not predictors — the point-in-time rule
   applies to predictors only.
+- `archive/nflverse/` is the only local copy of the exact roster bytes behind every dated pin;
+  upstream overwrites the rolling asset, so a lost archive makes older pins unfetchable and
+  earlier replays fail closed. Back it up with the database.
+- Every stored timestamp is canonical UTC (`YYYY-MM-DDTHH:MM:SS.ffffffZ`, 27 characters) and the
+  narrative tables refuse any other spelling at insert. Ad-hoc writes from the `sqlite3` CLI work;
+  no registered SQL function is needed. Write timestamps in that exact form.
+- Treat the SQLite database and its sibling `.stage1-receipts/` directory as one recovery unit.
+  If receipts exist, preferably run extraction once at the original path to reconcile them before
+  moving or restoring anything; otherwise preserve both together at matching sibling paths. Never
+  back up, rename, move, or restore only the database while an accepted-batch receipt remains.
 
 ## Weather games CSV
 

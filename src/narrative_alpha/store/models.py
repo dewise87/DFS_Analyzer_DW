@@ -717,6 +717,474 @@ class SourceItemRow(PointInTimeRow):
         return self
 
 
+ClaimTypeValue = Literal[
+    "availability",
+    "usage",
+    "health",
+    "performance_observation",
+    "narrative",
+    "life_event",
+    "environment",
+    "team_context",
+    "field_propagation",
+    "none",
+]
+ClaimDimensionValue = Literal[
+    "active_status",
+    "snap_share",
+    "route_share",
+    "touch_share",
+    "target_share",
+    "role",
+    "health",
+    "efficiency",
+    "mean",
+    "tail",
+    "dependence",
+    "ownership",
+    "none",
+]
+ClaimDirectionValue = Literal["decrease", "neutral", "increase", "unknown"]
+EvidenceClassValue = Literal["A", "B", "C"]
+EvidenceBasisValue = Literal[
+    "official",
+    "direct_quote",
+    "beat_report",
+    "film_claim",
+    "play_by_play",
+    "statistics",
+    "community_observation",
+    "generic_sentiment",
+    "joke",
+    "unknown",
+]
+ClaimNoveltyValue = Literal["new", "corroborating", "contradicting", "derivative", "stale"]
+ModelConfidenceValue = Literal["low", "medium", "high", "unknown"]
+SuggestedChannelValue = Literal["availability", "mean", "shape", "dependence", "ownership"]
+
+
+def prompt_version_sha256(
+    *,
+    stage: str,
+    schema_version: str,
+    system_prompt: str,
+    user_prompt_template: str,
+    output_schema: Mapping[str, object],
+) -> str:
+    """Hash the exact prompt and strict output contract as one immutable artifact."""
+
+    payload = {
+        "output_schema": output_schema,
+        "schema_version": schema_version,
+        "stage": stage,
+        "system_prompt": system_prompt,
+        "user_prompt_template": user_prompt_template,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class PromptVersionRow(PointInTimeRow):
+    """The exact prompt text and strict schema used for one extraction version."""
+
+    prompt_version_id: str
+    stage: Literal["stage_1_extraction"]
+    schema_version: str
+    system_prompt: str
+    user_prompt_template: str
+    output_schema_json: dict[str, object]
+    prompt_sha256: Sha256
+    created_at: datetime
+
+    @field_validator("output_schema_json", mode="before")
+    @classmethod
+    def decode_output_schema(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("created_at")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_prompt_hash(self) -> Self:
+        expected = prompt_version_sha256(
+            stage=self.stage,
+            schema_version=self.schema_version,
+            system_prompt=self.system_prompt,
+            user_prompt_template=self.user_prompt_template,
+            output_schema=self.output_schema_json,
+        )
+        if self.prompt_sha256 != expected:
+            raise ValueError("prompt_sha256 does not match the prompt artifact")
+        return self
+
+
+class SourceItemExtractionRow(PointInTimeRow):
+    """One provider attempt, including durable terminal zero-claim outcomes."""
+
+    extraction_id: str
+    source_item_id: int = Field(gt=0)
+    source_policy_id: int = Field(gt=0)
+    source_family: str
+    source_content_sha256: Sha256
+    prompt_version_id: str
+    model_id: str
+    max_output_tokens: int = Field(gt=0)
+    request_sha256: Sha256
+    provider_request_id: str | None
+    batch_submission_request_id: str | None
+    provider_batch_id: str | None
+    provider_custom_id: str | None
+    provider_message_id: str | None
+    status: Literal[
+        "creating", "submitted", "settling", "succeeded", "flagged", "failed"
+    ]
+    output_json: dict[str, object] | None
+    output_sha256: Sha256 | None
+    output_redacted_at: datetime | None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cost_nanos_usd: int | None = Field(default=None, ge=0)
+    pricing_version: str
+    pricing_effective_at: date
+    pricing_source_url: str
+    input_nanos_per_token: int = Field(ge=0)
+    output_nanos_per_token: int = Field(ge=0)
+    latency_ms: int | None = Field(default=None, ge=0)
+    error_code: str | None
+    error_message: str | None
+
+    @field_validator(
+        "provider_request_id",
+        "batch_submission_request_id",
+        "provider_batch_id",
+        "provider_custom_id",
+        "provider_message_id",
+        "error_code",
+    )
+    @classmethod
+    def validate_optional_identifier(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provider trace identifiers and error codes must not be blank")
+        return value
+
+    @field_validator("output_json", mode="before")
+    @classmethod
+    def decode_output_json(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("output_redacted_at")
+    @classmethod
+    def normalize_output_redacted_at(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _utc(value)
+
+    @model_validator(mode="after")
+    def validate_attempt_outcome(self) -> Self:
+        if self.ingested_at != self.valid_from or self.ingested_at < self.observed_at:
+            raise ValueError(
+                "extraction ingestion/validity timestamps must align after observation"
+            )
+        if self.status in {"settling", "succeeded"}:
+            complete_batch_trace = all(
+                value is not None
+                for value in (
+                    self.batch_submission_request_id,
+                    self.provider_batch_id,
+                    self.provider_custom_id,
+                )
+            )
+            if (
+                self.output_sha256 is None
+                or self.error_code is not None
+                or self.provider_message_id is None
+                or self.provider_request_id is not None
+                or not complete_batch_trace
+            ):
+                raise ValueError("succeeded extraction requires output hash and no error")
+            if self.status == "settling" and (
+                self.output_json is None or self.output_redacted_at is not None
+            ):
+                raise ValueError("settling extraction requires unredacted output JSON")
+            if self.status == "succeeded" and (
+                (self.output_json is None) == (self.output_redacted_at is None)
+            ):
+                raise ValueError(
+                    "succeeded extraction requires output JSON unless compliance-redacted"
+                )
+            if self.output_json is not None:
+                canonical = json.dumps(
+                    self.output_json,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if hashlib.sha256(canonical).hexdigest() != self.output_sha256:
+                    raise ValueError("output_sha256 does not match canonical output_json")
+        elif self.output_json is not None or self.output_sha256 is not None:
+            raise ValueError("non-succeeded extraction cannot carry model output")
+        elif self.output_redacted_at is not None:
+            raise ValueError("only succeeded output can be compliance-redacted")
+        elif self.status in {"flagged", "failed"} and self.error_code is None:
+            raise ValueError("flagged/failed extraction requires an error and no output hash")
+        elif self.status == "submitted" and not all(
+            value is not None
+            for value in (
+                self.provider_batch_id,
+                self.provider_custom_id,
+            )
+        ):
+            raise ValueError("submitted extraction requires a complete batch trace")
+        elif self.status == "creating" and any(
+            value is not None
+            for value in (
+                self.provider_request_id,
+                self.batch_submission_request_id,
+                self.provider_batch_id,
+                self.provider_custom_id,
+                self.provider_message_id,
+            )
+        ):
+            raise ValueError("creating extraction cannot claim provider acceptance")
+        return self
+
+
+class SourceItemReviewFlagRow(PointInTimeRow):
+    """A durable prompt-injection or prohibited-output review item."""
+
+    source_item_review_flag_id: str
+    source_item_id: int = Field(gt=0)
+    source_id: str
+    source_policy_id: int = Field(gt=0)
+    flag_type: Literal[
+        "prompt_injection_input",
+        "prompt_injection_output",
+        "prohibited_output",
+        "provider_trace_missing",
+        "policy_blocked_output",
+    ]
+    reason: str
+    prompt_version_id: str
+    model_id: str
+    provider_request_id: str | None
+    batch_submission_request_id: str | None
+    provider_batch_id: str | None
+    provider_custom_id: str | None
+    review_status: Literal["pending", "confirmed", "dismissed"]
+    reviewed_at: datetime | None
+
+    @field_validator(
+        "provider_request_id",
+        "batch_submission_request_id",
+        "provider_batch_id",
+        "provider_custom_id",
+    )
+    @classmethod
+    def validate_optional_identifier(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provider trace identifiers must not be blank")
+        return value
+
+    @field_validator("reviewed_at")
+    @classmethod
+    def normalize_reviewed_at(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _utc(value)
+
+    @model_validator(mode="after")
+    def validate_review_state(self) -> Self:
+        if (self.review_status == "pending") != (self.reviewed_at is None):
+            raise ValueError("reviewed_at must be absent exactly while a flag is pending")
+        if self.reviewed_at is not None and self.reviewed_at < max(
+            self.observed_at,
+            self.ingested_at,
+            self.valid_from,
+        ):
+            raise ValueError("reviewed_at cannot predate the review flag")
+        trace_values = (
+            self.provider_request_id,
+            self.batch_submission_request_id,
+            self.provider_batch_id,
+            self.provider_custom_id,
+        )
+        if self.flag_type == "prompt_injection_input" and any(
+            value is not None for value in trace_values
+        ):
+            raise ValueError("input injection flags cannot carry provider trace")
+        if self.flag_type != "prompt_injection_input" and not (
+            self.provider_request_id is not None
+            or (self.provider_batch_id is not None and self.provider_custom_id is not None)
+        ):
+            raise ValueError("provider-backed review flags require provider trace")
+        return self
+
+
+class ClaimRow(PointInTimeRow):
+    """One Stage 1 claim; qualitative directions are not projection adjustments."""
+
+    claim_id: str
+    extraction_id: str
+    source_item_id: int = Field(gt=0)
+    source_policy_id: int = Field(gt=0)
+    prompt_version_id: str
+    model_id: str
+    provider_request_id: str | None
+    batch_submission_request_id: str | None
+    provider_batch_id: str | None
+    provider_custom_id: str | None
+    provider_message_id: str | None
+    claim_type: ClaimTypeValue
+    claim_dimension: ClaimDimensionValue
+    outcome_direction: ClaimDirectionValue
+    roster_behavior_direction: ClaimDirectionValue
+    evidence_class: EvidenceClassValue
+    evidence_basis: EvidenceBasisValue
+    falsifiable: bool
+    specificity: float = Field(ge=0, le=1)
+    actionability: float = Field(ge=0, le=1)
+    novelty: ClaimNoveltyValue
+    model_confidence: ModelConfidenceValue
+    team_refs_json: tuple[str, ...]
+    uncertainty_flags_json: tuple[str, ...]
+    ambiguity_flags_json: tuple[str, ...]
+    suggested_channels_json: tuple[SuggestedChannelValue, ...]
+    disconfirming_context: str | None
+    disconfirming_context_sha256: Sha256 | None
+    context_redacted_at: datetime | None
+
+    @field_validator(
+        "provider_request_id",
+        "batch_submission_request_id",
+        "provider_batch_id",
+        "provider_custom_id",
+        "provider_message_id",
+    )
+    @classmethod
+    def validate_optional_identifier(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provider trace identifiers must not be blank")
+        return value
+
+    @field_validator("context_redacted_at")
+    @classmethod
+    def normalize_context_redacted_at(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _utc(value)
+
+    @model_validator(mode="after")
+    def validate_provider_trace(self) -> Self:
+        batch_trace = all(
+            value is not None
+            for value in (
+                self.batch_submission_request_id,
+                self.provider_batch_id,
+                self.provider_custom_id,
+            )
+        )
+        if (
+            self.provider_message_id is None
+            or self.provider_request_id is not None
+            or not batch_trace
+        ):
+            raise ValueError("claim has no complete provider request trace")
+        if self.disconfirming_context is not None:
+            digest = hashlib.sha256(self.disconfirming_context.encode("utf-8")).hexdigest()
+            if self.disconfirming_context_sha256 != digest:
+                raise ValueError("disconfirming_context_sha256 does not match context")
+            if self.context_redacted_at is not None:
+                raise ValueError("retained disconfirming context cannot be marked redacted")
+        elif (self.disconfirming_context_sha256 is None) != (
+            self.context_redacted_at is None
+        ):
+            raise ValueError("redacted context must retain its hash and redaction time")
+        return self
+
+    @field_validator(
+        "uncertainty_flags_json",
+        "ambiguity_flags_json",
+        "suggested_channels_json",
+        "team_refs_json",
+        mode="before",
+    )
+    @classmethod
+    def decode_claim_lists(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator(
+        "uncertainty_flags_json",
+        "ambiguity_flags_json",
+        "suggested_channels_json",
+        "team_refs_json",
+    )
+    @classmethod
+    def require_unique_claim_lists(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("claim metadata lists must not contain duplicates")
+        return value
+
+
+class ClaimPlayerRefRow(PointInTimeRow):
+    """A model-returned name linked only by the deterministic player crosswalk."""
+
+    claim_player_ref_id: int = Field(gt=0)
+    claim_id: str
+    ordinal: int = Field(ge=0)
+    name_raw: str
+    player_id: int | None
+    unresolved_id: int | None
+    resolution_method: str | None
+    resolution_confidence: float | None = Field(default=None, ge=0, le=1)
+    manual_override: bool
+
+    @model_validator(mode="after")
+    def validate_resolution_link(self) -> Self:
+        if (self.player_id is None) == (self.unresolved_id is None):
+            raise ValueError("exactly one of player_id and unresolved_id must be populated")
+        if self.player_id is None and (
+            self.resolution_method is not None or self.resolution_confidence is not None
+        ):
+            raise ValueError("unresolved player references cannot claim a match method")
+        if self.player_id is None and self.manual_override:
+            raise ValueError("unresolved player references cannot claim a manual override")
+        if self.player_id is not None and (
+            self.resolution_method is None or self.resolution_confidence is None
+        ):
+            raise ValueError("resolved player references require match metadata")
+        return self
+
+
+class ClaimEvidenceRefRow(PointInTimeRow):
+    """A bounded, verbatim span in the canonical collected item text."""
+
+    claim_evidence_ref_id: int = Field(gt=0)
+    claim_id: str
+    ordinal: int = Field(ge=0)
+    source_item_id: int = Field(gt=0)
+    source_text_sha256: Sha256
+    extract_start: int = Field(ge=0)
+    extract_end: int = Field(gt=0)
+    verbatim_extract: str | None = Field(default=None, min_length=1, max_length=512)
+    extract_sha256: Sha256
+    redacted_at: datetime | None
+
+    @field_validator("redacted_at")
+    @classmethod
+    def normalize_redacted_at(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _utc(value)
+
+    @model_validator(mode="after")
+    def validate_extract_interval(self) -> Self:
+        if self.extract_end <= self.extract_start:
+            raise ValueError("extract_end must be greater than extract_start")
+        if self.verbatim_extract is not None:
+            digest = hashlib.sha256(self.verbatim_extract.encode("utf-8")).hexdigest()
+            if digest != self.extract_sha256:
+                raise ValueError("extract_sha256 does not match verbatim_extract")
+            if self.redacted_at is not None:
+                raise ValueError("retained evidence cannot be marked redacted")
+        elif self.redacted_at is None:
+            raise ValueError("redacted evidence requires redacted_at")
+        return self
+
+
 class ContentTombstoneRow(PointInTimeRow):
     """Durable evidence that reconstructive source content was removed."""
 

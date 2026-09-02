@@ -34,6 +34,15 @@ def connect_database(database_path: Path | str) -> Iterator[sqlite3.Connection]:
         if foreign_keys != 1:
             raise StoreConfigurationError("could not enable SQLite foreign keys")
 
+        # DELETE guards must also fire for the implicit delete performed by INSERT OR REPLACE;
+        # otherwise immutable provenance/tombstone rows can be silently replaced.
+        connection.execute("PRAGMA recursive_triggers = ON")
+        recursive_triggers = int(
+            connection.execute("PRAGMA recursive_triggers").fetchone()[0]
+        )
+        if recursive_triggers != 1:
+            raise StoreConfigurationError("could not enable SQLite recursive triggers")
+
         journal_mode = str(connection.execute("PRAGMA journal_mode = WAL").fetchone()[0])
         if journal_mode.casefold() != "wal":
             raise StoreConfigurationError(

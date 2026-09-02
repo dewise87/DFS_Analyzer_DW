@@ -65,7 +65,50 @@ uv run na-collect seed --catalog config/narrative_sources.toml --check-feeds
 
 Run `uv run na-collect run` on the Wed–Fri batch cadence. It attempts every enabled source,
 reports failures by source, and exits nonzero if any feed failed. Run
-`uv run na-collect purge` on the same schedule to enforce each reviewed raw-text TTL.
+`uv run na-collect purge` on the same schedule. Purge uses the earliest deadline implied by
+the capture policy, the current policy when one exists, and every exact policy version cited by
+an extraction attempt. A later, longer policy cannot extend earlier authorization; an item whose
+capture policy cannot be reconstructed receives zero retention.
+
+### Structured claim extraction
+
+Run Stage 1 inside the raw-text retention window. Always dry-run first: it renders the plan,
+lists ineligible items with reasons, and prices the batch without building an API client or
+writing to the database (`--show-prompts` adds every rendered prompt; `--max-items N` bounds a
+smoke test):
+
+```bash
+uv run na-extract --database data/db/narrative_alpha.sqlite3 \
+  --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --dry-run
+ANTHROPIC_API_KEY=... uv run na-extract --database data/db/narrative_alpha.sqlite3 \
+  --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --max-items 20
+ANTHROPIC_API_KEY=... uv run na-extract --database data/db/narrative_alpha.sqlite3 \
+  --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z
+```
+
+Exit codes: `0` done (review flags are an expected outcome, not a failure); `3` the provider
+batch is still processing after `--timeout-seconds` (default one hour; Message Batches can take
+up to 24 hours) — rerun the identical command and it resumes the accepted batch without
+re-billing; `2` an error. A missing `ANTHROPIC_API_KEY` is refused before the database is
+touched. `na-extract review` lists pending review flags (injection markers, prohibited output)
+and any in-flight attempt; `na-extract abandon --extraction-id ID --reason "..."` turns a
+stuck attempt into a retryable failure — the only sanctioned way out of an attempt whose
+provider outcome is unknown. An item that fails three times under one prompt version and
+model is listed as ineligible instead of being billed again; an item past retention,
+tombstoned, or purged is listed and skipped, never aborting the rest of the window.
+
+The live command uses Anthropic Message Batches with strict structured output and no tools.
+It checks the current source policy before sending text, rejects visible prompt-injection markers,
+verifies every evidence span character-for-character, and resolves model-returned names only through
+the deterministic player crosswalk. Batch pricing is versioned in `config/model_pricing.toml`; actual
+provider token usage and integer USD-nanocost are stored on the extraction attempt. Reservations are
+committed before the single-shot provider POST, the accepted trace is fsynced to a sibling
+`<database>.stage1-receipts/` directory before the SQLite commit, and startup reconciles any
+surviving receipt so a crash between acceptance and commit never re-bills. Policy, retention,
+deletion, and source bytes are checked at submission and again when each result settles.
+`--run-at` is dry-run-only so a live policy or retention check cannot be backdated. A process
+killed mid-run leaves lease rows that block a second run for at most the poll timeout plus a
+few minutes; `na-extract review` shows them.
 
 ## Salary CSV parsing
 
@@ -98,6 +141,15 @@ ambiguous identities are never accepted silently. Review them with:
 uv run na-crosswalk --database data/db/narrative_alpha.sqlite3 resolve
 uv run na-crosswalk --database data/db/narrative_alpha.sqlite3 resolve \
   --unresolved-id 12 --player-id 345 --note "confirmed against roster"
+```
+
+Pins are dated and selected as-of a decision date. Verified roster bytes are kept in the local
+content-addressed archive, so a replay does not depend on nflverse's rolling release URL. To
+review a weekly refresh and print its hash, player diff, and exact pin entry without changing
+the pin table:
+
+```bash
+uv run na-crosswalk nflverse-refresh --season 2026 --reviewed-at 2026-09-02
 ```
 
 `PlayerCrosswalk.require_all_resolved()` is the fail-closed guard for lineup generation.

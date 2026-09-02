@@ -45,6 +45,9 @@ POINT_IN_TIME_COLUMNS = {
     "run_id",
 }
 EXTERNAL_TABLES = {
+    "claim_evidence_refs",
+    "claim_player_refs",
+    "claims",
     "contest_payouts",
     "contests",
     "teams",
@@ -56,6 +59,7 @@ EXTERNAL_TABLES = {
     "slates",
     "salaries",
     "projection_snapshots",
+    "prompt_versions",
     "player_distributions",
     "ownership_baselines",
     "actual_ownership",
@@ -65,6 +69,8 @@ EXTERNAL_TABLES = {
     "sources",
     "source_policies",
     "source_items",
+    "source_item_extractions",
+    "source_item_review_flags",
     "content_tombstones",
 }
 
@@ -103,9 +109,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6]
+    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7]
     assert second == ()
-    assert len(records) == 6
+    assert len(records) == 7
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -124,6 +130,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[5][0] == 6
     assert records[5][1] == "0006_versioned_sources.sql"
     assert len(records[5][2]) == 64
+    assert records[6][0] == 7
+    assert records[6][1] == "0007_stage_1_extraction.sql"
+    assert len(records[6][2]) == 64
 
 
 def test_source_versioning_migration_preserves_existing_narrative_rows(
@@ -210,9 +219,12 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
                 "content_tombstones",
             )
         }
+        retained_text = connection.execute(
+            "SELECT title, raw_content, cleaned_text FROM source_items"
+        ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6]
+    assert [migration.version for migration in applied] == [6, 7]
     assert counts == {
         "source_keys": 1,
         "sources": 1,
@@ -220,7 +232,75 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         "source_items": 1,
         "content_tombstones": 1,
     }
+    assert tuple(retained_text) == (None, None, None)
     assert foreign_key_problems == []
+
+
+@pytest.mark.parametrize(
+    ("legacy_content_hash", "legacy_tombstoned_at", "message"),
+    [
+        ("b" * 64, "2026-08-01T12:00:00.000000Z", "does not match its source item"),
+        ("a" * 64, "not-a-date", "non-canonical UTC timestamp"),
+    ],
+)
+def test_stage1_migration_rejects_irreparable_legacy_tombstones(
+    tmp_path: Path,
+    legacy_content_hash: str,
+    legacy_tombstoned_at: str,
+    message: str,
+) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    legacy_migrations = tmp_path / "legacy_migrations"
+    legacy_migrations.mkdir()
+    migrations_path = Path("src/narrative_alpha/store/migrations")
+    for version in range(1, 7):
+        source_path = next(migrations_path.glob(f"{version:04d}_*.sql"))
+        (legacy_migrations / source_path.name).write_bytes(source_path.read_bytes())
+
+    timestamp = "2026-08-01T12:00:00.000000Z"
+    with connect_database(database_path) as connection:
+        apply_migrations(connection, legacy_migrations)
+        connection.execute("INSERT INTO source_keys(source_id) VALUES ('fixture')")
+        cursor = connection.execute(
+            """
+            INSERT INTO source_items(
+                source_id, external_item_id, canonical_url, title, raw_content,
+                cleaned_text, content_sha256, source, published_at, observed_at,
+                ingested_at, effective_at, valid_from, valid_to, source_version, run_id
+            ) VALUES (
+                'fixture', 'legacy-item', NULL, 'Legacy title', X'74657874', 'text',
+                ?, 'fixture', NULL, ?, ?, NULL, ?, NULL, 'v1', NULL
+            )
+            """,
+            ("a" * 64, timestamp, timestamp, timestamp),
+        )
+        assert cursor.lastrowid is not None
+        connection.execute(
+            """
+            INSERT INTO content_tombstones(
+                source_item_id, source_id, content_sha256, reason, tombstoned_at,
+                source, published_at, observed_at, ingested_at, effective_at,
+                valid_from, valid_to, source_version, run_id
+            ) VALUES (?, 'fixture', ?, 'platform_deleted', ?, 'fixture', NULL,
+                      ?, ?, NULL, ?, NULL, 'v1', NULL)
+            """,
+            (
+                int(cursor.lastrowid),
+                legacy_content_hash,
+                legacy_tombstoned_at,
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        with pytest.raises(MigrationError, match=message):
+            apply_migrations(connection)
+        applied_versions = {
+            int(row[0])
+            for row in connection.execute("SELECT version FROM applied_migrations")
+        }
+
+    assert applied_versions == {1, 2, 3, 4, 5, 6}
 
 
 def test_each_migration_is_transactional(tmp_path: Path) -> None:
@@ -245,10 +325,149 @@ def test_each_migration_is_transactional(tmp_path: Path) -> None:
     assert applied_count == 0
 
 
-def test_connection_enables_wal_and_foreign_keys(tmp_path: Path) -> None:
+def test_connection_enables_wal_foreign_keys_and_recursive_triggers(
+    tmp_path: Path,
+) -> None:
     with connect_database(tmp_path / "store.sqlite3") as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA recursive_triggers").fetchone()[0] == 1
+
+
+def test_store_interval_guards_preserve_microseconds_and_require_canonical_utc(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "store.sqlite3"
+    observed_at = "2026-01-01T00:00:00.000000Z"
+    one_microsecond_later = "2026-01-01T00:00:00.000001Z"
+    insert_source = """
+        INSERT INTO sources(
+            source_id, display_name, source_family, collector_kind, feed_url,
+            enabled, source, published_at, observed_at, ingested_at, effective_at,
+            valid_from, valid_to, source_version, run_id
+        ) VALUES (?, 'Fixture', 'official_team', 'rss_atom', ?, 1, 'fixture',
+                  NULL, ?, ?, NULL, ?, ?, 'v1', NULL)
+    """
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        connection.executemany(
+            "INSERT INTO source_keys(source_id) VALUES (?)",
+            [("micro-close",), ("offset-close",), ("reversed",)],
+        )
+        connection.execute(
+            insert_source,
+            (
+                "micro-close",
+                "https://example.test/micro-close.xml",
+                observed_at,
+                observed_at,
+                observed_at,
+                None,
+            ),
+        )
+        # A one-microsecond interval closes cleanly: lexical order on canonical text is exact.
+        connection.execute(
+            "UPDATE sources SET valid_to = ? WHERE source_id = 'micro-close'",
+            (one_microsecond_later,),
+        )
+        # Non-canonical spellings (offsets, compact fractions) are refused at insert so the
+        # UNIQUE(source_id, observed_at) and interval checks can never see two spellings of
+        # one instant.
+        for spelling in ("2026-01-02T00:00:00+14:00", "2026-01-02T00:00:00Z", "2026-01-02"):
+            with pytest.raises(sqlite3.IntegrityError, match="canonical UTC"):
+                connection.execute(
+                    insert_source,
+                    (
+                        "offset-close",
+                        "https://example.test/offset-close.xml",
+                        observed_at,
+                        observed_at,
+                        spelling,
+                        None,
+                    ),
+                )
+        with pytest.raises(sqlite3.IntegrityError, match="valid_to must be later"):
+            connection.execute(
+                insert_source,
+                (
+                    "reversed",
+                    "https://example.test/reversed.xml",
+                    observed_at,
+                    observed_at,
+                    one_microsecond_later,
+                    observed_at,
+                ),
+            )
+        closed = connection.execute(
+            "SELECT valid_to FROM sources WHERE source_id = 'micro-close'"
+        ).fetchone()[0]
+
+    assert closed == one_microsecond_later
+
+
+def test_migration_runner_disables_legacy_alter_table_and_keeps_tombstone_keys(
+    tmp_path: Path,
+) -> None:
+    connection = sqlite3.connect(tmp_path / "raw.sqlite3")
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("PRAGMA legacy_alter_table = ON")
+        apply_migrations(connection)
+        assert connection.execute("PRAGMA legacy_alter_table").fetchone()[0] == 0
+        # No registered SQL function is required: a bare sqlite3 connection can write.
+        connection.execute("INSERT INTO source_keys(source_id) VALUES ('bare')")
+        tombstone_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(content_tombstones)"
+        ).fetchall()
+        assert {str(row[2]) for row in tombstone_foreign_keys} >= {
+            "model_runs",
+            "source_items",
+            "source_keys",
+        }
+        assert all(str(row[2]) != "source_items_stage1" for row in tombstone_foreign_keys)
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%na_timestamp_after%'"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_stage1_migration_rejects_utc_reversed_legacy_interval(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    legacy_migrations = tmp_path / "legacy_migrations"
+    legacy_migrations.mkdir()
+    migrations_path = Path("src/narrative_alpha/store/migrations")
+    for version in range(1, 7):
+        source_path = next(migrations_path.glob(f"{version:04d}_*.sql"))
+        (legacy_migrations / source_path.name).write_bytes(source_path.read_bytes())
+
+    observed_at = "2026-01-01T00:00:00.000000Z"
+    with connect_database(database_path) as connection:
+        apply_migrations(connection, legacy_migrations)
+        connection.execute("INSERT INTO source_keys(source_id) VALUES ('fixture')")
+        connection.execute(
+            """
+            INSERT INTO sources(
+                source_id, display_name, source_family, collector_kind, feed_url,
+                enabled, source, published_at, observed_at, ingested_at, effective_at,
+                valid_from, valid_to, source_version, run_id
+            ) VALUES (
+                'fixture', 'Fixture', 'official_team', 'rss_atom',
+                'https://example.test/feed.xml', 1, 'fixture', NULL, ?, ?, NULL,
+                '2026-08-01T00:00:00-12:00', '2026-08-01T23:00:00+14:00',
+                'v1', NULL
+            )
+            """,
+            (observed_at, observed_at),
+        )
+
+        with pytest.raises(
+            MigrationError,
+            match=r"source configuration.*invalid timestamp",
+        ):
+            apply_migrations(connection)
 
 
 def test_foreign_key_enforcement_rejects_orphan(tmp_path: Path) -> None:

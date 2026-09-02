@@ -18,11 +18,15 @@ from narrative_alpha.identity.nflverse import (
     NflverseRosterError,
     PinnedRosterRelease,
     RosterHashError,
+    RosterPlayerChange,
+    RosterRefreshReport,
     RosterSchemaError,
     RosterSeedIssue,
     RosterSeedReport,
     fetch_pinned_roster,
     pinned_roster_release,
+    refresh_roster_release,
+    roster_archive_path,
     seed_nflverse_roster,
 )
 from narrative_alpha.identity.normalization import (
@@ -50,6 +54,8 @@ __all__ = [
     "PlayerCrosswalk",
     "PlayerIdentityInput",
     "RosterHashError",
+    "RosterPlayerChange",
+    "RosterRefreshReport",
     "RosterSchemaError",
     "RosterSeedIssue",
     "RosterSeedReport",
@@ -58,6 +64,8 @@ __all__ = [
     "normalize_name",
     "normalize_team_code",
     "pinned_roster_release",
+    "refresh_roster_release",
+    "roster_archive_path",
     "seed_nflverse_roster",
     "team_code_variants",
 ]

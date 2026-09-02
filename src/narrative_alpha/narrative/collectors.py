@@ -33,7 +33,7 @@ from narrative_alpha.snapshots.fetch import (
     Sleeper,
     get_with_retry,
 )
-from narrative_alpha.store import SourcePolicyRow, SourceRow
+from narrative_alpha.store import SourceItemRow, SourcePolicyRow, SourceRow
 
 DEFAULT_POLICY_MAX_AGE = timedelta(days=365)
 
@@ -276,32 +276,76 @@ def purge_expired_content(
 
     purged: list[int] = []
     for source_id in selected_source_ids:
-        policy = _reviewed_policy(connection, source_id, purge_time)
-        cutoff = purge_time - timedelta(days=policy.raw_retention_days)
-        rows = connection.execute(
-            """
-            SELECT source_item_id, source_id, content_sha256
-            FROM source_items
-            WHERE source_id = ?
-              AND raw_content IS NOT NULL
-              AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
-            ORDER BY source_item_id
-            """,
-            (source_id, utc_timestamp(cutoff)),
-        ).fetchall()
+        try:
+            current_policy = _reviewed_policy(connection, source_id, purge_time)
+        except PolicyGateError:
+            # Missing/revoked current terms are never permission to retain old content.
+            current_policy = None
+        rows = sorted(
+            (
+                item
+                for row in connection.execute(
+                    "SELECT * FROM source_items "
+                    "WHERE source_id = ? AND raw_content IS NOT NULL",
+                    (source_id,),
+                )
+                if _item_retention_expired(
+                    connection,
+                    item=(item := SourceItemRow.from_db(row)),
+                    current_policy=current_policy,
+                    as_of=purge_time,
+                )
+            ),
+            key=lambda item: item.source_item_id,
+        )
         for row in rows:
-            item_id = int(row["source_item_id"])
+            item_id = row.source_item_id
             if _tombstone(
                 connection,
                 item_id=item_id,
-                source_id=str(row["source_id"]),
-                content_sha256=str(row["content_sha256"]),
+                source_id=row.source_id,
+                content_sha256=row.content_sha256,
                 reason="retention_expired",
                 at=purge_time,
             ):
                 purged.append(item_id)
 
     return PurgeReport(purge_time, len(purged), tuple(purged))
+
+
+def _item_retention_expired(
+    connection: sqlite3.Connection,
+    *,
+    item: SourceItemRow,
+    current_policy: SourcePolicyRow | None,
+    as_of: datetime,
+) -> bool:
+    """Honor the shortest TTL that ever authorized retention or model processing."""
+
+    try:
+        capture_policy = _reviewed_policy(connection, item.source_id, item.observed_at)
+    except PolicyGateError:
+        # No reconstructable authorizing policy means no affirmative retention grant.
+        retention_days = [0]
+    else:
+        retention_days = [capture_policy.raw_retention_days]
+    if current_policy is not None:
+        retention_days.append(current_policy.raw_retention_days)
+    retention_days.extend(
+        int(row[0])
+        for row in connection.execute(
+            """
+            SELECT policy.raw_retention_days
+            FROM source_item_extractions AS extraction
+            JOIN source_policies AS policy
+              ON policy.source_policy_id = extraction.source_policy_id
+            WHERE extraction.source_item_id = ?
+            """,
+            (item.source_item_id,),
+        )
+    )
+    strictest_days = min(retention_days)
+    return item.observed_at <= ensure_utc(as_of) - timedelta(days=strictest_days)
 
 
 def tombstone_removed_item(
@@ -322,8 +366,8 @@ def tombstone_removed_item(
     ).fetchone()
     if row is None:
         raise CollectionError(f"source item {source_item_id} does not exist")
-    # A missing policy is never treated as permission to retain reported-deleted content.
-    _reviewed_policy(connection, str(row["source_id"]), deletion_time)
+    # A deletion report is an instruction to remove content. Current policy loss/revocation
+    # can never turn into permission to retain it.
     return _tombstone(
         connection,
         item_id=int(row["source_item_id"]),
@@ -353,41 +397,45 @@ def clean_markup(markup: str) -> str:
 def _reviewed_policy(
     connection: sqlite3.Connection, source_id: str, as_of: datetime
 ) -> SourcePolicyRow:
-    cutoff = utc_timestamp(as_of)
-    row = connection.execute(
-        """
-        SELECT * FROM source_policies
-        WHERE source_id = ?
-          AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
-          AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
-          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
-        ORDER BY observed_at DESC, source_policy_id DESC
-        LIMIT 1
-        """,
-        (source_id, cutoff, cutoff, cutoff),
-    ).fetchone()
-    if row is None:
+    cutoff = ensure_utc(as_of)
+    rows = (
+        SourcePolicyRow.from_db(row)
+        for row in connection.execute(
+            "SELECT * FROM source_policies WHERE source_id = ?",
+            (source_id,),
+        )
+    )
+    current = [
+        policy
+        for policy in rows
+        if policy.observed_at <= cutoff
+        and policy.valid_from <= cutoff
+        and (policy.valid_to is None or policy.valid_to > cutoff)
+    ]
+    if not current:
         raise PolicyGateError(f"source {source_id!r} has no reviewed current policy")
-    return SourcePolicyRow.from_db(row)
+    return max(current, key=lambda policy: (policy.observed_at, policy.source_policy_id))
 
 
 def _load_source(connection: sqlite3.Connection, source_id: str, as_of: datetime) -> SourceRow:
-    cutoff = utc_timestamp(as_of)
-    row = connection.execute(
-        """
-        SELECT * FROM sources
-        WHERE source_id = ?
-          AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
-          AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
-          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
-        ORDER BY observed_at DESC, source_record_id DESC
-        LIMIT 1
-        """,
-        (source_id, cutoff, cutoff, cutoff),
-    ).fetchone()
-    if row is None:
+    cutoff = ensure_utc(as_of)
+    rows = (
+        SourceRow.from_db(row)
+        for row in connection.execute(
+            "SELECT * FROM sources WHERE source_id = ?",
+            (source_id,),
+        )
+    )
+    current = [
+        source
+        for source in rows
+        if source.observed_at <= cutoff
+        and source.valid_from <= cutoff
+        and (source.valid_to is None or source.valid_to > cutoff)
+    ]
+    if not current:
         raise CollectionError(f"source {source_id!r} is not configured at the collection instant")
-    return SourceRow.from_db(row)
+    return max(current, key=lambda source: (source.observed_at, source.source_record_id))
 
 
 def _tombstone(
@@ -478,17 +526,45 @@ class _VisibleTextExtractor(HTMLParser):
         attributes: Mapping[str, str] = {
             name.casefold(): value.casefold() for name, value in attrs if value is not None
         }
-        style = attributes.get("style", "").replace(" ", "")
+        style = re.sub(r"\s+", "", attributes.get("style", ""))
+        clipped = (
+            "clip:rect(" in style
+            or "clip-path:inset(50%" in style
+            or "clip-path:inset(100%" in style
+        )
+        offscreen = (
+            re.search(r"(?:^|;)(?:left|right|top|bottom):-\d{3,}(?:px|em|rem)(?:;|$)", style)
+            is not None
+            or re.search(r"(?:^|;)text-indent:-\d{3,}(?:px|em|rem)(?:;|$)", style)
+            is not None
+        )
+        zero_sized = "overflow:hidden" in style and (
+            re.search(r"(?:^|;)(?:width|max-width):0(?:px|em|rem|%|pt)?(?:;|$)", style)
+            is not None
+            or re.search(r"(?:^|;)(?:height|max-height):0(?:px|em|rem|%|pt)?(?:;|$)", style)
+            is not None
+        )
         return (
             tag in self._ALWAYS_HIDDEN
             or "hidden" in {name.casefold() for name, _ in attrs}
             or attributes.get("aria-hidden") == "true"
             or "display:none" in style
             or "visibility:hidden" in style
+            or "content-visibility:hidden" in style
+            or re.search(r"(?:^|;)opacity:0(?:\.0+)?(?:!important)?(?:;|$)", style)
+            is not None
+            or re.search(
+                r"(?:^|;)font-size:0(?:px|em|rem|%|pt)?(?:!important)?(?:;|$)",
+                style,
+            )
+            is not None
+            or clipped
+            or offscreen
+            or zero_sized
         )
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        name = tag.casefold()
+        name = _local_name(tag).casefold()
         if name in self._VOID:
             return
         hidden = self._is_hidden(name, attrs)
@@ -500,7 +576,7 @@ class _VisibleTextExtractor(HTMLParser):
         return
 
     def handle_endtag(self, tag: str) -> None:
-        name = tag.casefold()
+        name = _local_name(tag).casefold()
         for index in range(len(self._open) - 1, -1, -1):
             if self._open[index][0] == name:
                 for _, hidden in self._open[index:]:

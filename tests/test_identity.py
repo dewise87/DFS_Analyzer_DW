@@ -7,14 +7,19 @@ import httpx
 import pytest
 
 from narrative_alpha.identity import (
+    PINNED_ROSTER_RELEASES,
     CrosswalkError,
     MatchMethod,
+    NflverseRosterError,
     PinnedRosterRelease,
     PlayerCrosswalk,
     PlayerIdentityInput,
     RosterHashError,
     fetch_pinned_roster,
     normalize_name,
+    pinned_roster_release,
+    refresh_roster_release,
+    roster_archive_path,
     seed_nflverse_roster,
 )
 from narrative_alpha.identity.cli import main as crosswalk_main
@@ -333,6 +338,7 @@ def test_manual_alias_applies_when_reingesting_the_original_older_capture(tmp_pa
 
     assert replay.player_id == player_id
     assert replay.method is MatchMethod.DETERMINISTIC_ALIAS
+    assert replay.manual_override is True
 
 
 def test_requeued_identity_reopens_resolved_status_and_fails_closed(tmp_path: Path) -> None:
@@ -613,6 +619,7 @@ def test_pinned_roster_fetch_retries_hash_checks_and_caches(tmp_path: Path) -> N
         season=2026,
         url="https://example.test/roster.csv",
         sha256=hashlib.sha256(content).hexdigest(),
+        reviewed_at=date(2026, 9, 1),
     )
     attempts = 0
 
@@ -631,6 +638,7 @@ def test_pinned_roster_fetch_retries_hash_checks_and_caches(tmp_path: Path) -> N
         again = fetch_pinned_roster(release, tmp_path / "cache", client=client)
 
     assert cached == again
+    assert cached == roster_archive_path(tmp_path / "cache", release.sha256)
     assert cached.read_bytes() == content
     assert attempts == 2
     assert sleeps == [0.25]
@@ -641,6 +649,7 @@ def test_pinned_roster_rejects_hash_mismatch(tmp_path: Path) -> None:
         season=2026,
         url="https://example.test/roster.csv",
         sha256="0" * 64,
+        reviewed_at=date(2026, 9, 1),
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -652,7 +661,32 @@ def test_pinned_roster_rejects_hash_mismatch(tmp_path: Path) -> None:
     ):
         fetch_pinned_roster(release, tmp_path / "cache", client=client)
 
-    assert not tuple((tmp_path / "cache").iterdir())
+    assert not tuple(path for path in (tmp_path / "cache").rglob("*") if path.is_file())
+
+
+def test_corrupt_archive_entry_is_named_and_never_trusted(tmp_path: Path) -> None:
+    content = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,GB,WR,ACT,Example Player,2000-01-01,00-001,1\n"
+    )
+    release = PinnedRosterRelease(
+        season=2026,
+        url="https://example.test/roster.csv",
+        sha256=hashlib.sha256(content).hexdigest(),
+        reviewed_at=date(2026, 9, 1),
+    )
+    archived = roster_archive_path(tmp_path / "archive", release.sha256)
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(content[:-10])
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("a corrupt archive entry must not be silently refetched")
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RosterHashError, match="local archive file is corrupt"),
+    ):
+        fetch_pinned_roster(release, tmp_path / "archive", client=client)
 
 
 def test_pinned_roster_seed_is_idempotent(tmp_path: Path) -> None:
@@ -664,6 +698,7 @@ def test_pinned_roster_seed_is_idempotent(tmp_path: Path) -> None:
         season=2026,
         url="https://example.test/roster.csv",
         sha256=hashlib.sha256(content).hexdigest(),
+        reviewed_at=date(2026, 9, 1),
     )
     roster = tmp_path / "roster.csv"
     roster.write_bytes(content)
@@ -680,3 +715,165 @@ def test_pinned_roster_seed_is_idempotent(tmp_path: Path) -> None:
     assert first.players_seeded == 1
     assert second.players_existing == 1
     assert counts == (1, 1, 1)
+
+
+def test_pinned_roster_release_selects_newest_pin_without_lookahead() -> None:
+    january = PinnedRosterRelease(
+        2026,
+        "https://example.test/january.csv",
+        "1" * 64,
+        date(2026, 1, 5),
+    )
+    september = PinnedRosterRelease(
+        2026,
+        "https://example.test/september.csv",
+        "2" * 64,
+        date(2026, 9, 1),
+    )
+    releases = {2026: (september, january)}
+
+    assert pinned_roster_release(2026, date(2026, 8, 31), releases=releases) is january
+    assert pinned_roster_release(2026, date(2026, 9, 1), releases=releases) is september
+    with pytest.raises(NflverseRosterError, match="at or before 2025-12-31"):
+        pinned_roster_release(2026, date(2025, 12, 31), releases=releases)
+
+
+def test_same_day_repin_selects_the_later_table_entry() -> None:
+    morning = PinnedRosterRelease(2026, "https://example.test/am.csv", "3" * 64, date(2026, 9, 2))
+    afternoon = PinnedRosterRelease(
+        2026, "https://example.test/pm.csv", "4" * 64, date(2026, 9, 2)
+    )
+    releases = {2026: (morning, afternoon)}
+
+    assert pinned_roster_release(2026, date(2026, 9, 2), releases=releases) is afternoon
+    assert pinned_roster_release(2026, date(2026, 9, 3), releases=releases) is afternoon
+
+
+def test_refresh_roster_reports_diff_and_does_not_mutate_pins(tmp_path: Path) -> None:
+    prior = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,GB,WR,ACT,Changed Player,2000-01-01,00-001,1\n"
+        b"2026,NYJ,QB,ACT,Removed Player,1999-01-01,00-002,1\n"
+    )
+    current = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,CHI,WR,ACT,Changed Player,2000-01-01,00-001,2\n"
+        b"2026,DET,RB,ACT,Added Player,2001-01-01,00-003,2\n"
+    )
+    pin = PinnedRosterRelease(
+        season=2026,
+        url="https://example.test/prior.csv",
+        sha256=hashlib.sha256(prior).hexdigest(),
+        reviewed_at=date(2026, 8, 25),
+    )
+    releases = {2026: (pin,)}
+    archive = tmp_path / "archive"
+    requests: list[str] = []
+
+    def archive_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=prior, request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(archive_handler)) as client:
+        fetch_pinned_roster(pin, archive, client=client)
+
+    before = tuple(PINNED_ROSTER_RELEASES[2026])
+
+    def refresh_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(200, content=current, request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(refresh_handler)) as client:
+        report = refresh_roster_release(
+            2026,
+            archive,
+            reviewed_at=date(2026, 9, 2),
+            client=client,
+            releases=releases,
+        )
+
+    assert len(requests) == 1
+    assert report.sha256 == hashlib.sha256(current).hexdigest()
+    assert report.added == (("00-003", "Added Player"),)
+    assert report.removed == (("00-002", "Removed Player"),)
+    assert report.changed[0].fields == (("team", "GB", "CHI"),)
+    assert report.issues == ()
+    assert "reviewed_at=date(2026, 9, 2)" in report.render()
+    assert tuple(PINNED_ROSTER_RELEASES[2026]) == before
+
+    # The reviewed entry it printed must be fetchable offline once pasted: the rolling bytes
+    # are archived under their own hash, and the pin table itself is untouched.
+    pasted = PinnedRosterRelease(2026, report.url, report.sha256, date(2026, 9, 2))
+    assert roster_archive_path(archive, report.sha256).read_bytes() == current
+
+    def offline(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("archived refresh bytes must not be refetched")
+
+    with httpx.Client(transport=httpx.MockTransport(offline)) as client:
+        fetched = fetch_pinned_roster(pasted, archive, client=client)
+    assert fetched.read_bytes() == current
+
+
+def test_refresh_rejects_a_future_review_date(tmp_path: Path) -> None:
+    pin = PinnedRosterRelease(2026, "https://example.test/prior.csv", "5" * 64, date(2026, 9, 1))
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("no fetch may happen before the review date is validated")
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(NflverseRosterError, match="2062-09-02 is in the future"),
+    ):
+        refresh_roster_release(
+            2026,
+            tmp_path / "archive",
+            reviewed_at=date(2062, 9, 2),
+            client=client,
+            releases={2026: (pin,)},
+            today=date(2026, 9, 2),
+        )
+
+
+def test_refresh_reports_malformed_and_conflicting_rows_instead_of_dropping_them(
+    tmp_path: Path,
+) -> None:
+    prior = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,GB,WR,ACT,Example Player,2000-01-01,00-001,1\n"
+    )
+    current = (
+        b"season,team,position,status,full_name,birth_date,gsis_id,week\n"
+        b"2026,,WR,ACT,Example Player,2000-01-01,00-001,2\n"
+        b"2026,DET,RB,ACT,Twice Listed,2001-01-01,00-003,2\n"
+        b"2026,CHI,RB,ACT,Twice Listed,2001-01-01,00-003,2\n"
+    )
+    pin = PinnedRosterRelease(
+        season=2026,
+        url="https://example.test/prior.csv",
+        sha256=hashlib.sha256(prior).hexdigest(),
+        reviewed_at=date(2026, 8, 25),
+    )
+    archive = tmp_path / "archive"
+    roster_archive_path(archive, pin.sha256).parent.mkdir(parents=True)
+    roster_archive_path(archive, pin.sha256).write_bytes(prior)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=current, request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        report = refresh_roster_release(
+            2026,
+            archive,
+            reviewed_at=date(2026, 9, 2),
+            client=client,
+            releases={2026: (pin,)},
+            today=date(2026, 9, 2),
+        )
+
+    assert [issue.reason for issue in report.issues] == [
+        "blank team",
+        "conflicting duplicate row for 00-003 in week 2",
+    ]
+    assert report.removed == (("00-001", "Example Player"),)
+    rendered = report.render()
+    assert "rows_rejected=2" in rendered
+    assert "! row 2: blank team" in rendered

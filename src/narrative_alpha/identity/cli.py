@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 from narrative_alpha.identity.crosswalk import CrosswalkError, PlayerCrosswalk
+from narrative_alpha.identity.nflverse import NflverseRosterError, refresh_roster_release
 from narrative_alpha.store import apply_migrations, connect_database
 
 DEFAULT_DATABASE_PATH = Path("data/db/narrative_alpha.sqlite3")
+DEFAULT_NFLVERSE_ARCHIVE = Path("data/archive/nflverse")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,12 +25,27 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--player-id", type=int)
     resolve.add_argument("--ignore", action="store_true")
     resolve.add_argument("--note")
+    refresh = commands.add_parser(
+        "nflverse-refresh",
+        help="review the rolling nflverse roster without changing the pin table",
+    )
+    refresh.add_argument("--season", type=int, required=True)
+    refresh.add_argument("--reviewed-at", type=date.fromisoformat, required=True)
+    refresh.add_argument("--archive", type=Path, default=DEFAULT_NFLVERSE_ARCHIVE)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "nflverse-refresh":
+            report = refresh_roster_release(
+                args.season,
+                args.archive,
+                reviewed_at=args.reviewed_at,
+            )
+            print(report.render(), end="")
+            return 0
         with connect_database(args.database) as connection:
             apply_migrations(connection)
             crosswalk = PlayerCrosswalk(connection)
@@ -58,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             crosswalk.resolve(args.unresolved_id, args.player_id, note=args.note)
             print(f"Resolved identity {args.unresolved_id} to canonical player {args.player_id}.")
             return 0
-    except CrosswalkError as error:
+    except (CrosswalkError, NflverseRosterError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

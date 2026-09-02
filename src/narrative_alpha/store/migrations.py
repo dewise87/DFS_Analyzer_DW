@@ -50,6 +50,11 @@ def apply_migrations(
 ) -> tuple[AppliedMigration, ...]:
     """Apply pending migrations in version order, one transaction per file."""
 
+    # Table-rebuild migrations rely on modern ALTER TABLE rename propagation even when a
+    # caller supplies a raw connection with foreign-key enforcement disabled.
+    connection.execute("PRAGMA legacy_alter_table = OFF")
+    if int(connection.execute("PRAGMA legacy_alter_table").fetchone()[0]) != 0:
+        raise MigrationError("could not disable SQLite legacy ALTER TABLE semantics")
     _ensure_migrations_table(connection)
     migrations = discover_migrations(migrations_path)
     existing = {

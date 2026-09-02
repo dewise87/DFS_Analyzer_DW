@@ -1,0 +1,31 @@
+[
+  {
+    "actionability": 0.9,
+    "ambiguity_flags": [
+      "none"
+    ],
+    "claim_dimension": "role",
+    "claim_type": "usage",
+    "disconfirming_context": null,
+    "evidence_basis": "beat_report",
+    "evidence_class": "B",
+    "falsifiable": true,
+    "model_confidence": "high",
+    "novelty": "new",
+    "outcome_direction": "increase",
+    "player_name_raw": "Jordan Reed",
+    "roster_behavior_direction": "increase",
+    "specificity": 0.8,
+    "suggested_channels": [
+      "mean",
+      "ownership"
+    ],
+    "team_refs": [
+      "WAS"
+    ],
+    "uncertainty_flags": [
+      "none"
+    ],
+    "verbatim_extract": "Jordan Reed will start and see expanded routes for WAS."
+  }
+]
