@@ -113,6 +113,10 @@ safe step still runs — purge always runs, and extraction is skipped with a sta
 only when collection failed entirely. Every step writes an `ops_runs` row, so `status` can
 show history, and nothing is retried silently. It exits nonzero if any step failed.
 
+Each run submits at most `batch.max_items_per_run` fresh items (`--max-items` overrides it);
+the rest wait, and the next window reopens at the first deferred item so nothing is skipped.
+Raise the cap once a labeled evaluation has passed.
+
 Before submitting anything to Stage 1 the lane prices the batch and compares month-to-date
 spend plus that estimate against `monthly_llm_budget_usd`. Over budget, it refuses the
 whole batch, records the refusal as a failed step, and prints the numbers. There is no
@@ -174,7 +178,8 @@ bounds a smoke test):
 ```bash
 uv run na-extract --database data/db/narrative_alpha.sqlite3 \
   --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --dry-run
-ANTHROPIC_API_KEY=... uv run na-extract --database data/db/narrative_alpha.sqlite3 \
+export ANTHROPIC_API_KEY=...
+uv run na-extract --database data/db/narrative_alpha.sqlite3 \
   --window-start 2026-09-02T00:00:00Z --window-end 2026-09-03T00:00:00Z --max-items 20
 ```
 
@@ -183,9 +188,13 @@ batch is still processing after `--timeout-seconds` (default one hour; Message B
 up to 24 hours) — rerun the identical command and it resumes the accepted batch without
 re-billing; `2` an error. A missing `ANTHROPIC_API_KEY` is refused before the database is
 touched. `na-extract review` lists pending review flags (injection markers, prohibited output)
-and any in-flight attempt; `na-extract abandon --extraction-id ID --reason "..."` turns a
-stuck attempt into a retryable failure — the only sanctioned way out of an attempt whose
-provider outcome is unknown. An item that fails three times under one prompt version and
+any in-flight attempt, and every held lease with its owner run's status;
+`na-extract abandon --extraction-id ID --reason "..."` turns a stuck attempt into a
+retryable failure — the only sanctioned way out of an attempt whose provider outcome is
+unknown. A process killed while polling (power loss, a terminated terminal) leaves its run
+`running` and its lease held for up to the poll timeout; `na-extract release --run-id ID
+--reason "..."` marks that run failed and drops its leases so the next run resumes the
+accepted batch without re-billing. An item that fails three times under one prompt version and
 model is listed as ineligible instead of being billed again; an item past retention,
 tombstoned, or purged is listed and skipped, never aborting the rest of the window.
 
@@ -202,6 +211,24 @@ deletion, and source bytes are checked at submission and again when each result 
 `--run-at` is dry-run-only so a live policy or retention check cannot be backdated. A process
 killed mid-run leaves lease rows that block a second run for at most the poll timeout plus a
 few minutes; `na-extract review` and `na-ops status` show them.
+
+After a live run, create the local 50-item prompt/model gate and fill the blank `label_*`
+columns. The sample deliberately balances claim, zero-claim, and flagged outcomes when each
+stratum exists:
+
+```bash
+uv run na-extract sample --database data/db/narrative_alpha.sqlite3 \
+  --size 50 --output data/eval/stage1
+uv run na-extract eval --database data/db/narrative_alpha.sqlite3 \
+  --labels data/eval/stage1/<completed-review.csv>
+```
+
+The evaluator reports per-item claim presence, player-reference resolution, claim dimension,
+both direction labels, exact evidence spans, and injection precision/recall, then stores the
+metrics against the exact prompt/model and label-file hash in `model_evals`. A prompt or model
+change ships only when that evaluation is not worse. Review and label CSVs are local data and
+remain gitignored; `na-collect purge` and the scheduled batch purge remove rows for tombstoned
+items so the files obey the source text's retention policy.
 
 ## Salary CSV parsing
 
@@ -243,9 +270,14 @@ the pin table:
 
 ```bash
 uv run na-crosswalk nflverse-refresh --season 2026 --reviewed-at 2026-09-02
+uv run na-crosswalk --database data/db/narrative_alpha.sqlite3 seed \
+  --season 2026 --as-of 2026-09-02
 ```
 
-`PlayerCrosswalk.require_all_resolved()` is the fail-closed guard for lineup generation.
+`seed` requires an explicit `--as-of` cutoff, selects only a reviewed pin available by then,
+verifies or fetches its content-addressed archive bytes, and idempotently seeds canonical players
+and temporal roster membership. `PlayerCrosswalk.require_all_resolved()` is the fail-closed guard
+for lineup generation.
 
 ## Projection and ownership ingestion
 

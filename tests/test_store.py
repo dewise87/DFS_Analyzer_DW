@@ -72,6 +72,7 @@ EXTERNAL_TABLES = {
     "source_item_extractions",
     "source_item_review_flags",
     "content_tombstones",
+    "model_evals",
 }
 
 
@@ -109,9 +110,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert second == ()
-    assert len(records) == 8
+    assert len(records) == 9
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -133,6 +134,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[6][0] == 7
     assert records[6][1] == "0007_stage_1_extraction.sql"
     assert len(records[6][2]) == 64
+    assert records[8][0] == 9
+    assert records[8][1] == "0009_stage_1_evaluations.sql"
+    assert len(records[8][2]) == 64
 
 
 def test_source_versioning_migration_preserves_existing_narrative_rows(
@@ -224,7 +228,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6, 7, 8]
+    assert [migration.version for migration in applied] == [6, 7, 8, 9]
     assert counts == {
         "source_keys": 1,
         "sources": 1,
@@ -234,6 +238,52 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
     }
     assert tuple(retained_text) == (None, None, None)
     assert foreign_key_problems == []
+
+
+def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    prior_migrations = tmp_path / "prior_migrations"
+    prior_migrations.mkdir()
+    migrations_path = Path("src/narrative_alpha/store/migrations")
+    for version in range(1, 9):
+        source_path = next(migrations_path.glob(f"{version:04d}_*.sql"))
+        (prior_migrations / source_path.name).write_bytes(source_path.read_bytes())
+    timestamp = "2026-09-02T12:00:00.000000Z"
+
+    with connect_database(database_path) as connection:
+        apply_migrations(connection, prior_migrations)
+        for run_id in ("parent", "child"):
+            connection.execute(
+                """
+                INSERT INTO model_runs(
+                    run_id, run_type, started_at, completed_at, status, code_version,
+                    config_sha256, parent_run_id, error_message, created_at
+                ) VALUES (?, 'stage_1_extraction', ?, ?, 'succeeded', 'fixture',
+                          NULL, NULL, NULL, ?)
+                """,
+                (run_id, timestamp, timestamp, timestamp),
+            )
+        connection.execute(
+            """
+            INSERT INTO model_run_parents(child_run_id, parent_run_id, relationship)
+            VALUES ('child', 'parent', 'stage1_recovery')
+            """
+        )
+        connection.commit()
+
+        applied = apply_migrations(connection)
+        parent = connection.execute("SELECT * FROM model_run_parents").fetchone()
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "UPDATE model_run_parents SET observed_at = ?",
+                ("2026-09-02T12:00:01.000000Z",),
+            )
+
+    assert [migration.version for migration in applied] == [9]
+    assert parent["observed_at"] == timestamp
+    assert parent["ingested_at"] == timestamp
 
 
 @pytest.mark.parametrize(

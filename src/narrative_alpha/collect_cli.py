@@ -213,6 +213,8 @@ def _purge(arguments: argparse.Namespace) -> int:
                 "platform_deletions_tombstoned": deleted,
                 "retention_tombstones_written": report.tombstones_written,
                 "source_items_purged": report.source_items_purged,
+                "eval_files_updated": report.eval_files_updated,
+                "eval_rows_removed": report.eval_rows_removed,
             },
             indent=2,
             sort_keys=True,

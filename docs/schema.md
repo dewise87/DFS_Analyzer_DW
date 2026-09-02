@@ -18,7 +18,14 @@ Optional parent-run and configuration-hash fields preserve derived-run lineage a
 
 Preserves complete many-parent Stage 1 recovery lineage. Immutable `stage1_recovery` and
 `stage1_recovery_takeover` relationships supplement `model_runs.parent_run_id`, which remains only
-the convenience field for a run with one predecessor.
+the convenience field for a run with one predecessor. Canonical observation and ingestion
+timestamps record when each recovery edge was created.
+
+## `model_evals`
+
+Stores immutable Stage 1 label-set evaluations by exact prompt version, model ID, and label-file
+SHA-256. The metrics JSON, evaluation run, item/row counts, and complete §3.2 fields make every
+prompt/model release comparison reproducible without retaining a committed label file.
 
 ## `teams`
 

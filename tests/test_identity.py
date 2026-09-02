@@ -610,6 +610,29 @@ def test_crosswalk_resolve_cli_lists_and_accepts_a_decision(
     assert tuple(status) == ("resolved", player_id)
 
 
+def test_crosswalk_seed_cli_refuses_without_as_of(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "store.sqlite3"
+
+    with pytest.raises(SystemExit) as stopped:
+        crosswalk_main(
+            [
+                "--database",
+                str(database),
+                "seed",
+                "--season",
+                "2026",
+                "--archive",
+                str(tmp_path / "archive"),
+            ]
+        )
+
+    assert stopped.value.code == 2
+    assert "--as-of" in capsys.readouterr().err
+    assert not database.exists()
+
+
 def test_pinned_roster_fetch_retries_hash_checks_and_caches(tmp_path: Path) -> None:
     content = (
         b"season,team,position,status,full_name,birth_date,gsis_id,week\n"

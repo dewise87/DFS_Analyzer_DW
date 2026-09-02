@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from narrative_alpha.identity.crosswalk import CrosswalkError, PlayerCrosswalk
-from narrative_alpha.identity.nflverse import NflverseRosterError, refresh_roster_release
+from narrative_alpha.identity.nflverse import (
+    NflverseRosterError,
+    fetch_pinned_roster,
+    pinned_roster_release,
+    refresh_roster_release,
+    seed_nflverse_roster,
+)
 from narrative_alpha.store import apply_migrations, connect_database
 
 DEFAULT_DATABASE_PATH = Path("data/db/narrative_alpha.sqlite3")
@@ -40,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
             "moved: report the current hash and paste entry without a player diff"
         ),
     )
+    seed = commands.add_parser(
+        "seed",
+        help="seed canonical players from the newest reviewed nflverse pin available as of a date",
+    )
+    seed.add_argument("--season", type=int, required=True)
+    seed.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        required=True,
+        help="historical cutoff used to select the reviewed roster pin (YYYY-MM-DD)",
+    )
+    seed.add_argument("--archive", type=Path, default=DEFAULT_NFLVERSE_ARCHIVE)
     return parser
 
 
@@ -47,13 +66,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "nflverse-refresh":
-            report = refresh_roster_release(
+            refresh_report = refresh_roster_release(
                 args.season,
                 args.archive,
                 reviewed_at=args.reviewed_at,
                 allow_missing_prior=args.allow_missing_prior,
             )
-            print(report.render(), end="")
+            print(refresh_report.render(), end="")
+            return 0
+        if args.command == "seed":
+            release = pinned_roster_release(args.season, args.as_of)
+            roster_path = fetch_pinned_roster(release, args.archive)
+            with connect_database(args.database) as connection:
+                apply_migrations(connection)
+                seed_report = seed_nflverse_roster(
+                    connection,
+                    roster_path,
+                    release,
+                    observed_at=datetime.now(UTC),
+                )
+            print(json.dumps(seed_report.model_dump(mode="json"), indent=2, sort_keys=True))
             return 0
         with connect_database(args.database) as connection:
             apply_migrations(connection)

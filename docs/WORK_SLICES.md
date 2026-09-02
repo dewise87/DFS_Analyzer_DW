@@ -1091,6 +1091,44 @@ signal.
 > CLI refuses without `--as-of`. No live API calls in tests. Run
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Implementation checkpoint (2026-09-02):** the reviewed 2026 nflverse asset was archived and
+pinned at SHA-256 `44087b928376ef297c702ffed2c6b930185b4556105011baf70673b9a3073a2d`;
+`na-crosswalk seed --season 2026 --as-of 2026-09-02` seeded 2,800 players from 2,800 rows with
+zero rejects. The production recovery unit was backed up and integrity-checked first. A full
+no-write Stage 1 plan found all 3,852 items eligible, with zero injection, policy, TTL, text,
+or text exclusions; estimated input was 2,036,512 tokens / $1.018256 and
+the 4,096-token-per-item output ceiling was 15,777,792 tokens / $39.44448 ($40.462736 total).
+No false-positive detector fixtures were needed; explicit acceptance tests now cover Amon-Ra
+St. Brown, Ja'Marr Chase, T.J. Hockenson, Kenneth Walker III, WSH/JAC, and common nicknames.
+
+Migration 0009 adds immutable, point-in-time `model_evals`, timestamps recovery-parent edges,
+corrects submission fences to join through source-item identity rather than the extraction
+provenance label, and indexes the Stage 1 window/retry/name hot paths. `na-extract sample` writes
+retained canonical text and complete stored claim/reference/evidence fields to a local stratified
+review CSV with blank labels; tombstone purge removes matching CSV rows. `na-extract eval` checks
+the label file against stored terminal results, hashes it, reports all §7.5 metrics, and records the
+evaluation run. The synthetic suite is 479 tests.
+
+**Live checkpoint (run under review, 2026-09-02):** the implementer could not run live
+because the key was not in its process, so the review ran the lane. First pass, 21 items,
+$0.046: zero claims stored — 16 of 21 items failed evidence validation. The raw batch output
+showed the model's extracts were verbatim (33 of 36 spans in the source) but its character
+offsets were wrong (1 of 36 correct), plus three straight-versus-typographic quote mismatches.
+Validation now locates each extract in the canonical text and stores computed offsets (see
+`DECISIONS.md`). Retry of the 17 failed items, $0.041: 15 succeeded, 26 claims stored
+(availability/active_status 8, life_event 7, narrative 5, health 2, performance 2, role 1,
+team_context 1), 2 evidence failures (one paraphrase, one partial quote), 1 schema violation,
+1 item flagged `prohibited_output` for a placeholder name. Actual output averaged 312 tokens
+per item against the 4,096 ceiling, so real cost is roughly 8% of the guard's estimate. All
+32 player references came back unresolved because the roster was seeded after the items were
+observed; identity now resolves as of settlement (see `DECISIONS.md`), and those 32 stay in the
+queue for `na-crosswalk resolve`. Also fixed under review: `--max-items` on the lane lost the
+deferred items (the watermark jumped past them); `batch.max_items_per_run` in `config/ops.toml`
+caps unattended runs; the indexed name lookup dropped accented canonical names; and a killed
+process locked its batch for an hour (`na-extract release`). The 50-item labeled sample and the
+prompt-v1 eval numbers remain open: run `na-extract sample --size 50 --output data/eval/stage1`
+after the next scheduled batch, label it, and run `na-extract eval`. Suite 479 -> 485.
+
 ### Slice 20 — Narrative episodes (Stage 2, deterministic)
 
 **Goal:** stop treating each headline as an independent event. Cluster stored claims into

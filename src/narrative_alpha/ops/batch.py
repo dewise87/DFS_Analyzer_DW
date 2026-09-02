@@ -312,6 +312,8 @@ def _purge(
             "as_of": utc_timestamp(report.as_of),
             "tombstones_written": report.tombstones_written,
             "source_items_purged": len(report.source_items_purged),
+            "eval_files_updated": report.eval_files_updated,
+            "eval_rows_removed": report.eval_rows_removed,
         },
         None,
     )
@@ -363,8 +365,14 @@ def _extract(
         planned_at=now,
         max_items=max_items,
     )
+    # Where the next run's window opens. With ``max_items`` the plan is truncated in
+    # observed_at order, so it must reopen at the first deferred item, not at ``now``.
+    deferred_from = getattr(plan, "deferred_from", None)
+    next_window_start = ensure_utc(deferred_from) if deferred_from is not None else now
     summary: dict[str, object] = {
         **window,
+        "next_window_start": utc_timestamp(next_window_start),
+        "deferred_items": int(getattr(plan, "deferred_items", 0)),
         "ready_items": len(plan.ready),
         "resumable_items": len(plan.resumable),
         "ineligible_items": len(plan.ineligible),
@@ -479,7 +487,7 @@ def extraction_window_start(connection: sqlite3.Connection, *, now: datetime) ->
 
     recorded = last_run(connection, step="extract", status="succeeded")
     if recorded is not None:
-        stored = recorded.summary.get("window_end")
+        stored = recorded.summary.get("next_window_start") or recorded.summary.get("window_end")
         if isinstance(stored, str):
             return ensure_utc(datetime.fromisoformat(stored.replace("Z", "+00:00")))
     earliest = connection.execute(

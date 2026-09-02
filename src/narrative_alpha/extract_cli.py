@@ -33,10 +33,12 @@ from narrative_alpha.narrative.extraction import (
     BatchPricing,
     ExtractionError,
     abandon_extraction,
+    list_execution_leases,
     list_inflight_extractions,
     list_pending_review_flags,
     load_batch_pricing,
     plan_extraction,
+    release_dead_run,
     run_extraction_batch,
 )
 from narrative_alpha.narrative.extraction_models import (
@@ -48,6 +50,12 @@ from narrative_alpha.narrative.extraction_models import (
     ProviderBatchSubmission,
     ProviderResult,
 )
+from narrative_alpha.narrative.stage1_eval import (
+    Stage1EvaluationError,
+    create_review_sample,
+    evaluate_labels,
+    format_eval_report,
+)
 from narrative_alpha.store import (
     MigrationError,
     StoreConfigurationError,
@@ -56,7 +64,7 @@ from narrative_alpha.store import (
 )
 
 ProviderFactory = Callable[[], ExtractionProvider]
-COMMANDS = ("run", "abandon", "review")
+COMMANDS = ("run", "abandon", "release", "review", "sample", "eval")
 EXIT_OK = 0
 EXIT_FAILED = 2
 EXIT_PENDING = 3
@@ -192,11 +200,35 @@ def build_parser() -> argparse.ArgumentParser:
     abandon.add_argument("--extraction-id", required=True)
     abandon.add_argument("--reason", required=True)
 
+    release = commands.add_parser(
+        "release",
+        help="mark a run whose process died as failed and drop its leases so the next "
+        "run can resume its accepted batch",
+    )
+    release.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    release.add_argument("--run-id", required=True)
+    release.add_argument("--reason", required=True)
+
     review = commands.add_parser(
         "review",
-        help="list pending review flags and in-flight attempts",
+        help="list pending review flags, in-flight attempts, and held leases",
     )
     review.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+
+    sample = commands.add_parser(
+        "sample",
+        help="write a local stratified review CSV from stored Stage 1 results",
+    )
+    sample.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    sample.add_argument("--size", type=_positive_int, default=50)
+    sample.add_argument("--output", type=Path, required=True, help="local output directory")
+
+    evaluate = commands.add_parser(
+        "eval",
+        help="score a completed review CSV and store its prompt/model evaluation",
+    )
+    evaluate.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    evaluate.add_argument("--labels", type=Path, required=True)
     return parser
 
 
@@ -212,8 +244,14 @@ def main(
     try:
         if arguments.command == "abandon":
             return _abandon(arguments)
+        if arguments.command == "release":
+            return _release(arguments)
         if arguments.command == "review":
             return _review(arguments)
+        if arguments.command == "sample":
+            return _sample(arguments)
+        if arguments.command == "eval":
+            return _eval(arguments)
         return _run(arguments, provider_factory=provider_factory)
     except (
         anthropic.AnthropicError,
@@ -221,6 +259,7 @@ def main(
         MigrationError,
         OSError,
         sqlite3.Error,
+        Stage1EvaluationError,
         StoreConfigurationError,
         ValueError,
     ) as error:
@@ -232,8 +271,15 @@ def _run(arguments: argparse.Namespace, *, provider_factory: ProviderFactory | N
     pricing = load_batch_pricing(arguments.pricing_config, model_id=DEFAULT_MODEL_ID)
     if arguments.dry_run:
         planned_at = arguments.run_at or datetime.now(UTC)
-        plan = _dry_run_plan(arguments, pricing=pricing, planned_at=planned_at)
-        payload = _plan_payload(plan, pricing=pricing, show_prompts=arguments.show_prompts)
+        plan, excluded_titles = _dry_run_plan(
+            arguments, pricing=pricing, planned_at=planned_at
+        )
+        payload = _plan_payload(
+            plan,
+            pricing=pricing,
+            show_prompts=arguments.show_prompts,
+            excluded_titles=excluded_titles,
+        )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return EXIT_OK
     if arguments.run_at is not None:
@@ -303,11 +349,28 @@ def _abandon(arguments: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _release(arguments: argparse.Namespace) -> int:
+    with connect_database(arguments.database) as connection:
+        apply_migrations(connection)
+        dropped = release_dead_run(
+            connection, run_id=arguments.run_id, reason=arguments.reason
+        )
+    print(
+        json.dumps(
+            {"run_id": arguments.run_id, "status": "failed", "leases_dropped": dropped},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return EXIT_OK
+
+
 def _review(arguments: argparse.Namespace) -> int:
     with connect_database(arguments.database) as connection:
         apply_migrations(connection)
         flags = list_pending_review_flags(connection)
         inflight = list_inflight_extractions(connection)
+        leases = list_execution_leases(connection)
     print(
         json.dumps(
             {
@@ -315,8 +378,14 @@ def _review(arguments: argparse.Namespace) -> int:
                 "pending_review_flag_count": len(flags),
                 "inflight_attempts": list(inflight),
                 "inflight_attempt_count": len(inflight),
+                "held_leases": list(leases),
                 "how_to_clear_a_stuck_attempt": (
                     "na-extract abandon --extraction-id <id> --reason '<why>'"
+                ),
+                "how_to_release_a_dead_run": (
+                    "na-extract release --run-id <owner_run_id> --reason '<why>' when a "
+                    "held lease's owner_status is 'running' but no na-extract/na-ops "
+                    "process is alive"
                 ),
             },
             indent=2,
@@ -327,12 +396,45 @@ def _review(arguments: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _sample(arguments: argparse.Namespace) -> int:
+    with connect_database(arguments.database) as connection:
+        apply_migrations(connection)
+        report = create_review_sample(
+            connection,
+            size=arguments.size,
+            output_dir=arguments.output,
+        )
+    print(
+        json.dumps(
+            {
+                "model_id": report.model_id,
+                "output_path": str(report.output_path),
+                "prompt_version_id": report.prompt_version_id,
+                "rows_written": report.rows_written,
+                "sampled_items": report.sampled_items,
+                "strata_counts": dict(report.strata_counts),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return EXIT_OK
+
+
+def _eval(arguments: argparse.Namespace) -> int:
+    with connect_database(arguments.database) as connection:
+        apply_migrations(connection)
+        report = evaluate_labels(connection, arguments.labels)
+    print(format_eval_report(report), end="")
+    return EXIT_OK
+
+
 def _dry_run_plan(
     arguments: argparse.Namespace,
     *,
     pricing: BatchPricing,
     planned_at: datetime,
-) -> ExtractionPlan:
+) -> tuple[ExtractionPlan, dict[int, str | None]]:
     with tempfile.TemporaryDirectory(prefix="na-extract-plan-") as directory:
         disposable_path = Path(directory) / "planning.sqlite3"
         with connect_database(disposable_path) as connection:
@@ -341,7 +443,7 @@ def _dry_run_plan(
                 with sqlite3.connect(source_uri, uri=True) as source_connection:
                     source_connection.backup(connection)
             apply_migrations(connection)
-            return plan_extraction(
+            plan = plan_extraction(
                 connection,
                 window_start=arguments.window_start,
                 window_end=arguments.window_end,
@@ -349,6 +451,18 @@ def _dry_run_plan(
                 planned_at=planned_at,
                 max_items=arguments.max_items,
             )
+            excluded_ids = {
+                *(error.source_item_id for error in plan.ineligible),
+                *(item.source_item_id for item in plan.injection_blocked),
+            }
+            titles = {
+                int(row["source_item_id"]): (
+                    None if row["title"] is None else str(row["title"])
+                )
+                for row in connection.execute("SELECT source_item_id, title FROM source_items")
+                if int(row["source_item_id"]) in excluded_ids
+            }
+            return plan, titles
 
 
 def _usd(nanos: int) -> str:
@@ -360,7 +474,9 @@ def _plan_payload(
     *,
     pricing: BatchPricing,
     show_prompts: bool,
+    excluded_titles: dict[int, str | None] | None = None,
 ) -> dict[str, object]:
+    titles = excluded_titles or {}
     items = [
         _plan_item_payload(item, status="ready_for_batch", show_prompts=show_prompts)
         for item in plan.ready
@@ -371,7 +487,12 @@ def _plan_payload(
         _plan_item_payload(item, status="submission_outcome_unknown", show_prompts=show_prompts)
         for item in plan.submission_unknown
     ] + [
-        _plan_item_payload(item, status="blocked_prompt_injection", show_prompts=show_prompts)
+        _plan_item_payload(
+            item,
+            status="blocked_prompt_injection",
+            show_prompts=show_prompts,
+            title=titles.get(item.source_item_id),
+        )
         for item in plan.injection_blocked
     ]
     system_prompt = next(
@@ -400,7 +521,13 @@ def _plan_payload(
         "estimated_max_output_cost_usd": _usd(plan.estimated_cost_nanos_usd - input_cost),
         "estimated_input_tokens": plan.estimated_input_tokens,
         "estimated_max_output_tokens": plan.estimated_max_output_tokens,
-        "ineligible": [_item_error_payload(error) for error in plan.ineligible],
+        "ineligible": [
+            {
+                **_item_error_payload(error),
+                "title": titles.get(error.source_item_id),
+            }
+            for error in plan.ineligible
+        ],
         "items": items,
         "model_id": plan.model_id,
         "prompt_sha256": plan.prompt_sha256,
@@ -419,6 +546,7 @@ def _plan_item_payload(
     *,
     status: str,
     show_prompts: bool,
+    title: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "estimated_input_tokens": item.estimated_input_tokens,
@@ -426,6 +554,8 @@ def _plan_item_payload(
         "source_item_id": item.source_item_id,
         "status": status,
     }
+    if status == "blocked_prompt_injection":
+        payload["title"] = title
     if show_prompts:
         payload["user_prompt"] = item.user_prompt
     return payload

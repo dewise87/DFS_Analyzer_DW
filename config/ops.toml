@@ -22,6 +22,11 @@ keychain_service = "narrative-alpha-anthropic"
 # Design-doc §5.3 batch lane: Wed–Fri.
 weekdays = ["wed", "thu", "fri"]
 local_time = "09:30"
+# Fresh items one run may submit to Stage 1; the rest wait for the next run (the window
+# reopens at the first deferred item, so nothing is skipped). Bounds the budget-guard
+# estimate and the blast radius of a bad prompt. 200 is the Slice 19 bounded first run;
+# raise it once a labeled evaluation has passed.
+max_items_per_run = 200
 
 [paths]
 database = "data/db/narrative_alpha.sqlite3"

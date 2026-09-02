@@ -69,6 +69,8 @@ def _write_config(tmp_path: Path, **overrides: object) -> Path:
         "log_directory": str(tmp_path / "logs"),
     }
     settings |= overrides
+    max_items = settings.get("max_items_per_run")
+    max_items_line = "" if max_items is None else f"max_items_per_run = {max_items}"
     path = tmp_path / "ops.toml"
     path.write_text(
         f"""
@@ -80,6 +82,7 @@ keychain_service = "{settings["keychain_service"]}"
 [batch]
 weekdays = {settings["batch_weekdays"]}
 local_time = "{settings["batch_local_time"]}"
+{max_items_line}
 
 [paths]
 database = "{settings["database"]}"
@@ -1054,3 +1057,105 @@ def test_reminder_notification_is_one_shell_word_even_with_quotes(tmp_path: Path
         'display notification "It\'s 9 a.m.; capture \\"now\\"" '
         'with title "Narrative Alpha" subtitle "Don\'t \\"miss\\" this"'
     )
+
+
+def test_max_items_defers_without_losing_items_and_defaults_from_config(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    first_at = CAPTURE_TIME
+    second_at = CAPTURE_TIME + timedelta(minutes=1)
+    windows: list[tuple[datetime, datetime]] = []
+
+    def plan(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        windows.append((kwargs["window_start"], kwargs["window_end"]))
+        if kwargs.get("max_items") == 1 and len(windows) == 1:
+            return SimpleNamespace(
+                ready=(SimpleNamespace(source_item_id=1),),
+                resumable=(),
+                submission_unknown=(),
+                injection_blocked=(),
+                ineligible=(),
+                estimated_cost_nanos_usd=0,
+                deferred_items=1,
+                deferred_from=second_at,
+            )
+        return _empty_plan(connection)
+
+    def run_extraction(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            run_id="stage1-fixture",
+            selected_items=1,
+            submitted_items=1,
+            succeeded_items=1,
+            claims_stored=0,
+            flagged_item_ids=(),
+            errors=(),
+            ineligible=(),
+            ok=True,
+            pending=False,
+        )
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        _seed_source_item(connection, observed_at=first_at, external_item_id="first")
+        _seed_source_item(
+            connection,
+            body="Jordan Reed practiced in full for WAS.",
+            observed_at=second_at,
+            external_item_id="second",
+        )
+        connection.commit()
+        first = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            max_items=1,
+            dependencies=_dependencies(
+                plan_extraction=plan,
+                run_extraction=run_extraction,
+                provider_factory=lambda: SimpleNamespace(),
+            ),
+        )
+        # The next window reopens at the first deferred item, not at the end of the run.
+        assert extraction_window_start(connection, now=NOW) == second_at
+        run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(plan_extraction=plan),
+        )
+
+    step = first.step("extract")
+    assert step is not None and step.status == "succeeded"
+    assert step.summary["deferred_items"] == 1
+    assert step.summary["next_window_start"] == _timestamp(second_at)
+    assert windows == [(first_at, NOW), (second_at, NOW)]
+
+
+def test_batch_max_items_per_run_comes_from_config(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, max_items_per_run=7)
+    seen: list[object] = []
+
+    def plan(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("max_items"))
+        return _empty_plan(connection)
+
+    # Seed through the same config file; `_config` would rewrite it without the override.
+    with connect_database(load_ops_config(config_path).database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        _seed_source_item(connection)
+        connection.commit()
+
+    default_code = ops_main(
+        ["--config", str(config_path), "batch"],
+        dependencies=_dependencies(plan_extraction=plan),
+    )
+    assert default_code == 0
+    assert ops_main(
+        ["--config", str(config_path), "batch", "--max-items", "3"],
+        dependencies=_dependencies(plan_extraction=plan),
+    ) == 0
+    assert seen == [7, 3]

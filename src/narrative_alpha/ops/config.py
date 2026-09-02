@@ -39,6 +39,9 @@ class _BatchConfig(BaseModel):
 
     weekdays: tuple[Annotated[str, Field(min_length=3, max_length=3)], ...] = Field(min_length=1)
     local_time: str
+    # Fresh items one scheduled run may submit to Stage 1; the rest wait for the next run.
+    # Bounds both the budget-guard estimate and the blast radius of a bad prompt.
+    max_items_per_run: int | None = Field(default=None, gt=0)
 
     @field_validator("weekdays")
     @classmethod
@@ -101,6 +104,7 @@ class OpsConfig:
     keychain_service: str
     batch_weekdays: tuple[str, ...]
     batch_local_time: time
+    batch_max_items_per_run: int | None
     database: Path
     snapshot_root: Path
     nflverse_archive: Path
@@ -140,6 +144,7 @@ def load_ops_config(path: Path = DEFAULT_OPS_CONFIG_PATH) -> OpsConfig:
         keychain_service=parsed.keychain_service,
         batch_weekdays=parsed.batch.weekdays,
         batch_local_time=time.fromisoformat(parsed.batch.local_time),
+        batch_max_items_per_run=parsed.batch.max_items_per_run,
         database=parsed.paths.database,
         snapshot_root=parsed.paths.snapshot_root,
         nflverse_archive=parsed.paths.nflverse_archive,

@@ -2,6 +2,47 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slice 19 review outcomes
+
+- **Evidence offsets are located by the store, not trusted from the model.** The first live
+  run (21 items, $0.046) stored zero claims: 16 of 21 items failed evidence validation. The
+  raw outputs showed the model's verbatim extracts were right — 33 of 36 spans were in the
+  source, 30 with wrong character offsets and 3 differing only in typographic quotes — and
+  only 1 span had correct offsets. Counting characters is not something a language model does
+  reliably, and the §5.5 contract never depended on it: the verbatim extract is the evidence.
+  Validation now locates each extract in the canonical text (one-to-one quote/dash folding so
+  lengths hold, nearest occurrence to the model's offset when repeated), stores the located
+  offsets and the source's own bytes, and still rejects any extract that is not in the source.
+  Player and team references are checked under the same folding. The prompt is unchanged, so
+  prompt v1 lineage stands; the repair is a deterministic function of raw output plus source
+  text, so replay is unaffected.
+- **Player identity is resolved as of settlement, not as of the headline.** The retry
+  stored 26 claims and resolved none of their 32 player references — Dak Prescott and George
+  Kittle included — because the roster was seeded on September 2 and the items were observed
+  September 1, and the crosswalk only sees roster rows observed before the identity's
+  instant. A canonical player id is a key, not a predictor, so Stage 1 now resolves names
+  against the roster known when the claim settles; the item's `observed_at` still governs
+  evidence and every point-in-time column on the claim. Replay is unaffected: claims are
+  stored, never re-resolved. The 32 references already queued stay in the unresolved queue.
+- **A killed process must not lock its batch.** The review's own smoke run was terminated by
+  a tool timeout while polling; its run stayed `running` and held the batch-recovery lease
+  for an hour, blocking the resume. `na-extract release --run-id` marks such a run failed and
+  drops its leases, and `na-extract review` lists held leases with their owner's status.
+- **Scheduled runs are capped per run, and a cap never loses items.** `batch.max_items_per_run`
+  in `config/ops.toml` (200 for the bounded first runs) bounds what one unattended run may
+  submit, which also bounds the budget-guard estimate: the guard prices the full output
+  ceiling, so an uncapped 4,700-item backlog was one week of collection away from being
+  refused forever. With a cap, the plan is truncated in `observed_at` order and the next
+  window reopens at the first deferred item (`next_window_start` in the step summary); the
+  delivered lane advanced the watermark to "now" and would have skipped every deferred item.
+- **The indexed name lookup falls back to the full scan when it finds nothing.** The SQL
+  prefilter mirrors `normalize_name` except that SQL cannot strip diacritics, so an accented
+  canonical name would have stopped resolving. A proper normalized-name column is the right
+  fix later; until then an empty prefilter re-runs the unindexed query.
+- **The live checkpoint was run under review, not by the implementer**, because the key was
+  not in the executing process. Twenty items through the real lane, results below in the
+  Slice 19 status note.
+
 ## 2026-09-02 — Slice 18 review outcomes
 
 - **The lane does not extract against an empty roster.** With zero `players` rows every

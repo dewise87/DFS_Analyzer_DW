@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import ClassVar, Protocol
 
 import httpx
@@ -98,6 +99,8 @@ class PurgeReport:
     as_of: datetime
     tombstones_written: int
     source_items_purged: tuple[int, ...]
+    eval_files_updated: int = 0
+    eval_rows_removed: int = 0
 
 
 @dataclass(frozen=True)
@@ -394,6 +397,7 @@ def purge_expired_content(
     *,
     as_of: datetime | None = None,
     source_ids: Sequence[str] | None = None,
+    eval_root: Path = Path("data/eval/stage1"),
 ) -> PurgeReport:
     """Remove expired reconstructive text and leave one durable tombstone per item."""
 
@@ -442,7 +446,21 @@ def purge_expired_content(
             ):
                 purged.append(item_id)
 
-    return PurgeReport(purge_time, len(purged), tuple(purged))
+    # Human labels contain the same reconstructive source text and are governed by the
+    # same tombstones. Import locally to keep the collection boundary independent of the
+    # evaluation module at import time.
+    from narrative_alpha.narrative.stage1_eval import purge_tombstoned_eval_rows
+
+    eval_files_updated, eval_rows_removed = purge_tombstoned_eval_rows(
+        connection, eval_root=eval_root
+    )
+    return PurgeReport(
+        purge_time,
+        len(purged),
+        tuple(purged),
+        eval_files_updated,
+        eval_rows_removed,
+    )
 
 
 def _item_retention_expired(

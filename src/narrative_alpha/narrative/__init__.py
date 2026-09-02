@@ -42,10 +42,12 @@ from narrative_alpha.narrative.extraction import (
     default_prompt_version,
     detect_prompt_injection,
     ensure_prompt_version,
+    list_execution_leases,
     list_inflight_extractions,
     list_pending_review_flags,
     load_batch_pricing,
     plan_extraction,
+    release_dead_run,
     run_extraction_batch,
 )
 from narrative_alpha.narrative.extraction_models import (
@@ -141,6 +143,7 @@ __all__ = [
     "enabled_source_ids",
     "ensure_prompt_version",
     "feed_check_payload",
+    "list_execution_leases",
     "list_inflight_extractions",
     "list_pending_review_flags",
     "load_batch_pricing",
@@ -149,6 +152,7 @@ __all__ = [
     "plan_extraction",
     "plan_source_seed",
     "purge_expired_content",
+    "release_dead_run",
     "require_current_policy",
     "run_extraction_batch",
     "seed_plan_payload",

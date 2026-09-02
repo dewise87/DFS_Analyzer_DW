@@ -240,6 +240,9 @@ class ExtractionPlan:
     skipped_terminal_items: int
     ineligible: tuple[ExtractionItemError, ...] = ()
     deferred_items: int = 0
+    # ``observed_at`` of the first item ``max_items`` pushed out of this plan: the next
+    # window must start there (inclusive), or the deferred items are never selected again.
+    deferred_from: datetime | None = None
 
 
 @dataclass(frozen=True)

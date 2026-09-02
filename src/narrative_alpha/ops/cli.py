@@ -69,7 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument(
         "--max-items",
         type=_positive_int,
-        help="submit at most this many fresh items to Stage 1; the rest wait",
+        help=(
+            "submit at most this many fresh items to Stage 1; the rest wait for the next "
+            "run (default: batch.max_items_per_run in the operator config)"
+        ),
     )
     batch.add_argument("--json", action="store_true", help="print the report as JSON")
 
@@ -144,7 +147,7 @@ def _batch(
             connection,
             config=config,
             window_start=arguments.window_start,
-            max_items=arguments.max_items,
+            max_items=arguments.max_items or config.batch_max_items_per_run,
             dependencies=dependencies,
         )
     if arguments.json:

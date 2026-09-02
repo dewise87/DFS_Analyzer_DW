@@ -134,6 +134,14 @@ PINNED_ROSTER_RELEASES: Mapping[int, tuple[PinnedRosterRelease, ...]] = MappingP
                 ),
                 reviewed_at=date(2026, 9, 1),
             ),
+            PinnedRosterRelease(
+                season=2026,
+                url=ROLLING_ROSTER_URL.format(season=2026),
+                sha256=(
+                    "44087b928376ef297c702ffed2c6b930185b4556105011baf70673b9a3073a2d"
+                ),
+                reviewed_at=date(2026, 9, 2),
+            ),
         )
     }
 )

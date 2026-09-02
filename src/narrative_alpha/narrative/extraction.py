@@ -569,17 +569,17 @@ def plan_extraction(
         raise ExtractionInputError("max_output_tokens must be positive")
     policy_at = ensure_utc(planned_at or datetime.now(UTC))
     prompt = default_prompt_version()
-    # Historical stores can contain equivalent aware ISO timestamps with `Z`, explicit
-    # offsets, or different fractional widths. SQLite text/julianday comparisons either invert
-    # an exact edge or lose microseconds for some of those forms, so the typed UTC parser owns
-    # the exact inclusive-start/exclusive-end decision.
-    rows = sorted(
-        (
-            item
-            for row in connection.execute("SELECT * FROM source_items")
-            if start <= (item := SourceItemRow.from_db(row)).observed_at < end
-        ),
-        key=lambda item: (item.observed_at, item.source_item_id),
+    # Migration 0007 validates every legacy timestamp and enforces fixed-width UTC-Z on new
+    # rows. That invariant makes lexical bounds exact and lets SQLite use the Stage 1 window
+    # index instead of materializing the entire source-item table in Python.
+    rows = tuple(
+        SourceItemRow.from_db(row)
+        for row in connection.execute(
+            "SELECT * FROM source_items "
+            "WHERE observed_at >= ? AND observed_at < ? "
+            "ORDER BY observed_at, source_item_id",
+            (utc_timestamp(start), utc_timestamp(end)),
+        )
     )
 
     ready: list[PreparedExtraction] = []
@@ -812,8 +812,10 @@ def plan_extraction(
             blocked.append(prepared)
 
     deferred = 0
+    deferred_from: datetime | None = None
     if max_items is not None and len(ready) > max_items:
         deferred = len(ready) - max_items
+        deferred_from = ready[max_items].observed_at
         ready = ready[:max_items]
 
     input_tokens = sum(item.estimated_input_tokens for item in ready)
@@ -839,6 +841,7 @@ def plan_extraction(
         skipped_terminal_items=skipped_terminal,
         ineligible=tuple(ineligible),
         deferred_items=deferred,
+        deferred_from=deferred_from,
     )
 
 
@@ -1932,6 +1935,59 @@ def abandon_extraction(
     return SourceItemExtractionRow.from_db(updated)
 
 
+def release_dead_run(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    reason: str,
+    released_at: datetime | None = None,
+) -> int:
+    """Mark a run whose process died as failed and drop the leases it still holds.
+
+    A process killed mid-poll (SIGTERM, power loss) never marks its run failed, and an
+    unexpired lease owned by a ``running`` run blocks every later run from resuming the
+    accepted batch until the lease expires — over an hour at the default poll timeout.
+    This is the operator's way to say the process is gone. Nothing accepted is discarded:
+    the next run resumes the batch without re-billing. Returns the number of leases dropped.
+    """
+
+    if not reason.strip():
+        raise ExtractionInputError("a release reason is required")
+    row = connection.execute(
+        "SELECT status FROM model_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if row is None:
+        raise ExtractionInputError(f"run {run_id!r} does not exist")
+    if row["status"] != "running":
+        raise ExtractionInputError(f"run {run_id!r} is {row['status']}, not running")
+    _fail_active_run_best_effort(
+        connection,
+        run_id=run_id,
+        failed_at=ensure_utc(released_at or datetime.now(UTC)),
+        reason=f"released by operator: {reason.strip()}"[:2000],
+    )
+    cursor = connection.execute(
+        "DELETE FROM stage1_execution_leases WHERE owner_run_id = ?", (run_id,)
+    )
+    connection.commit()
+    return int(cursor.rowcount)
+
+
+def list_execution_leases(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
+    """Leases with their owner run's status: a ``running`` owner with a dead process blocks."""
+
+    rows = connection.execute(
+        """
+        SELECT lease.lease_key, lease.operation_kind, lease.owner_run_id, lease.acquired_at,
+               lease.expires_at, run.status AS owner_status
+        FROM stage1_execution_leases AS lease
+        LEFT JOIN model_runs AS run ON run.run_id = lease.owner_run_id
+        ORDER BY lease.acquired_at, lease.lease_key
+        """
+    ).fetchall()
+    return tuple(dict(row) for row in rows)
+
+
 def list_inflight_extractions(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
     """Attempts still ``creating``/``submitted``: what a rerun will resume or refuse."""
 
@@ -2194,10 +2250,13 @@ def _record_run_parent(
     connection.execute(
         """
         INSERT OR IGNORE INTO model_run_parents(
-            child_run_id, parent_run_id, relationship
-        ) VALUES (?, ?, ?)
+            child_run_id, parent_run_id, relationship, observed_at, ingested_at
+        )
+        SELECT ?, ?, ?, child.started_at, child.created_at
+        FROM model_runs AS child
+        WHERE child.run_id = ?
         """,
-        (child_run_id, parent_run_id, relationship),
+        (child_run_id, parent_run_id, relationship, child_run_id),
     )
 
 
@@ -3409,8 +3468,12 @@ def _validate_provider_envelope(
         ) from error
     if envelope.prompt_injection_detected:
         return envelope
+    # Model-counted character offsets are unreliable (the first live run got 1 of 36 right
+    # while 33 extracts were verbatim in the source). The verbatim text is the evidence; the
+    # offsets are located here, deterministically, and stored as computed.
+    repaired_claims = tuple(_repair_evidence_offsets(item, claim) for claim in envelope.claims)
     canonical_claims = tuple(
-        sorted((_canonical_claim(claim) for claim in envelope.claims), key=_json)
+        sorted((_canonical_claim(claim) for claim in repaired_claims), key=_json)
     )
     claim_payloads = tuple(_json(claim) for claim in canonical_claims)
     if len(claim_payloads) != len(set(claim_payloads)):
@@ -3418,6 +3481,77 @@ def _validate_provider_envelope(
     for claim in canonical_claims:
         _validate_claim_source(item, claim)
     return envelope.model_copy(update={"claims": canonical_claims})
+
+
+# One-to-one character folds so a located span keeps its length: the model tends to write
+# straight quotes and hyphens where feeds carry typographic ones.
+_VERBATIM_FOLD = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u00a0": " ",
+    }
+)
+
+
+def _fold_verbatim(value: str) -> str:
+    return value.translate(_VERBATIM_FOLD)
+
+
+def _locate_extract(source_text: str, extract: str, *, hint_start: int) -> tuple[int, int] | None:
+    """Find ``extract`` verbatim (quotes/dashes folded) in ``source_text``.
+
+    Returns the occurrence nearest the model's own offset so a repeated phrase resolves the
+    same way every time; ``None`` when the text is not in the source at all.
+    """
+
+    folded_text = _fold_verbatim(source_text)
+    folded_extract = _fold_verbatim(extract)
+    if not folded_extract:
+        return None
+    positions: list[int] = []
+    position = folded_text.find(folded_extract)
+    while position != -1:
+        positions.append(position)
+        position = folded_text.find(folded_extract, position + 1)
+    if not positions:
+        return None
+    best = min(positions, key=lambda candidate: (abs(candidate - hint_start), candidate))
+    return best, best + len(extract)
+
+
+def _repair_evidence_offsets(item: PreparedExtraction, claim: ExtractedClaim) -> ExtractedClaim:
+    """Replace model-counted offsets with located ones and the extract with the source's bytes.
+
+    A span whose text is not in the source is left untouched so validation rejects it.
+    """
+
+    repaired = []
+    for ref in claim.evidence_refs:
+        located = _locate_extract(
+            item.source_text, ref.verbatim_extract, hint_start=ref.extract_start
+        )
+        if located is None:
+            repaired.append(ref)
+            continue
+        start, end = located
+        repaired.append(
+            ref.model_copy(
+                update={
+                    "extract_start": start,
+                    "extract_end": end,
+                    "verbatim_extract": item.source_text[start:end],
+                }
+            )
+        )
+    return claim.model_copy(update={"evidence_refs": tuple(repaired)})
 
 
 def _canonical_claim(claim: ExtractedClaim) -> ExtractedClaim:
@@ -3444,15 +3578,16 @@ def _canonical_claim(claim: ExtractedClaim) -> ExtractedClaim:
 
 
 def _validate_claim_source(item: PreparedExtraction, claim: ExtractedClaim) -> None:
+    folded_source = _fold_verbatim(item.source_text)
     if (
         claim.disconfirming_context is not None
-        and claim.disconfirming_context not in item.source_text
+        and _fold_verbatim(claim.disconfirming_context) not in folded_source
     ):
         raise EvidenceValidationError(
             "disconfirming context is not verbatim in the canonical source item"
         )
     for player in claim.player_refs:
-        if player.name_raw not in item.source_text:
+        if _fold_verbatim(player.name_raw) not in folded_source:
             raise EvidenceValidationError(
                 f"player name {player.name_raw!r} is not verbatim in source item "
                 f"{item.source_item_id}"
@@ -3462,7 +3597,7 @@ def _validate_claim_source(item: PreparedExtraction, claim: ExtractedClaim) -> N
             raise EvidenceValidationError(
                 f"team reference {team!r} is outside the reviewed NFL team lexicon"
             )
-        if team not in item.source_text:
+        if _fold_verbatim(team) not in folded_source:
             raise EvidenceValidationError(
                 f"team reference {team!r} is not verbatim in source item {item.source_item_id}"
             )
@@ -3610,11 +3745,16 @@ def _store_success(
         _insert_store_row(connection, "claims", claim_row)
 
         for ordinal, player in enumerate(claim.player_refs):
+            # Identity is resolved against the roster known when the claim is settled, not
+            # when the headline was observed. A roster seeded after collection would
+            # otherwise never resolve a single name in the backlog, and a canonical player
+            # id is a key, not a predictor. The item's own observed_at still governs the
+            # evidence and every point-in-time column on the claim.
             team = _deterministic_team_for_name(
                 connection,
                 player.name_raw,
                 source=item.source_id,
-                observed_at=item.observed_at,
+                observed_at=recorded_at,
             )
             match = crosswalk.match(
                 PlayerIdentityInput(
@@ -3624,7 +3764,7 @@ def _store_success(
                     name_raw=player.name_raw,
                     team=team or "UNK",
                     position=None,
-                    observed_at=item.observed_at,
+                    observed_at=recorded_at,
                     ingested_at=recorded_at,
                     source_file_sha256=item.content_sha256,
                     run_id=run_id,
@@ -3689,10 +3829,78 @@ def _deterministic_team_for_name(
     """Find an exact canonical/alias team only; ambiguity queues through ``UNK``."""
 
     cutoff = utc_timestamp(observed_at)
-    rows = connection.execute(
+    normalized = normalize_name(name_raw)
+    # The indexed SQL prefilter mirrors ``normalize_name`` except for diacritics, which SQL
+    # cannot strip. An empty prefilter therefore falls back to scanning every player so an
+    # accented canonical name still resolves exactly as it did before the index existed.
+    rows = _team_candidate_rows(
+        connection,
+        name_raw=name_raw,
+        normalized=normalized,
+        source=source,
+        cutoff=cutoff,
+        prefilter=True,
+    )
+    if not rows:
+        rows = _team_candidate_rows(
+            connection,
+            name_raw=name_raw,
+            normalized=normalized,
+            source=source,
+            cutoff=cutoff,
+            prefilter=False,
+        )
+    teams = {
+        str(row["team"])
+        for row in rows
+        if normalize_name(str(row["canonical_name"])) == normalized
+        or (row["alias"] is not None and normalize_name(str(row["alias"])) == normalized)
+    }
+    return next(iter(teams)) if len(teams) == 1 else None
+
+
+def _team_candidate_rows(
+    connection: sqlite3.Connection,
+    *,
+    name_raw: str,
+    normalized: str,
+    source: str,
+    cutoff: str,
+    prefilter: bool,
+) -> list[sqlite3.Row]:
+    candidate_sql = (
         """
+        WITH candidate_players(player_id) AS (
+            SELECT player_id
+            FROM players
+            WHERE canonical_name = ? COLLATE NOCASE
+               OR lower(
+                    replace(
+                        replace(
+                            replace(replace(canonical_name, '.', ''), char(39), ''),
+                            char(8217), ''
+                        ),
+                        '-', ' '
+                    )
+                  ) = ?
+            UNION
+            SELECT player_id
+            FROM player_aliases
+            WHERE source = ? AND normalized_alias = ?
+        )
+        """
+        if prefilter
+        else "WITH candidate_players(player_id) AS (SELECT player_id FROM players)"
+    )
+    candidate_parameters: tuple[object, ...] = (
+        (name_raw, normalized, source.casefold(), normalized) if prefilter else ()
+    )
+    rows = connection.execute(
+        candidate_sql
+        + """
         SELECT p.canonical_name, h.team, a.alias
-        FROM players AS p
+        FROM candidate_players AS candidate
+        JOIN players AS p ON p.player_id = candidate.player_id
         JOIN player_team_history AS h ON h.player_id = p.player_id
         LEFT JOIN player_aliases AS a
           ON a.player_id = p.player_id AND a.source = ?
@@ -3711,16 +3919,16 @@ def _deterministic_team_for_name(
           AND rtrim(h.valid_from, 'Z') <= rtrim(?, 'Z')
           AND (h.valid_to IS NULL OR rtrim(h.valid_to, 'Z') > rtrim(?, 'Z'))
         """,
-        (source.casefold(), cutoff, cutoff, cutoff, *(cutoff for _ in range(6))),
+        (
+            *candidate_parameters,
+            source.casefold(),
+            cutoff,
+            cutoff,
+            cutoff,
+            *(cutoff for _ in range(6)),
+        ),
     ).fetchall()
-    normalized = normalize_name(name_raw)
-    teams = {
-        str(row["team"])
-        for row in rows
-        if normalize_name(str(row["canonical_name"])) == normalized
-        or (row["alias"] is not None and normalize_name(str(row["alias"])) == normalized)
-    }
-    return next(iter(teams)) if len(teams) == 1 else None
+    return list(rows)
 
 
 def _store_flagged(
