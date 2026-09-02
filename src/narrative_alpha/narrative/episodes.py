@@ -269,12 +269,14 @@ def build_episodes(
     )
     existing_count = int(
         connection.execute(
-            "SELECT count(*) FROM narrative_episodes WHERE method_version = ? AND as_of = ?",
-            (method, utc_timestamp(cutoff)),
+            "SELECT count(*) FROM narrative_episodes "
+            "WHERE method_version = ? AND prompt_version_id = ? AND as_of = ?",
+            (method, prompt_version, utc_timestamp(cutoff)),
         ).fetchone()[0]
     )
     if existing_count:
-        if _stored_signature(connection, method, cutoff) != _candidate_signature(candidates):
+        stored = _stored_signature(connection, method, cutoff, prompt_version_id=prompt_version)
+        if stored != _candidate_signature(candidates):
             raise EpisodeSnapshotConflictError(
                 f"stored episode snapshot {method!r} at {utc_timestamp(cutoff)} "
                 "differs from the deterministic rebuild"
@@ -1128,15 +1130,17 @@ def _stored_signature(
     connection: sqlite3.Connection,
     method_version: str,
     as_of: datetime,
+    *,
+    prompt_version_id: str = DEFAULT_PROMPT_VERSION_ID,
 ) -> str:
     cutoff = utc_timestamp(as_of)
     episode_rows = connection.execute(
         """
         SELECT * FROM narrative_episodes
-        WHERE method_version = ? AND as_of = ?
+        WHERE method_version = ? AND prompt_version_id = ? AND as_of = ?
         ORDER BY episode_id
         """,
-        (method_version, cutoff),
+        (method_version, prompt_version_id, cutoff),
     ).fetchall()
     payload: list[dict[str, object]] = []
     for episode in episode_rows:
