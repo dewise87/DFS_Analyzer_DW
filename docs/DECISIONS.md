@@ -23,7 +23,8 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   and away come from the export's own `AWAY@HOME` field (`ParsedSalaryRow.is_home`), never from
   the alphabetical key order; a FanDuel classic export carries no kickoff, so it writes no game
   at all and names the affected matchups instead of inventing one.
-- **A team defense is one canonical player per franchise, keyed `dst:<code>`.** No roster
+- **A team defense is one canonical player per franchise, keyed `dst:<code>`** (shared
+  `identity/defense.py`, used by the salary and the projection/ownership loaders). No roster
   carries a defense and every site names it differently ("Green Bay Defense", "New York
   Defense"), so the crosswalk queued every DST row on every slate — 32 by-hand resolutions a
   week and a blocked lineup build. Review fix: a DST/D row resolves deterministically to the

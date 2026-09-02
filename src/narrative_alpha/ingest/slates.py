@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from pydantic import BaseModel, ConfigDict, Field
 
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput
+from narrative_alpha.identity.defense import is_defense_position, resolve_team_defense
 from narrative_alpha.identity.normalization import normalize_team_code, team_code_variants
 from narrative_alpha.ingest.salaries import (
     ParsedSalaryRow,
@@ -49,8 +50,6 @@ _SITE_ALIASES: dict[str, SalarySite] = {
     "fanduel": SalarySite.FANDUEL,
 }
 _ROSTER_SLOT_ONLY = frozenset({"FLEX", "CPT", "MVP"})
-_DEFENSE_POSITIONS = frozenset({"DST", "D", "DEF"})
-DEFENSE_PLAYER_SOURCE = "slate-ingest-defense"
 
 
 class SlateIngestError(RuntimeError):
@@ -457,13 +456,12 @@ def _load_slate_group(
         if game_id is None:
             matchups_without_kickoff.add(_matchup_label(parsed_row))
 
-        if parsed_row.listed_position.upper() in _DEFENSE_POSITIONS:
-            # A team defense is not a person and never appears on the nflverse roster:
-            # every site names it differently ("Packers", "Green Bay Packers"), so it
-            # resolves deterministically to one canonical defense row per franchise.
-            player_id: int | None = _resolve_team_defense(
+        if is_defense_position(parsed_row.listed_position):
+            # A team defense is not a person and never appears on the nflverse roster;
+            # it resolves deterministically to one canonical defense row per franchise.
+            player_id: int | None = resolve_team_defense(
                 connection,
-                normalize_team_code(parsed_row.team),
+                parsed_row.team,
                 observed_at=observed_at,
                 ingested_at=ingested_at,
                 run_id=run_id,
@@ -703,52 +701,6 @@ def _resolve_team(
     if cursor.lastrowid is None:  # pragma: no cover - SQLite always supplies a rowid
         raise SlateIngestError(f"could not insert team {canonical}")
     return int(cursor.lastrowid), True
-
-
-def _resolve_team_defense(
-    connection: sqlite3.Connection,
-    team_code: str,
-    *,
-    observed_at: datetime,
-    ingested_at: datetime,
-    run_id: str | None,
-) -> int:
-    """Return the canonical defense ``player_id`` for a franchise, inserting it once.
-
-    The key is ``dst:<code>``; the name is the code plus ``DST`` so it reads the same on
-    every site. Like a team, a defense is an identity: the earliest row is reused.
-    """
-
-    key = f"dst:{team_code}"
-    row = connection.execute(
-        "SELECT player_id FROM players WHERE player_key = ? ORDER BY valid_from, player_id LIMIT 1",
-        (key,),
-    ).fetchone()
-    if row is not None:
-        return int(row["player_id"])
-    observed_text = utc_timestamp(observed_at)
-    cursor = connection.execute(
-        """
-        INSERT INTO players(
-            player_key, canonical_name, position, birth_date, source, published_at,
-            observed_at, ingested_at, effective_at, valid_from, valid_to, source_version,
-            run_id
-        ) VALUES (?, ?, 'DST', NULL, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?)
-        """,
-        (
-            key,
-            f"{team_code} DST",
-            DEFENSE_PLAYER_SOURCE,
-            observed_text,
-            utc_timestamp(ingested_at),
-            observed_text,
-            SLATE_INGEST_VERSION,
-            run_id,
-        ),
-    )
-    if cursor.lastrowid is None:  # pragma: no cover - SQLite always supplies a rowid
-        raise SlateIngestError(f"could not insert defense player {key}")
-    return int(cursor.lastrowid)
 
 
 def _matchup_key(parsed_row: ParsedSalaryRow) -> tuple[str, str]:

@@ -1455,15 +1455,19 @@ launchd reminders now name `na-ops slate` as the command after the captures.
 
 Open items: (1) no vendor `SourceFormat` adapter exists (Slice 9), so today every real
 projection/ownership capture is a recorded failure and the build then refuses for want of a
-projection — the lane cannot yet produce a lineup from real vendor files. (2) The projection
-loader has no team-defence path: `slates.py` resolves DSTs to a canonical `dst:<code>`
-player, but `load_projection_capture` sends a vendor's DST rows through the ordinary
-crosswalk, which has no candidate pool for them. Unless the seeded roster carries a defence
-row per franchise, all 32 defences queue every week and the build stops — decide this
-against the first real vendor file, with Slice 9. (3) The lane opens no `model_runs` row, so
+projection — the lane cannot yet produce a lineup from real vendor files. (2) [closed under
+review, see below] the projection loader had no team-defence path. (3) The lane opens no `model_runs` row, so
 the rows it ingests carry a NULL `run_id`, as `na-slate ingest` does today; a run is traced
 through `ops_runs` and each row's `source_file_sha256`. Two pre-existing `ruff` findings
 (under the newer pinned ruff) were fixed so `ruff check .` is green. Suite 527 → 541.
+
+**Reviewed 2026-09-02** (solo review; ran the lane against a copy of the production store with
+the golden DK capture: every step isolated, every refusal named its remedy, the SLATE LANE
+status section rendered). One fix: open item (2) above is closed — the projection loader now
+routes vendor DST rows to the same canonical `dst:<code>` defense as the salary loader, through
+a shared `identity/defense.py`, so a vendor file cannot queue 32 defenses a week. Open items
+(1) and (3) stand: no vendor adapter exists until Slice 9, and lane rows carry a NULL
+`run_id`. Suite 541 → 542.
 
 ### Slice 24 — Local dashboard (read-mostly, one page)
 

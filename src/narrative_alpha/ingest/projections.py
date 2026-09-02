@@ -11,6 +11,7 @@ from typing import Literal, Protocol, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput
+from narrative_alpha.identity.defense import is_defense_position, resolve_team_defense
 from narrative_alpha.ingest.timestamps import ensure_utc, optional_utc_timestamp, utc_timestamp
 from narrative_alpha.snapshots import MANIFEST_FILENAME, CaptureKind, load_manifest, sha256_file
 
@@ -245,20 +246,19 @@ def load_projection_capture(
                 rows_seen += parsed_projections.rows_seen
                 rejected_rows += len(parsed_projections.rejected)
                 for projection in parsed_projections.rows:
-                    result = identity_crosswalk.match(
-                        _identity_input(
-                            projection,
-                            file_record.source,
-                            site,
-                            file_record.sha256,
-                            file_record.observed_at,
-                            ingestion_time,
-                            run_id,
-                        )
+                    player_id = _resolve_player(
+                        connection,
+                        identity_crosswalk,
+                        projection,
+                        source=file_record.source,
+                        site=site,
+                        file_sha256=file_record.sha256,
+                        observed_at=file_record.observed_at,
+                        ingested_at=ingestion_time,
+                        run_id=run_id,
+                        unresolved_ids=unresolved_ids,
                     )
-                    if result.player_id is None:
-                        if result.unresolved_id is not None:
-                            unresolved_ids.append(result.unresolved_id)
+                    if player_id is None:
                         continue
                     outcome = _insert_projection(
                         connection,
@@ -266,7 +266,7 @@ def load_projection_capture(
                         source=file_record.source,
                         site=site,
                         slate_id=slate_id,
-                        player_id=result.player_id,
+                        player_id=player_id,
                         file_sha256=file_record.sha256,
                         observed_at=file_record.observed_at,
                         ingested_at=ingestion_time,
@@ -282,20 +282,19 @@ def load_projection_capture(
                 rows_seen += parsed_ownership.rows_seen
                 rejected_rows += len(parsed_ownership.rejected)
                 for ownership in parsed_ownership.rows:
-                    result = identity_crosswalk.match(
-                        _identity_input(
-                            ownership,
-                            file_record.source,
-                            site,
-                            file_record.sha256,
-                            file_record.observed_at,
-                            ingestion_time,
-                            run_id,
-                        )
+                    player_id = _resolve_player(
+                        connection,
+                        identity_crosswalk,
+                        ownership,
+                        source=file_record.source,
+                        site=site,
+                        file_sha256=file_record.sha256,
+                        observed_at=file_record.observed_at,
+                        ingested_at=ingestion_time,
+                        run_id=run_id,
+                        unresolved_ids=unresolved_ids,
                     )
-                    if result.player_id is None:
-                        if result.unresolved_id is not None:
-                            unresolved_ids.append(result.unresolved_id)
+                    if player_id is None:
                         continue
                     outcome = _insert_ownership(
                         connection,
@@ -303,7 +302,7 @@ def load_projection_capture(
                         source=file_record.source,
                         site=site,
                         slate_id=slate_id,
-                        player_id=result.player_id,
+                        player_id=player_id,
                         file_sha256=file_record.sha256,
                         observed_at=file_record.observed_at,
                         ingested_at=ingestion_time,
@@ -328,6 +327,39 @@ def load_projection_capture(
         unresolved_ids=tuple(unresolved_ids),
         errors=tuple(errors),
     )
+
+
+def _resolve_player(
+    connection: sqlite3.Connection,
+    crosswalk: PlayerCrosswalk,
+    parsed: SourcePlayerFields,
+    *,
+    source: str,
+    site: str,
+    file_sha256: str,
+    observed_at: datetime,
+    ingested_at: datetime,
+    run_id: str | None,
+    unresolved_ids: list[int],
+) -> int | None:
+    """A vendor row's canonical player: the franchise defense row for DST, else crosswalk."""
+
+    if is_defense_position(parsed.position):
+        return resolve_team_defense(
+            connection,
+            parsed.team,
+            observed_at=observed_at,
+            ingested_at=ingested_at,
+            run_id=run_id,
+        )
+    result = crosswalk.match(
+        _identity_input(parsed, source, site, file_sha256, observed_at, ingested_at, run_id)
+    )
+    if result.player_id is None:
+        if result.unresolved_id is not None:
+            unresolved_ids.append(result.unresolved_id)
+        return None
+    return result.player_id
 
 
 def _identity_input(

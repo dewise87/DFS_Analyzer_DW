@@ -431,3 +431,44 @@ def test_same_key_different_content_is_a_load_error_not_a_duplicate(tmp_path: Pa
     assert "projection_snapshots key conflict" in conflicting.errors[0]
     assert "different content" in conflicting.errors[0]
     assert [row["projection_mean"] for row in stored] == [14.5]
+
+
+def test_vendor_defense_rows_resolve_to_the_franchise_defense_not_the_queue(
+    tmp_path: Path,
+) -> None:
+    # Vendors carry one D/ST row per team; the person crosswalk can never match it, and
+    # queueing 32 defenses a week would block every lineup build.
+    database = tmp_path / "store.sqlite3"
+    staged = tmp_path / "projections.csv"
+    staged.write_text(
+        "name,player_id,team,position,mean,floor,ceiling,ownership\n"
+        "Green Bay Packers,dst-gb,GB,DST,8.0,2.0,15.0,0.05\n"
+        "Known Player,known-1,GB,WR,12.0,5.0,25.0,0.12\n",
+        encoding="utf-8",
+    )
+    capture = capture_files(
+        tmp_path / "snapshots",
+        2026,
+        1,
+        CaptureKind.PROJECTIONS,
+        "fixture-vendor",
+        [staged],
+        observed_at=OBSERVED,
+    )
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        _seed_store(connection)
+        report = load_projection_capture(
+            connection, capture, site="draftkings", slate_id=1, registry=_registry()
+        )
+        defense = connection.execute(
+            "SELECT player_id, canonical_name, position FROM players WHERE player_key = 'dst:GB'"
+        ).fetchone()
+        projected = connection.execute(
+            "SELECT count(*) FROM projection_snapshots WHERE player_id = ?", (defense["player_id"],)
+        ).fetchone()[0]
+
+    assert report.unresolved_rows == 0
+    assert report.projection_rows_inserted == 2
+    assert tuple(defense)[1:] == ("GB DST", "DST")
+    assert projected == 1
