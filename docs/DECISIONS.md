@@ -2,6 +2,115 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-02 — Slices 20 and 21 review outcomes
+
+- **Text similarity creates a Stage 2 link; direction only labels it.** The delivered
+  clustering required both claims to carry agreeing (or opposing) non-unknown directions
+  before any link existed, so a byte-identical copy of an `unknown`/`neutral` claim was
+  `independent` and counted as a second event. Half of the first live corpus has such
+  directions, and on production data no derivative, corroborating, or contradicting relation
+  ever fired. Now: an opposing link above threshold is `contradicting` (it outranks a near-copy,
+  because "will start" versus "will not start" is the point), a near-copy is `derivative` from
+  any source — a same-source repost is not a second event — and everything else linked is
+  `corroborating`. Stop words and team references are dropped before Jaccard; the fixture
+  thresholds are unchanged and remain labelled-set work under a future method version.
+- **Episode time is the story's time.** Ordering, the rolling gap, `opened_at`,
+  `last_item_at`, velocity, and recency use `min(published_at, observed_at)` when the feed
+  carries a publication time; availability is still gated on `observed_at`/`ingested_at`.
+  Production items carry five distinct `observed_at` values across 4,879 rows (one per
+  collection run), so fetch time made every episode instantaneous and chose origins by claim
+  id. An episode also closes 168 hours after it opened, and the build loads only the last 14
+  days, because a daily collector never leaves a 72-hour gap.
+- **Stage 2 pins the Stage 1 prompt version** (`narrative_episodes.prompt_version_id`, part of
+  the episode id). A re-extraction under prompt v2 is a new snapshot, never a rebuild conflict
+  with v1. `claim_player_refs` are read as of the cutoff like every other input; the
+  per-source family is the family of that source's latest item, so a mid-season
+  reclassification cannot make families outnumber sources; dropped team references are
+  reported by name so the nickname table can be extended.
+- **Novelty needs a material move and is decided once.** The gate zeroed a whole episode on a
+  0.1-point baseline tick and, re-decided at t−6h and t−12h, turned a gate flip into a large
+  spurious velocity. It now requires `novelty_min_baseline_move` (0.01, hashed into the feature
+  version) and the as-of decision is held across the velocity instants. An episode whose origin
+  was not yet extracted at an earlier instant did not exist then and contributes nothing,
+  instead of aborting the slate build.
+- **Stated, not changed:** independence is computed over all sources including derivatives
+  (a same-family copy lowers it) — the earlier text saying derivatives do not affect factors
+  was wrong; velocity re-evaluates the as-of clustering at earlier instants rather than
+  re-clustering; no-episode players carry 0 for consensus, entropy, and novelty share, so any
+  model must gate on `unique_episode_count`; a code change to the formula without a
+  `formula_version` bump is caught only by a replay conflict. `na-slate list` (Slice 22)
+  supplies the slate ids `na-features` requires.
+
+## 2026-09-02 — Deterministic Stage 3 heat and Appendix B boundary
+
+- **The §12.2.2 product is literal, and only soft judgments receive the 0.15 floor.** Direction is
+  the mean roster-behavior direction across unique non-derivative items. Per-claim quality is the
+  arithmetic mean of configured evidence-class, evidence-basis, and frozen source-family scores;
+  item scores are averaged so multiple claims from one item do not manufacture weight. Specificity
+  is the corresponding mean of `(specificity + actionability) / 2`. Quality, specificity, and the
+  unique-family/unique-source independence proxy are affine-mapped from `[0,1]` to `[0.15,1]`.
+  Direction and novelty keep real zeros. Reach includes every unique source, including a derivative;
+  derivatives do not refresh factors, event count, decay age, or independent-source entropy
+  (they do lower the independence proxy: see the review entry above).
+- **An episode's origin fixes its source class and half-life.** Official-team and national-media
+  origins are mainstream, fantasy aggregators are DFS, and team communities are team/fan. Age runs
+  from the most recent non-derivative item's observation to the evaluation instant. This avoids a
+  copied late headline changing both an episode's identity and decay regime. The mappings,
+  provisional quality priors, half-lives, floor, six-hour window, and method names are all in
+  `config/heat.toml`; its canonical values are hash-bound to an immutable `feature_version`.
+- **Novelty is a deliberately coarse placeholder, not a learned attribution claim.** It defaults to
+  `1.0`. When the latest eligible ownership snapshot and a snapshot from the same vendor at or
+  before the episode opening both exist, a nonzero baseline move aligned with the episode direction
+  sets novelty to `0.0`; an absent, unchanged, or opposing baseline leaves it at `1.0`. This binary
+  gate is the only inference supportable before labeled timing data exists. Revisit with prospective
+  ownership histories; do not add a fractional rule without calibration. Every baseline row used by
+  current heat, velocity, or acceleration is retained in feature provenance.
+- **Player features use one full point-in-time salary pool as their standardization cohort.** Each
+  raw heat channel—including mainstream, DFS, and team/fan channels—is population-z-scored across
+  all eligible players on that slate, preserving zero exposure as information, then winsorized at
+  ±4. `H_velocity_6h = H(t)-H(t-6h)` and acceleration is the difference between consecutive
+  six-hour velocities; both reconstruct the member timeline and decay/novelty state directly, never
+  prior feature rows. Consensus is `abs(H_signed)/H_absolute`; source-class entropy is normalized by
+  the three configured classes; overlap is `1 - unique families / unique sources`; novelty share is
+  actual absolute heat divided by its novelty-one counterfactual.
+- **Unavailable Appendix B dimensions stay NULL.** The row grain has no contest cohort and the
+  current feed schema captures no author, so `contest_archetype` and author count are unknown. Value
+  rank, position scarcity, alternative quality, and `model_version` also await explicit contracts.
+  Salary and available six-hour projection/baseline changes are populated from exact pre-cutoff
+  rows. Classic slates use the classic baseline role; showdown rows use flex, because the required
+  player-level key cannot represent separate flex and captain vectors. Revisit showdown grain before
+  a captain ownership model consumes these rows.
+
+## 2026-09-02 — Deterministic Stage 2 episode boundary
+
+- **Stage 2 uses token-set Jaccard before any synthesis model.** Claims are sessionized by
+  resolved player (or the one explicit canonical team for unresolved/team-only claims), claim dimension,
+  and a configurable 72-hour rolling gap. Within a session, Unicode-normalized case-folded token
+  sets are transparent, cheap to replay, and adequate for the first measured version: similarity
+  at least 0.35 creates a directional link, and similarity at least 0.80 from a different source
+  is derivative. Exact canonical-content hashes still identify copies after retention has purged
+  reconstructive text; other text-unavailable claims remain independent and are counted in the
+  build report. Stage 1 team references are normalized from accepted names/nicknames to one of the
+  32 codes; ambiguous city-only or generic nicknames stay unclustered. Revisit the thresholds or add
+  synthesis only against a labeled episode set, under a new `method_version`.
+- **A rolling gap defines the broad episode; relation labels define its event evidence.** The first
+  stable `(source item observed_at, claim_id)` member is the origin. Same-direction linked text is
+  corroborating, near-copy linked text is derivative, opposite-direction linked text is
+  contradicting, and an in-window claim without a directional text link is independent. The stored
+  `linked_claim_id` makes every propagation decision inspectable. A repeated method/as-of build is
+  accepted only when the complete stored graph equals a fresh deterministic rebuild.
+- **Reach and event count deliberately diverge.** Reach is the number of unique sources, so a copied
+  report can raise it. `n_events` counts unique items carrying origin, independent, or corroborating
+  relations and excludes derivatives and contradictions. Source entropy is Shannon entropy over
+  unique-item counts by source; velocity is unique items per six hours over the episode span, with
+  one six-hour minimum denominator. Recency is measured from `as_of` to the last non-derivative
+  item. All features use unique source items rather than claim-row multiplicity.
+- **The cutoff is availability-aware.** Both a source item and its stored claim must have
+  `observed_at`, `ingested_at`, and validity admitting `as_of`; a retroactive build records its real
+  build time separately and cannot masquerade as a prospective artifact. One resolved claim can
+  belong to multiple player episodes. Unresolved references use a single explicit team when one is
+  present, otherwise a claim-scoped unclustered episode, and are always surfaced in the report.
+
 ## 2026-09-02 — Slice 19 review outcomes
 
 - **Evidence offsets are located by the store, not trusted from the model.** The first live

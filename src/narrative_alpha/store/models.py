@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
@@ -1182,6 +1183,301 @@ class ClaimEvidenceRefRow(PointInTimeRow):
                 raise ValueError("retained evidence cannot be marked redacted")
         elif self.redacted_at is None:
             raise ValueError("redacted evidence requires redacted_at")
+        return self
+
+
+EpisodeSubjectTypeValue = Literal["player", "team", "unclustered"]
+EpisodeRelationValue = Literal[
+    "origin",
+    "independent",
+    "corroborating",
+    "derivative",
+    "contradicting",
+]
+_NFL_TEAM_CODES = frozenset(
+    {
+        "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE",
+        "DAL", "DEN", "DET", "GB", "HOU", "IND", "JAX", "KC",
+        "LAC", "LAR", "LV", "MIA", "MIN", "NE", "NO", "NYG",
+        "NYJ", "PHI", "PIT", "SEA", "SF", "TB", "TEN", "WAS",
+    }
+)
+
+
+class NarrativeEpisodeRow(PointInTimeRow):
+    """One immutable deterministic Stage 2 episode at an explicit information cutoff."""
+
+    episode_id: str
+    subject_type: EpisodeSubjectTypeValue
+    subject_player_id: int | None
+    subject_team_code: str | None
+    unclustered_key: str | None
+    claim_dimension: ClaimDimensionValue
+    opened_at: datetime
+    last_item_at: datetime
+    origin_claim_id: str
+    method_version: str
+    prompt_version_id: str = Field(min_length=1)
+    as_of: datetime
+    window_hours: float = Field(gt=0, allow_inf_nan=False)
+    unique_source_count: int = Field(gt=0)
+    unique_source_family_count: int = Field(gt=0)
+    source_entropy: float = Field(ge=0, allow_inf_nan=False)
+    reach_proxy: int = Field(gt=0)
+    velocity_per_6h: float = Field(ge=0, allow_inf_nan=False)
+    recency_hours: float = Field(ge=0, allow_inf_nan=False)
+    n_events: int = Field(gt=0)
+    item_count: int = Field(gt=0)
+
+    @field_validator("opened_at", "last_item_at", "as_of")
+    @classmethod
+    def normalize_episode_timestamps(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_episode(self) -> Self:
+        if not self.episode_id.strip() or not self.origin_claim_id.strip():
+            raise ValueError("episode and origin claim identifiers must not be blank")
+        if not self.method_version.strip():
+            raise ValueError("method_version must not be blank")
+        if not (self.opened_at <= self.last_item_at <= self.as_of):
+            raise ValueError("episode item times must be ordered and no later than as_of")
+        if self.unique_source_family_count > self.unique_source_count:
+            raise ValueError("source-family count cannot exceed source count")
+        if self.reach_proxy != self.unique_source_count:
+            raise ValueError("reach_proxy must equal unique_source_count")
+        if (
+            self.n_events > self.item_count
+            or self.unique_source_count > self.item_count
+        ):
+            raise ValueError("episode counts cannot exceed item_count")
+        subject_values = (
+            self.subject_player_id is not None,
+            self.subject_team_code is not None,
+            self.unclustered_key is not None,
+        )
+        expected = {
+            "player": (True, False, False),
+            "team": (False, True, False),
+            "unclustered": (False, False, True),
+        }[self.subject_type]
+        if subject_values != expected:
+            raise ValueError("episode subject type and subject fields do not agree")
+        if self.subject_team_code is not None and (
+            not self.subject_team_code.strip()
+            or self.subject_team_code != self.subject_team_code.strip().upper()
+            or self.subject_team_code not in _NFL_TEAM_CODES
+        ):
+            raise ValueError("team episode subjects must be canonical uppercase codes")
+        if self.unclustered_key is not None and not self.unclustered_key.strip():
+            raise ValueError("unclustered episode subjects require a key")
+        return self
+
+
+class EpisodeClaimRow(PointInTimeRow):
+    """One claim's deterministic relation and propagation edge inside an episode."""
+
+    episode_id: str
+    claim_id: str
+    source_item_id: int = Field(gt=0)
+    source_id: str
+    source_family: str
+    relation: EpisodeRelationValue
+    similarity_score: float = Field(ge=0, le=1, allow_inf_nan=False)
+    linked_claim_id: str | None
+    method: str
+    method_version: str
+    as_of: datetime
+
+    @field_validator("as_of")
+    @classmethod
+    def normalize_as_of(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_relation(self) -> Self:
+        for value in (
+            self.episode_id,
+            self.claim_id,
+            self.source_id,
+            self.source_family,
+            self.method,
+            self.method_version,
+        ):
+            if not value.strip():
+                raise ValueError("episode claim identifiers and methods must not be blank")
+        linked = self.relation in {"corroborating", "derivative", "contradicting"}
+        if linked != (self.linked_claim_id is not None):
+            raise ValueError("only linked episode relations require linked_claim_id")
+        if self.linked_claim_id == self.claim_id:
+            raise ValueError("an episode claim cannot link to itself")
+        return self
+
+
+class NarrativeFeatureVersionRow(StoreRow):
+    """Immutable semantic binding between a feature version and its heat config."""
+
+    feature_version: str
+    formula_version: str
+    config_sha256: Sha256
+    config_json: dict[str, Any]
+    registered_at: datetime
+    source: str
+
+    @field_validator("config_json", mode="before")
+    @classmethod
+    def decode_config_json(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("registered_at")
+    @classmethod
+    def normalize_registered_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_config_identity(self) -> Self:
+        for value in (self.feature_version, self.formula_version, self.source):
+            if not value.strip():
+                raise ValueError("feature-version identifiers must not be blank")
+        canonical = json.dumps(
+            _json_value(self.config_json), sort_keys=True, separators=(",", ":")
+        )
+        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != self.config_sha256:
+            raise ValueError("config_sha256 does not match config_json")
+        return self
+
+
+class NarrativeFeatureRow(PointInTimeRow):
+    """One immutable Appendix B player/slate feature vector at an explicit cutoff."""
+
+    feature_id: str
+    player_id: int = Field(gt=0)
+    slate_id: int = Field(gt=0)
+    contest_archetype: ContestArchetypeValue | None
+    site: Literal["draftkings", "fanduel"]
+    role: Literal["classic", "flex", "captain"]
+    as_of: datetime
+
+    baseline_ownership: float | None = Field(default=None, ge=0, le=1)
+    baseline_ownership_change_6h: float | None = Field(
+        default=None, allow_inf_nan=False
+    )
+    projection_change_6h: float | None = Field(default=None, allow_inf_nan=False)
+    salary: int = Field(ge=0)
+    value_rank: float | None = Field(default=None, allow_inf_nan=False)
+    position_scarcity: float | None = Field(default=None, allow_inf_nan=False)
+    alternative_quality_index: float | None = Field(default=None, allow_inf_nan=False)
+
+    h_signed: float = Field(allow_inf_nan=False)
+    h_absolute: float = Field(ge=0, allow_inf_nan=False)
+    h_mainstream: float = Field(allow_inf_nan=False)
+    h_dfs: float = Field(allow_inf_nan=False)
+    h_team_fan: float = Field(allow_inf_nan=False)
+    h_velocity_6h: float = Field(allow_inf_nan=False)
+    h_acceleration: float = Field(allow_inf_nan=False)
+    h_consensus: float = Field(ge=0, le=1, allow_inf_nan=False)
+    h_source_entropy: float = Field(ge=0, le=1, allow_inf_nan=False)
+    h_novelty_share: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+    h_signed_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_absolute_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_mainstream_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_dfs_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_team_fan_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_velocity_6h_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_acceleration_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_consensus_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_source_entropy_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    h_novelty_share_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+
+    unique_episode_count: int = Field(ge=0)
+    unique_source_count: int = Field(ge=0)
+    unique_author_count: int | None = Field(default=None, ge=0)
+    source_overlap_index: float = Field(ge=0, le=1, allow_inf_nan=False)
+    unique_episode_count_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    unique_source_count_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+    unique_author_count_z: float | None = Field(
+        default=None, ge=-4, le=4, allow_inf_nan=False
+    )
+    source_overlap_index_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
+
+    model_version: str | None
+    feature_version: str
+    formula_version: str
+    feature_config_sha256: Sha256
+    episode_method_version: str
+    episode_ids_json: tuple[str, ...]
+    ownership_baseline_ids_json: tuple[int, ...]
+    baseline_ownership_snapshot_id: int | None = Field(default=None, gt=0)
+    baseline_previous_snapshot_id: int | None = Field(default=None, gt=0)
+    projection_snapshot_id: int | None = Field(default=None, gt=0)
+    projection_previous_snapshot_id: int | None = Field(default=None, gt=0)
+    salary_id: int = Field(gt=0)
+    input_sha256: Sha256
+
+    @field_validator("as_of")
+    @classmethod
+    def normalize_feature_as_of(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("episode_ids_json", "ownership_baseline_ids_json", mode="before")
+    @classmethod
+    def decode_feature_provenance_lists(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @model_validator(mode="after")
+    def validate_feature_contract(self) -> Self:
+        for value in (
+            self.feature_id,
+            self.feature_version,
+            self.formula_version,
+            self.episode_method_version,
+        ):
+            if not value.strip():
+                raise ValueError("feature identifiers and versions must not be blank")
+        if self.episode_ids_json != tuple(sorted(set(self.episode_ids_json))):
+            raise ValueError("episode_ids_json must be sorted and unique")
+        if len(self.episode_ids_json) != self.unique_episode_count:
+            raise ValueError("episode count must match episode_ids_json")
+        if self.ownership_baseline_ids_json != tuple(
+            sorted(set(self.ownership_baseline_ids_json))
+        ):
+            raise ValueError("ownership baseline ids must be sorted and unique")
+        if (self.baseline_ownership is None) != (
+            self.baseline_ownership_snapshot_id is None
+        ):
+            raise ValueError("baseline ownership and its snapshot id must be present together")
+        if (self.baseline_ownership_change_6h is None) != (
+            self.baseline_previous_snapshot_id is None
+        ):
+            raise ValueError("baseline change requires a previous snapshot id")
+        if self.baseline_previous_snapshot_id is not None and (
+            self.baseline_ownership_snapshot_id is None
+        ):
+            raise ValueError("a previous baseline requires a current baseline")
+        projection_pair = (
+            self.projection_snapshot_id is not None,
+            self.projection_previous_snapshot_id is not None,
+        )
+        if projection_pair[0] != projection_pair[1] or (
+            (self.projection_change_6h is None) == projection_pair[0]
+        ):
+            raise ValueError("projection change and both snapshot ids must be present together")
+        if (self.unique_author_count is None) != (self.unique_author_count_z is None):
+            raise ValueError("author count and its standardized value must be jointly NULL")
+        if self.model_version is not None:
+            raise ValueError("features-only rows cannot claim an ownership model version")
+        if self.h_absolute + 1e-12 < abs(self.h_signed):
+            raise ValueError("absolute heat cannot be below absolute signed heat")
+        expected_consensus = (
+            abs(self.h_signed) / self.h_absolute if self.h_absolute > 0 else 0.0
+        )
+        if not math.isclose(self.h_consensus, expected_consensus, abs_tol=1e-12):
+            raise ValueError("consensus must equal abs(signed heat) / absolute heat")
+        if self.effective_at != self.as_of:
+            raise ValueError("feature effective_at must equal as_of")
+        if self.source_version != self.feature_version:
+            raise ValueError("feature source_version must equal feature_version")
         return self
 
 

@@ -73,6 +73,9 @@ EXTERNAL_TABLES = {
     "source_item_review_flags",
     "content_tombstones",
     "model_evals",
+    "narrative_episodes",
+    "episode_claims",
+    "narrative_features",
 }
 
 
@@ -110,9 +113,21 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
             "SELECT version, name, sha256 FROM applied_migrations"
         ).fetchall()
 
-    assert [migration.version for migration in first] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [migration.version for migration in first] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+    ]
     assert second == ()
-    assert len(records) == 9
+    assert len(records) == 11
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -137,6 +152,12 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[8][0] == 9
     assert records[8][1] == "0009_stage_1_evaluations.sql"
     assert len(records[8][2]) == 64
+    assert records[9][0] == 10
+    assert records[9][1] == "0010_narrative_episodes.sql"
+    assert len(records[9][2]) == 64
+    assert records[10][0] == 11
+    assert records[10][1] == "0011_narrative_features.sql"
+    assert len(records[10][2]) == 64
 
 
 def test_source_versioning_migration_preserves_existing_narrative_rows(
@@ -228,7 +249,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6, 7, 8, 9]
+    assert [migration.version for migration in applied] == [6, 7, 8, 9, 10, 11]
     assert counts == {
         "source_keys": 1,
         "sources": 1,
@@ -281,7 +302,7 @@ def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
                 ("2026-09-02T12:00:01.000000Z",),
             )
 
-    assert [migration.version for migration in applied] == [9]
+    assert [migration.version for migration in applied] == [9, 10, 11]
     assert parent["observed_at"] == timestamp
     assert parent["ingested_at"] == timestamp
 

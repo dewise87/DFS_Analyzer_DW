@@ -230,6 +230,38 @@ SQLite additionally binds the reference to the retained item/hash and forbids la
 tombstone clears the reconstructive extract and output JSON while retaining hashes, offsets, claim
 taxonomy, and provider/policy lineage.
 
+## `narrative_episodes`
+
+Stores one immutable deterministic Stage 2 cluster for an exact method version, Stage 1 prompt
+version, and information cutoff, scoped to a resolved player, explicit team, or reported
+unclustered claim. Item times are publication times when the feed carried one, else observation. Origin and item
+times, rolling-window parameter, unique-source reach/diversity, entropy, velocity, recency, and
+event count are stored with their actual build run and complete point-in-time provenance.
+
+## `episode_claims`
+
+Links every episode to its Stage 1 claims and source items as origin, independent, corroborating,
+derivative, or contradicting evidence. Similarity, method, optional prior-claim propagation edge,
+frozen source family, method/as-of identity, and point-in-time fields make each relation auditable;
+rows cannot be edited or deleted.
+
+## `narrative_feature_versions`
+
+Binds each immutable Stage 3 `feature_version` to the canonical parsed heat configuration, its
+SHA-256, and the formula implementation version. Reusing a version name after any semantic config
+change is refused before feature computation; rows cannot be edited or deleted.
+
+## `narrative_features`
+
+Stores one immutable Appendix B vector per `(player, slate, site, as_of, feature_version)`. Raw and
+population-z-scored narrative fields are retained together, with standardized values winsorized at
+±4. Baseline ownership, six-hour baseline/projection changes, and salary point to their exact input
+rows; missing pre-cutoff baselines remain `NULL`. Sorted episode and ownership-snapshot ID arrays,
+the Stage 2 method, canonical heat-config hash, semantic input hash, and Stage 3 run make every value
+replayable. The current source schema has no author identity, and a player-level build has no contest
+cohort, so author count, contest archetype, value/scarcity alternatives, and ownership-model version
+remain explicitly `NULL` rather than fabricated.
+
 ## `decision_snapshots`
 
 Freezes a slate decision cutoff with canonical JSON containing the complete §8.4 artifact hash-set.  

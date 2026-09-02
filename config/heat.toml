@@ -1,0 +1,56 @@
+# Deterministic Stage 3 narrative-heat configuration.
+#
+# Every semantic change in this file requires a new feature_version. The loader hashes the
+# canonical parsed values and records that hash beside every feature row, so a version name
+# cannot silently acquire new meaning.
+
+feature_version = "narrative-heat-v1"
+formula_version = "section-12.2.2-v1"
+episode_method_version = "deterministic-token-set-jaccard-v1"
+episode_window_hours = 72.0
+soft_factor_floor = 0.15
+winsor_limit = 4.0
+velocity_window_hours = 6.0
+novelty_method = "aligned-vendor-baseline-change-v1"
+# Novelty drops to 0 only when the vendor baseline has already moved at least this much (a
+# fraction; 0.01 = one ownership point) in the episode's direction since it opened.
+novelty_min_baseline_move = 0.01
+standardization_method = "population-zscore-within-slate-channel-v1"
+
+[half_life_hours]
+mainstream = 24.0
+dfs = 12.0
+team_fan = 18.0
+
+[evidence_class_quality]
+A = 1.0
+B = 0.75
+C = 0.4
+
+[evidence_basis_quality]
+official = 1.0
+direct_quote = 0.95
+beat_report = 0.85
+film_claim = 0.7
+play_by_play = 0.9
+statistics = 0.9
+community_observation = 0.5
+generic_sentiment = 0.25
+joke = 0.0
+unknown = 0.0
+
+[source_families.official_team]
+source_class = "mainstream"
+quality = 1.0
+
+[source_families.national_media]
+source_class = "mainstream"
+quality = 0.9
+
+[source_families.fantasy_aggregator]
+source_class = "dfs"
+quality = 0.8
+
+[source_families.team_community]
+source_class = "team_fan"
+quality = 0.55

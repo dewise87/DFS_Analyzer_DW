@@ -1,0 +1,74 @@
+[
+  {
+    "key": "origin",
+    "source_id": "fixture-official",
+    "source_family": "official_team",
+    "observed_hours": 0,
+    "title": "CAR role update",
+    "body": "Marcus Bell will start and see expanded routes for CAR.",
+    "player_name": "Marcus Bell",
+    "team_refs": ["CAR"],
+    "outcome_direction": "increase",
+    "roster_behavior_direction": "increase"
+  },
+  {
+    "key": "copy",
+    "source_id": "fixture-national",
+    "source_family": "national_media",
+    "observed_hours": 1,
+    "title": "CAR role update",
+    "body": "Marcus Bell will start and see expanded routes for CAR.",
+    "player_name": "Marcus Bell",
+    "team_refs": ["CAR"],
+    "outcome_direction": "increase",
+    "roster_behavior_direction": "increase"
+  },
+  {
+    "key": "contradiction",
+    "source_id": "fixture-community",
+    "source_family": "team_community",
+    "observed_hours": 2,
+    "title": "CAR role update",
+    "body": "Marcus Bell will not start or see expanded routes for CAR.",
+    "player_name": "Marcus Bell",
+    "team_refs": ["CAR"],
+    "outcome_direction": "decrease",
+    "roster_behavior_direction": "decrease"
+  },
+  {
+    "key": "outside-window",
+    "source_id": "fixture-late",
+    "source_family": "national_media",
+    "observed_hours": 100,
+    "title": "CAR role update",
+    "body": "Marcus Bell will start and see expanded routes for CAR.",
+    "player_name": "Marcus Bell",
+    "team_refs": ["CAR"],
+    "outcome_direction": "increase",
+    "roster_behavior_direction": "increase"
+  },
+  {
+    "key": "unresolved-team",
+    "source_id": "fixture-team-unresolved",
+    "source_family": "team_community",
+    "observed_hours": 3,
+    "title": "CAR prospect update",
+    "body": "Prospect Rookie may see expanded routes for the Panthers.",
+    "player_name": "Prospect Rookie",
+    "team_refs": ["Panthers"],
+    "outcome_direction": "increase",
+    "roster_behavior_direction": "increase"
+  },
+  {
+    "key": "unresolved-unclustered",
+    "source_id": "fixture-unclustered",
+    "source_family": "national_media",
+    "observed_hours": 4,
+    "title": "Prospect update",
+    "body": "Mystery Runner may see a larger role in Los Angeles.",
+    "player_name": "Mystery Runner",
+    "team_refs": ["Los Angeles"],
+    "outcome_direction": "increase",
+    "roster_behavior_direction": "unknown"
+  }
+]

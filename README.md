@@ -230,6 +230,48 @@ change ships only when that evaluation is not worse. Review and label CSVs are l
 remain gitignored; `na-collect purge` and the scheduled batch purge remove rows for tombstoned
 items so the files obey the source text's retention policy.
 
+## Narrative episodes
+
+Stage 2 deterministically clusters stored claims at an explicit information cutoff. The default
+72-hour rolling window can be changed per build; changing the algorithm or its fixed similarity
+thresholds requires a new method version. Repeating an identical method/as-of build reuses the
+stored graph, while different inputs or parameters at that identity fail loudly.
+
+```bash
+uv run na-episodes build --database data/db/narrative_alpha.sqlite3 \
+  --as-of 2026-09-02T16:00:00Z
+uv run na-episodes show --database data/db/narrative_alpha.sqlite3 --player 123
+uv run na-episodes show --database data/db/narrative_alpha.sqlite3 \
+  --episode episode-<sha256>
+```
+
+`show` includes each retained canonical source item, relation, similarity, and propagation edge for
+eye-level review. A copied report can raise unique-source reach but is derivative and does not raise
+`n_events`; unresolved player references are reported and become canonical team-scoped episodes
+only when their Stage 1 team reference is unambiguous.
+
+## Narrative heat features
+
+Stage 3 turns the exact Stage 2 snapshot into one immutable Appendix B row for every player in the
+point-in-time salary pool. Build episodes and features with the identical cutoff:
+
+```bash
+uv run na-episodes build --database data/db/narrative_alpha.sqlite3 \
+  --as-of 2026-09-02T16:00:00Z
+uv run na-features build --database data/db/narrative_alpha.sqlite3 \
+  --slate-id 123 --site dk --as-of 2026-09-02T16:00:00Z
+```
+
+Slate ids come from `na-slate list` (Slice 22); until it lands there is no slate in the store to
+build features for.
+
+The heat formula, source-class half-lives, quality mappings, 0.15 soft-factor floor, and immutable
+`feature_version` live in `config/heat.toml`. A semantic config change without a version bump is
+refused. Baseline ownership is selected only from snapshots available at the cutoff and remains
+`NULL` when absent; it is never filled with zero. Six-hour velocity and acceleration are rebuilt
+from the episode timeline, so no earlier feature build is required. This stage stores features and
+their exact episode/snapshot provenance only—it does not calculate an ownership adjustment.
+
 ## Salary CSV parsing
 
 DraftKings and FanDuel classic/showdown exports are detected from their headers and parsed

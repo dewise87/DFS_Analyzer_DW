@@ -1183,6 +1183,33 @@ defines the unit of analysis for every statistic that follows (§12.4.1).
 > unresolved-player claims are counted in the report. Run `~/.local/bin/uv run pytest -q`,
 > `ruff check .`, `mypy` — all green.
 
+**Implementation status (2026-09-02):** migration 0010 adds immutable, canonical-time episode and
+claim-relation graphs with explicit method/as-of identity and Stage 2 run lineage. The deterministic
+v1 method sessionizes by subject, dimension, and a configurable 72-hour rolling gap; token-set
+Jaccard plus separate direction agreement assigns corroborating, derivative, contradicting, and
+independent relations, with stable claim-ID tie breaks and an auditable prior-claim edge. Features
+use unique source items: copied reports raise unique-source reach and entropy but not `n_events`.
+Unresolved references normalize unambiguous team names and nicknames to canonical codes; ambiguous
+or teamless references receive claim-scoped unclustered episodes and stay visible in the build
+report. `na-episodes build` refuses an implicit cutoff, enforces both observation and ingestion
+availability, and validates an identical rebuild before reusing it; `show` renders retained source
+text and the complete propagation graph.
+
+The fixture suite covers every acceptance case without network or production data. A disposable,
+integrity-checked backup of the live database was migrated and clustered successfully: 27 eligible
+claims produced 21 episodes and 27 memberships (19 unresolved claims were team-scoped, seven were
+explicitly unclustered); a second identical build wrote nothing, and team names such as Rams/49ers
+were stored as LAR/SF rather than raw labels. The production database itself was not modified.
+Suite 485 → 492.
+
+**Reviewed 2026-09-02** (two parallel reviewers; see `DECISIONS.md` "Slices 20 and 21 review
+outcomes"). Blocker: links required agreeing non-unknown directions, so identical copies of
+`unknown`/`neutral` claims — half the live corpus — were independent events, and no propagation
+label ever fired on production data. Majors: timing ran off collector fetch time (all items in a
+run share one instant), sessions never closed with a daily collector, `claim_player_refs` were
+read without a cutoff, same-source reposts counted as events, and a source reclassification could
+abort the build. All fixed; the prompt version is now pinned on the snapshot.
+
 ### Slice 21 — Deterministic heat features (Stage 3) + Appendix B feature rows
 
 **Goal:** turn episodes into the Appendix B feature vector per player and slate at an as-of
@@ -1229,18 +1256,193 @@ rule 4 (self-reported model scores are metadata), Appendix B (feature contract),
 > ownership snapshot precedes as-of; `feature_version` mismatch is refused, not overwritten.
 > Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
 
+**Implementation status (2026-09-02):** migration 0011 adds immutable feature-version bindings and
+one Appendix B row per player/slate/site/as-of/version. `config/heat.toml` owns the source classes,
+half-lives, evidence/source quality weights, 0.15 affine floor, six-hour interval, standardization
+method, and `narrative-heat-v1` identity; canonical config drift under that identity is refused.
+Episode heat uses roster direction, configured quality, claim specificity/actionability, the
+baseline-aware novelty gate, unique-family independence, `log1p` unique-source reach, and
+source-class half-life decay. Derivative copies affect reach but not the item-weighted factors,
+event count, age, or independent-source entropy.
+
+`na-features build` requires an explicit slate, `dk|fd`, and timezone-aware cutoff plus a complete
+Stage 2 snapshot at the identical cutoff. It constructs signed/absolute and source-class heat,
+six-hour velocity and acceleration directly from the member timeline, consensus, normalized class
+entropy, novelty share, unique counts, and overlap; population z-scores across the full eligible
+salary pool are stored beside raw values and clipped at ±4. Latest eligible same-vendor ownership
+and projection pairs, the exact salary, sorted episode IDs, all ownership IDs used by temporal heat,
+config/method hashes, and run lineage are retained. Missing inputs are `NULL`, never zero, and fields
+without a defined source (author/cohort/scarcity/alternative/model) are not invented. Repeating an
+identical build writes nothing; changed inputs conflict. The fixture-only acceptance suite includes
+the literal golden product and zero gates, derivative reach, future-input exclusion, a real
+26-player winsorization case, baseline novelty, config-version drift, and the CLI. Suite 492 → 499.
+
+**Reviewed 2026-09-02.** Formula verified factor by factor against §12.2.2 with an independent
+hand computation (bit-identical). Major: the novelty gate zeroed heat on any 0.1-point baseline
+tick and, re-decided per instant, manufactured a large negative velocity; it now needs a
+configured material move and is decided once at the cutoff. Major: an episode whose origin was
+extracted later than a follow-up aborted the whole slate at t−6h; it now contributes nothing at
+that instant. Added tests for the snapshot-conflict guard and zero-variance channels. The
+open items (no-episode ratio features are 0, formula code is not hashed) are recorded. Suite
+499 → 505.
+
+### Slice 22 — Slate and salary ingestion (`na-slate`)
+
+**Goal:** close the last gap in the Minimum Lovable Pipeline. Today nothing outside the test
+suite writes a `slates` or `salaries` row, so `na-build`, `na-features`, and the slate memo
+have no real slate to work on. This slice turns a captured DraftKings or FanDuel salary CSV
+into point-in-time slate and salary rows through the crosswalk, and gives the operator a way
+to see slate ids. Week 1 locks 2026-09-13; this must land first.
+
+**Design doc:** §4.1 (salaries and slates), §4.2 (crosswalk), §3.2 (point-in-time), §8.4
+(manifest hashes name every input), §1.5 rule 7.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse: the parser, the
+row models, and the crosswalk all exist; this is the loader between them.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `docs/DECISIONS.md`, `src/narrative_alpha/ingest/salaries.py` (`parse_salary_csv` and its
+> parsed-row models), `src/narrative_alpha/ingest/projections.py` (`load_projection_capture`
+> is the pattern to copy: manifest hash verification, crosswalk resolution, insert-only
+> point-in-time rows, idempotent reload, structured load report), `SlateRow`/`SalaryRow` in
+> `src/narrative_alpha/store/models.py`, `src/narrative_alpha/snapshots/models.py` (the
+> capture manifest), `src/narrative_alpha/identity/crosswalk.py`, and how
+> `tests/test_build.py` seeds slates and salaries today.
+>
+> Build `src/narrative_alpha/ingest/slates.py` and a `na-slate` CLI:
+>
+> 1. **`na-slate ingest --season N --week N --site dk|fd --capture <capture dir>`** (default:
+>    the newest `salaries` capture for that week under `data/snapshots/`). Verify the file
+>    hash against the manifest, parse with `parse_salary_csv`, and write one `slates` row
+>    per distinct slate in the file (classic vs showdown from the parser; `external_slate_id`
+>    is a deterministic key of site, season, week, slate type, and the earliest kickoff, since
+>    salary exports carry no slate id; `name` from `--slate-name` or that key) plus one
+>    `salaries` row per player. `observed_at` is the manifest's capture time, never now;
+>    `starts_at`/`locks_at` come from the earliest game time in the file.
+> 2. **Crosswalk, fail closed.** Resolve every player through `PlayerCrosswalk.match` with
+>    the site player id as the external id (DK and FD both carry one), name, team, and
+>    position. Unresolved players go to the unresolved queue and are listed in the load
+>    report; the slate is still written (a lineup build later refuses through
+>    `require_all_resolved`). Never guess.
+> 3. **Idempotent and versioned.** Reloading the same capture inserts nothing and says so.
+>    A later capture of the same slate (Sunday re-download) inserts new salary rows with the
+>    new `observed_at`; salaries that changed are reported as a diff. Rows are never updated.
+> 4. **`na-slate list --season N --week N`** prints slate id, site, type, name, lock time,
+>    player count, unresolved count, and the latest salary/projection/ownership observation
+>    times — the ids that `na-build`, `na-features`, and `na-report` require.
+> 5. `README.md`: the Saturday sequence is now capture → `na-slate ingest` → `na-slate list`.
+>
+> Tests: golden DK and FD salary captures (reuse the existing synthesized goldens) load into
+> a seeded store with resolved players; an unresolved player is queued and reported; a hash
+> mismatch refuses; reload is a no-op; a second capture versions rather than updates;
+> showdown files produce a showdown slate; `list` renders. No network. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Slice 23 — Slate lane (`na-ops slate`) end to end
+
+**Goal:** one command for Saturday and Sunday, the way `na-ops batch` is one command for the
+week: ingest that week's captures, build episodes and features at the decision instant, build
+lineups, freeze the decision snapshot, write the memo, and say exactly where the upload CSV
+is. This is the Sunday session of design-doc §12.5 in its boring form.
+
+**Design doc:** §1.6 (MLP is the fallback state), §6.8 (output artifacts per slate), §8.4,
+§9.0, Appendix D (Saturday/Sunday items), §12.5 (the decision session).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse: orchestration over
+existing commands, mirroring `ops/batch.py`.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/ops/batch.py` (the step recorder, isolation, and `ops_runs` pattern
+> you must reuse), `src/narrative_alpha/ops/status.py`, `src/narrative_alpha/ops/schedule.py`
+> (the reminder text), `src/narrative_alpha/ingest/slates.py` and `projections.py`,
+> `src/narrative_alpha/narrative/episodes.py` and `features.py`, `src/narrative_alpha/build.py`,
+> `src/narrative_alpha/report_cli.py`, and `src/narrative_alpha/interface/slate_memo.py`.
+>
+> Add `na-ops slate --season N --week N --site dk|fd [--decision-at <ts>] [--lineups N]`:
+>
+> 1. Steps, in order, each isolated and recorded in `ops_runs` (a new migration widens the
+>    `step` CHECK; add the slate steps, never rename the batch ones): ingest salaries
+>    (newest capture) → ingest projections and ownership (every capture of those kinds for
+>    the week not yet loaded, through the `SourceFormatRegistry`; a vendor with no adapter is
+>    a recorded failure naming the vendor, and the lane continues) → Stage 2 episodes at
+>    `decision_at` → Stage 3 features for that slate → `na-build` decision snapshot with the
+>    upload CSV → slate memo. `decision_at` defaults to now and is written into every step's
+>    summary; the same instant is passed to episodes, features, and the build so the
+>    decision is replayable.
+> 2. **Fail closed where the MLP requires it.** Unresolved players on the slate stop the
+>    build step with the exact `na-crosswalk resolve` command; a missing projection source
+>    stops the build and says which capture kinds are missing for the week. Earlier steps
+>    still record.
+> 3. **Output.** Print the memo path, the upload CSV path, the decision snapshot id, and a
+>    one-line replay command. Add a "SLATE" section to `na-ops status` showing, for the
+>    current week and site, which captures are ingested, whether episodes/features exist at
+>    the latest decision instant, and the last decision snapshot.
+> 4. Update the launchd reminder text to name `na-ops slate` as the command after captures.
+>
+> Tests: step isolation and recording; a missing projection capture stops the build step
+> and names the kind; unresolved players stop the build with the resolve command; the same
+> `decision_at` reaches every stage (assert on the injected dependencies); a second run at
+> the same decision instant writes no new episodes/features (idempotent); status renders the
+> slate section on an empty store and a seeded one. No network. Run
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
+### Slice 24 — Local dashboard (read-mostly, one page)
+
+**Goal:** the "not pretty, but simple" UI: a single local web page that shows `na-ops status`,
+the review queues, the latest slate memo, and the batch/slate history, with two buttons
+that run the lanes. No framework, no build step, no logic the CLI lacks.
+
+**Design doc:** §1.6 (complexity budget), §7.1 (interface layer), Appendix D.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/ops/` (status payload, batch and slate lanes), `extract_cli.py`
+> (`review`), `identity/cli.py` (`resolve`), and `interface/slate_memo.py`.
+>
+> Build `na-ops dashboard [--port 8765]` on the standard library only (`http.server` and one
+> HTML template with inline CSS; no JavaScript framework, no external assets, no CDN):
+>
+> 1. **Read pages** rendered from the same functions the CLIs call: the status screen
+>    (every section of `status_payload`), the review queues (pending flags, in-flight
+>    attempts, held leases, unresolved identities with their candidate players), the last
+>    twenty `ops_runs` rows, and the latest slate memo text.
+> 2. **Two actions, POST only, confirmed on the page:** "run batch now" and "run slate now"
+>    for the current week. Each runs the lane in a background thread through the library
+>    call, writes `ops_runs` as usual, and the page shows progress by reloading. Refuse to
+>    start a lane that is already running.
+> 3. **Resolve from the page:** each unresolved identity row offers its candidate players
+>    and an ignore button, calling `PlayerCrosswalk.resolve` — the same call as the CLI.
+> 4. Bind to `127.0.0.1` only. No credentials in the page or the process beyond what the
+>    lanes already read from the Keychain wrapper. Add `na-ops dashboard` to the README as
+>    the way to look at the tool without a terminal.
+>
+> Tests: the pages render on an empty store and a seeded one (use `http.client` against a
+> test server on an ephemeral port); the batch action refuses a second concurrent start;
+> resolve from the page persists exactly what the CLI would; the server refuses non-loopback
+> binds. Run `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` — all green.
+
 ### Queued, not yet prompted (in order)
 
-- **Slice 22 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
-  §12.2.5–§12.2.8): prompt when there are at least three weeks of actual ownership labels and
-  the Stokastic ownership baseline (Slice 9) is ingesting. Fitting on synthetic labels would
-  violate rule 1.5.2.
-- **Slice 23 — Local dashboard** over the `na-ops` functions: status, review queues
-  (unresolved players, flagged items), slate memo, "run batch now". Thin; no logic of its own.
-- **Slice 24 — Sunday fast lane** (Phase 3, §7.4): pre-approved `fast_lane_rules.yaml`,
-  single-item synchronous extraction, official-inactive bypass.
 - **Slice 9 — Stokastic adapter** stays open until real exports exist under
-  `data/snapshots/`; its prompt is unchanged.
+  `data/snapshots/`. Stokastic opens NFL main-slate data within about twelve hours of lock,
+  so the first chance is Saturday 2026-09-12; hand the slice out that day, and expect Week 1
+  to be capture-only for that source.
+- **Slice 25 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
+  §12.2.5–§12.2.8): prompt when there are at least three weeks of actual ownership labels and
+  a vendor ownership baseline is ingesting. Fitting on synthetic labels would violate rule
+  1.5.2.
+- **Slice 26 — Sunday fast lane** (Phase 3, §7.4): pre-approved `fast_lane_rules.yaml`,
+  single-item synchronous extraction, official-inactive bypass.
+- **Stage 2/3 in the weekly batch:** once Slice 23 lands, decide whether `na-ops batch` should
+  also build episodes at the end of each run (cheap, deterministic) so `status` can show
+  episode counts mid-week.
 
 ---
 
