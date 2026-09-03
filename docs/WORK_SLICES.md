@@ -2131,6 +2131,194 @@ Host, and confirmation tests pass unchanged.
 **Review outcome (2026-09-03):** accepted; one text fix (the no-week fieldset named a
 `--standings-file` flag the CLI does not have — the files are positional).
 
+### Slice 33 — Archetype-aware optimizer requests (Stage 4 becomes lineup-affecting)
+
+**Goal:** today every build is the cash objective with no ownership constraint, so Stage 4
+routing changes the request bytes and the reported sums and not one roster. This slice gives
+each contest archetype a versioned request policy — ownership-sum band, lineup uniqueness,
+player exposure range — through the fields `OptimizationRequest` already carries, so a
+tournament build actually consumes the ownership the routing applied.
+
+**Design doc:** §6.5 (optimizer requirements), §6.4 (leverage is a diagnostic, not an
+objective), §12.2.5 caps, §11 contest archetypes, §1.6.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse; the policy numbers
+are stated assumptions to be tuned, not statistics.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read §6.4,
+> §6.5, and §11 of the design doc; then `src/narrative_alpha/portfolio/models.py`
+> (`OptimizationRequest`, `NumericRange`, `ContestArchetype`), `portfolio/pydfs_adapter.py`
+> (`_unsupported_features` refuses every archetype but cash; `_ownership_average_bounds`
+> already converts an ownership-sum range to per-player bounds), `build.py`,
+> `ops/slate.py` (`--contest-archetype`), `fast/inactives.py` (the re-freeze copies request
+> fields from the base decision), `interface/slate_memo.py`, and `ownership_routing.py`.
+>
+> 1. **Policy file.** `config/contest_policies.toml`, versioned (`policy_version`), one
+>    table per archetype: `ownership_sum_points` (min, max — a lineup's summed ownership in
+>    points, e.g. cash none; single_entry 90–150; 3max 80–140; 20max 70–130;
+>    mass_multi_entry 60–120), `lineup_uniqueness`, `max_player_exposure` (fraction of the
+>    portfolio), and `objective = "projection"` for every archetype in this slice — the
+>    simulator-backed objectives of §6.4 do not exist yet and the file must not pretend
+>    they do. Loader is strict (`extra="forbid"`), hashes the bytes, refuses unknown
+>    archetypes. State in the file's comments that the numbers are first-season
+>    assumptions to be re-estimated from actual-ownership labels.
+> 2. **Request construction.** `build_decision` takes the policy (default: the shipped
+>    file) and fills `ownership_sum_range`, `lineup_uniqueness`, and exposure fields from
+>    it for the requested archetype; the policy version and hash go into the manifest so
+>    replay reads the same numbers (extend the replay byte-identity test with a
+>    tournament build). The adapter accepts the four non-cash archetypes when the
+>    objective is projection with constraints, and keeps refusing anything it cannot honor
+>    faithfully. An ownership-sum band that no valid lineup can satisfy is a stated
+>    refusal naming the band and the candidate pool's range, not a silent widening.
+> 3. **The fast lane** copies the base request's policy fields on re-freeze (it already
+>    copies archetype and uniqueness; add the rest) so pinned and replacement lineups obey
+>    one policy.
+> 4. **The memo** prints the policy (version, archetype, band, uniqueness, exposure) in
+>    the DECISION INPUT block; the red-team "do nothing" scope line already reads
+>    `ownership_sum_range` and will say that rosters could change once it is set.
+> 5. `na-ops slate --contest-archetype` is unchanged; `na-ops status` shows the policy
+>    version beside the decision.
+>
+> Tests: each archetype builds through the real adapter on the existing fixture pool;
+> replay is byte-identical for a tournament build with routing on and off; an impossible
+> band refuses with the pool's range; the fast lane's re-freeze carries the policy; the
+> memo golden updated with the new block only. Gates green; never the production database.
+
+### Slice 34 — Tuesday grading and the source credibility ledger (§5.9)
+
+**Goal:** the third Tuesday step the design asks for: grade every falsifiable claim against
+what actually happened, and keep the multidimensional source ledger — by source, team, claim
+type, and dimension — that season two's source learning depends on. Grade only what can be
+falsified; vague commentary earns nothing from a player who then played well.
+
+**Design doc:** §5.9 (the ledger's columns), §4.1–§4.2 (claim taxonomy, falsifiability),
+Appendix D (Tuesday grading), Phase 3 acceptance ("source scores are claim-type-specific and
+time-decayed"), §12.4 (small cells: shrink, never a raw win rate).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: the grading
+rules decide what the ledger means.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read §5.9, §4.1–§4.2, §12.4, and Appendix C–D of
+> the design doc; then `docs/schema.md` for `claims`, `claim_player_refs`,
+> `claim_evidence_refs`, `results`, `player_availability`, `actual_ownership`, and
+> `ownership_baselines`; `src/narrative_alpha/narrative/extraction_models.py` (claim types,
+> dimensions, directions, `falsifiable`), `ops/results.py` (the Tuesday lane and its step
+> conventions), `narrative/source_catalog.py` (grades), and `evaluation/baseline_report.py`.
+>
+> Build `src/narrative_alpha/grading/`:
+>
+> 1. **Grading rules, one per falsifiable claim type**, deterministic and written down in
+>    `config/claim_grading.toml` (versioned, hashed): availability claims against
+>    `player_availability` and the `results` row's played/DNP fact; workload and usage
+>    claims against the stat-line object in `results` with a stated threshold per
+>    dimension; ownership-propagation claims against the direction of `actual_ownership`
+>    minus the vendor baseline at the decision. A claim with no rule, or marked not
+>    falsifiable, is recorded as `ungradable` with the reason — never scored. Each grade
+>    row (`claim_grades`, append-only, migration) carries the claim, the rule and its hash,
+>    the outcome row it was graded against, the verdict (`correct`, `incorrect`,
+>    `ungradable`, `indeterminate`), and lead time from claim observation to lock.
+> 2. **The ledger.** `source_credibility` rows per (source_id, team, claim_type,
+>    claim_dimension) as-of each grading run: n graded, a Beta(1,1)-prior accuracy
+>    posterior mean and 90% interval, precision, coverage, average lead time, correction
+>    rate, last claim at, and a time-decay weight with a stated half-life in the config.
+>    Append-only; a new row per run, never an update. No single number per source.
+> 3. **The lane.** A `results_grade` step in `na-ops results` after `results_labels`
+>    (widen the `ops_runs` CHECK by migration, as 0013 did), grading every claim for the
+>    week's slates whose outcome rows exist, then refreshing the ledger; the step summary
+>    counts verdicts by claim type. `na-report sources --season N --week N` renders the
+>    ledger with the Appendix C discipline: never a win rate alone, always n and the
+>    interval. `na-ops status` shows graded and ungradable counts for the week.
+> 4. Nothing here changes a source's catalog grade or any extraction, routing, or build
+>    input; the ledger is a report until a later slice consumes it (fast-lane item
+>    eligibility, §7.4).
+>
+> Tests: each rule against a synthetic claim and outcome in both directions plus the
+> indeterminate case; an unfalsifiable claim is `ungradable` and a later good performance
+> does not change that; the posterior with n=2 stays near the prior; the ledger is
+> append-only; the step records on an empty week. Gates green; never the production
+> database.
+
+### Slice 35 — MCP server over the reads (Phase 3, §7.1)
+
+**Goal:** the interface layer's second face: a local MCP server whose tools are the reads
+the dashboard and CLIs already make, so a chat client can ask "why is this player at 14%"
+and get the audit, the memo, the status, and the evidence — with `as_of` and run ids on
+every response and no write tool at all in this slice.
+
+**Design doc:** §7.1, §7.6 (prompt injection: evidence excerpts are untrusted text), §1.6.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read §7.1 and §7.6 of the design doc; then
+> `src/narrative_alpha/ops/dashboard.py` (which library function each page calls),
+> `narrative/audit.py` (`player_audit`, `resolve_audit_player`, `list_audit_candidates`),
+> `interface/slate_memo.py`, `ops/status.py` (`status_payload`), `ownership/scenarios.py`,
+> `narrative/episodes.py`, and `replay.py`.
+>
+> Build `src/narrative_alpha/mcp_server.py` with a `na-mcp` entry point on the official
+> `mcp` Python SDK (stdio transport only; add the dependency). Tools, each a thin call into
+> the existing library function with the same as-of discipline, returning JSON that carries
+> `as_of`, `decision_snapshot_id` or `run_id` where one applies, and `code_version`:
+> `get_status` (the status payload), `get_slate_memo` (the latest or a named decision's
+> memo text and model), `get_player_dossier` (`player_audit`), `list_audit_candidates`,
+> `get_narrative_episode` (one episode with its claims and evidence as-of a decision),
+> `get_ownership_scenarios` (one decision's scenario rows and routing record),
+> `search_evidence` (substring search over evidence excerpts as-of a decision, capped),
+> and `replay_snapshot` (runs `replay_decision` and returns the report — a read, since it
+> writes nothing). No `log_decision` and no lane-starting tool: writes stay on the CLI and
+> the dashboard, where a human confirms them. Every evidence excerpt in a response is
+> wrapped in the untrusted-content framing the extraction prompt already uses (§7.6), so a
+> client model does not take a scraped headline as an instruction. Bind nothing to a
+> network; stdio only. Document the client configuration (Claude Desktop, Claude Code) in
+> the README in ten lines.
+>
+> Tests: each tool against the seeded fixtures used by `tests/test_audit.py` and
+> `tests/test_ops_dashboard.py` through the SDK's in-process client; a response for a
+> decision carries its `as_of`; a claim observed after the decision is absent; the server
+> exposes no tool whose name suggests a write. Gates green.
+
+### Slice 36 — Complexity-budget pass on Slices 29–32
+
+**Goal:** three duplications left by the last four slices, removed with no behavior change:
+one provenance join, one evaluation gate, one copy of the ownership caps and threshold.
+
+**Design doc:** §1.6.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Refactor with the golden
+files as the oracle.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read the review notes under Slices 29–31 in
+> `docs/WORK_SLICES.md`, then `src/narrative_alpha/ownership_routing.py`,
+> `narrative/audit.py`, `ownership/config.py`, `ownership/evaluation.py`
+> (`latest_evaluation_status`), and `interface/red_team.py`. Four changes, no new behavior,
+> every golden file byte-identical afterwards:
+>
+> 1. Move `ownership/config.py` to a leaf module (`ownership_config.py`, stdlib and
+>    pydantic only) that both `ownership_routing` and the `ownership` package import;
+>    delete `MATERIAL_DELTA` and `CLASSIC_CAPS` as constants and read them from the loaded
+>    config — loaded once, at import, from the shipped path, with the hash checked against
+>    the value a decision manifest recorded when routing is pinned.
+> 2. One evaluation gate: `ownership_routing._latest_evaluation` and
+>    `ownership.evaluation.latest_evaluation_status` become one function that returns the
+>    eval id and verdict; both callers use it.
+> 3. One provenance join: `audit.py`'s episode/claim/evidence reads call
+>    `ownership_routing._episode_provenance` (made public) and render from its result;
+>    delete the duplicated queries.
+> 4. Scope `audit._ownership`'s "available scenario set" query by the decision's contest
+>    archetype (read it from the frozen optimizer request), and drop dead shims the
+>    reviews named.
+>
+> Tests: the existing suites and golden files pass unchanged; add one test that the
+> routing threshold and caps come from the config file's bytes. Gates green.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
@@ -2139,12 +2327,13 @@ Host, and confirmation tests pass unchanged.
   to be capture-only for that source.
 - **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
   real vendor export as Slice 9.
-- **Slice 33 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
+- **Slice 37 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
   the no-episode ratio features (both noted at Slices 20–21) once a month of live episodes
   shows what the clusters actually look like.
-- **Slice 34 — MCP server (Phase 3):** one tool per read the dashboard already makes,
-  now unblocked: Slice 31 landed `player_audit`, which is the read an MCP tool would
-  expose first.
+- **Slice 38 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
+  season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
+  precision, not the catalog's family default.
+- **Late swap MVP** (§6.7, Phase 3): after Week 1 shows what in-slate captures look like.
 
 ---
 
