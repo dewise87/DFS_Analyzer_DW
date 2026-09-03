@@ -1,16 +1,5 @@
 """L3 bounded ownership-offset model, honest evaluation, and scenario artifacts."""
 
-from narrative_alpha.ownership.config import (
-    DEFAULT_OWNERSHIP_CONFIG_PATH,
-    CalibrationConfig,
-    CapConfig,
-    EvaluationConfig,
-    GovernanceStatus,
-    OwnershipConfigError,
-    OwnershipModelConfig,
-    PriorConfig,
-    load_ownership_config,
-)
 from narrative_alpha.ownership.data import (
     LabelGate,
     MissingTrainingRow,
@@ -50,6 +39,17 @@ from narrative_alpha.ownership.scenarios import (
     build_scenarios,
     calibrate_probabilities,
     persist_scenarios,
+)
+from narrative_alpha.ownership_config import (
+    DEFAULT_OWNERSHIP_CONFIG_PATH,
+    CalibrationConfig,
+    CapConfig,
+    EvaluationConfig,
+    GovernanceStatus,
+    OwnershipConfigError,
+    OwnershipModelConfig,
+    PriorConfig,
+    load_ownership_config,
 )
 
 __all__ = [

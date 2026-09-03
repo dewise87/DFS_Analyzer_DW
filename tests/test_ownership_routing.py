@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import tomllib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from test_build import (
 )
 from test_features import FixtureProvider
 
+from narrative_alpha import ownership_routing
 from narrative_alpha.build import BuildRoutingError, build_decision
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.interface import build_slate_memo, render_slate_memo
@@ -40,10 +42,11 @@ from narrative_alpha.ownership import (
     persist_fit,
 )
 from narrative_alpha.ownership_routing import (
-    CLASSIC_CAPS,
-    MATERIAL_DELTA,
     NO_PINNED_ROUTING,
+    ROUTING_SLATE_KIND,
+    material_delta,
     pinned_routing_from_manifest,
+    routing_config,
 )
 from narrative_alpha.portfolio import CandidatePlayer, PydfsAdapter
 from narrative_alpha.replay import replay_decision
@@ -100,17 +103,101 @@ class RoutingFixture:
     model_version: str
 
 
-def test_classic_caps_match_the_shipped_ownership_configuration() -> None:
-    config = load_ownership_config(Path("config/ownership_model.toml"))
-    for status, expected in CLASSIC_CAPS.items():
-        assert config.cap("classic", status).maximum_delta == pytest.approx(expected), status
+def test_routing_threshold_and_caps_come_from_the_config_files_bytes() -> None:
+    """Stage 4 governs on the shipped file, not on a mirror of it.
+
+    The TOML is parsed here independently of `ownership_config`, so a value edited in the
+    file and nowhere else moves this assertion — which is the point: the routing's material
+    threshold and its magnitude caps must be `config/ownership_model.toml`'s own bytes.
+    """
+
+    raw = OWNERSHIP_CONFIG_PATH.read_bytes()
+    parsed = tomllib.loads(raw.decode("utf-8"))
+
+    assert routing_config().config_sha256 == hashlib.sha256(raw).hexdigest()
+    assert material_delta() == pytest.approx(
+        float(parsed["evaluation"]["material_delta_points"]) / 100.0
+    )
+    for status, values in parsed["caps"][ROUTING_SLATE_KIND].items():
+        cap = routing_config().cap_for(ROUTING_SLATE_KIND, status)
+        assert cap is not None, status
+        assert cap.maximum_delta == pytest.approx(float(values["maximum_points"]) / 100.0), status
+        assert cap.multiplier == pytest.approx(float(values["multiplier"])), status
 
 
-def test_material_delta_matches_the_shipped_ownership_configuration() -> None:
-    """Routing sits below `narrative_alpha.ownership` in the import graph and cannot read
-    the config; this pins its copy of the threshold to the file the model actually uses."""
+def test_a_routed_decision_replays_under_the_configuration_it_froze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later edit to the shipped ownership file must not make a frozen decision
+    unreplayable: the decision carries the bytes it was governed under."""
 
-    assert load_ownership_config(OWNERSHIP_CONFIG_PATH).evaluation.material_delta == MATERIAL_DELTA
+    fixture = _fixture(tmp_path)
+    with connect_database(fixture.database) as connection:
+        baselines = _baselines(connection, fixture)
+        _insert_scenario_set(
+            connection, fixture, applied=dict(baselines), status="TESTING", at=SCENARIOS_AT
+        )
+        _insert_evaluation(connection, fixture, beat_baseline=True, at=SCENARIOS_AT)
+        connection.commit()
+    built = build_decision(
+        fixture.database,
+        slate_id=fixture.slate_id,
+        site="draftkings",
+        decision_at=SECOND_DECISION_AT,
+        artifact_directory=fixture.artifacts,
+    )
+    assert built.ownership_routing.applied
+    frozen = next(
+        item
+        for item in built.snapshot.manifest_hashes_json
+        if item.artifact_kind == "ownership_config"
+    )
+    assert frozen.sha256 == routing_config().config_sha256
+    assert (built.artifact_directory / "ownership_config.toml").read_bytes() == (
+        routing_config().raw_bytes
+    )
+
+    monkeypatch.setattr(
+        ownership_routing,
+        "ROUTING_CONFIG",
+        replace(routing_config(), config_sha256="0" * 64),
+    )
+    with connect_database(fixture.database) as connection:
+        replayed = replay_decision(
+            connection,
+            decision_snapshot_id=built.snapshot.decision_snapshot_id,
+            decision_at=built.snapshot.decision_at,
+            artifact_root=fixture.artifacts,
+            adapter=PydfsAdapter(),
+        )
+    assert replayed.report.output_matches
+    assert replayed.ownership_routing.scenario_run_id == built.ownership_routing.scenario_run_id
+
+
+def test_a_build_refuses_a_set_written_under_another_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    with connect_database(fixture.database) as connection:
+        baselines = _baselines(connection, fixture)
+        _insert_scenario_set(
+            connection, fixture, applied=dict(baselines), status="TESTING", at=SCENARIOS_AT
+        )
+        _insert_evaluation(connection, fixture, beat_baseline=True, at=SCENARIOS_AT)
+        connection.commit()
+    monkeypatch.setattr(
+        ownership_routing,
+        "ROUTING_CONFIG",
+        replace(routing_config(), config_sha256="0" * 64),
+    )
+    with pytest.raises(BuildRoutingError, match="regenerate the set"):
+        build_decision(
+            fixture.database,
+            slate_id=fixture.slate_id,
+            site="draftkings",
+            decision_at=SECOND_DECISION_AT,
+            artifact_directory=fixture.artifacts,
+        )
 
 
 def test_build_falls_back_to_the_vendor_baseline_without_a_winning_evaluation(
@@ -181,7 +268,7 @@ def test_a_material_delta_with_no_episode_is_held_at_the_baseline(tmp_path: Path
     with connect_database(fixture.database) as connection:
         baselines = _baselines(connection, fixture)
         applied = dict(baselines)
-        applied[quiet] = baselines[quiet] + MATERIAL_DELTA + 0.01
+        applied[quiet] = baselines[quiet] + material_delta() + 0.01
         _insert_scenario_set(
             connection, fixture, applied=applied, status="TESTING", at=SCENARIOS_AT
         )
@@ -338,7 +425,7 @@ def test_ops_status_names_the_active_scenario_set_and_its_multiplier(
         baselines = _baselines(connection, fixture)
         applied = dict(baselines)
         applied[fixture.narrative_player_id] = (
-            baselines[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
+            baselines[fixture.narrative_player_id] + material_delta() + 0.01
         )
         run_id = _insert_scenario_set(
             connection,
@@ -408,7 +495,7 @@ def test_replay_is_byte_identical_with_scenarios_on_and_off(tmp_path: Path) -> N
         baselines = _baselines(connection, fixture)
         applied = dict(baselines)
         applied[fixture.narrative_player_id] = (
-            baselines[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
+            baselines[fixture.narrative_player_id] + material_delta() + 0.01
         )
         run_id = _insert_scenario_set(
             connection,
@@ -492,7 +579,7 @@ def test_red_team_section_answers_all_five_questions(tmp_path: Path) -> None:
         refreshed = _baselines(connection, fixture)
         applied = dict(refreshed)
         applied[fixture.narrative_player_id] = (
-            refreshed[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
+            refreshed[fixture.narrative_player_id] + material_delta() + 0.01
         )
         _insert_scenario_set(
             connection, fixture, applied=applied, status="TESTING", at=SCENARIOS_AT

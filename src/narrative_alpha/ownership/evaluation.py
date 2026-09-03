@@ -20,7 +20,6 @@ from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from narrative_alpha import __version__
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
-from narrative_alpha.ownership.config import OwnershipModelConfig
 from narrative_alpha.ownership.data import MissingTrainingRow, TrainingData
 from narrative_alpha.ownership.model import (
     OwnershipModelError,
@@ -29,7 +28,7 @@ from narrative_alpha.ownership.model import (
     is_synthetic_source,
     predict_ownership,
 )
-from narrative_alpha.replay import PointInTimeSession
+from narrative_alpha.ownership_config import OwnershipModelConfig
 
 
 class OwnershipEvaluationError(OwnershipModelError):
@@ -366,45 +365,6 @@ def persist_evaluation(
             "report_path": path,
         }
     )
-
-
-def latest_evaluation_status(
-    connection: sqlite3.Connection,
-    *,
-    site: str,
-    contest_archetype: str,
-    feature_version: str,
-    config_sha256: str,
-    as_of: datetime,
-) -> tuple[str, bool] | None:
-    """Return TESTING for a winning evaluation and refusal evidence for a losing one."""
-
-    selected = PointInTimeSession(connection).query(
-        """
-        SELECT model_eval_id, beat_baseline
-        FROM model_evals
-        WHERE evaluation_kind = 'ownership' AND ownership_site = :site
-          AND ownership_archetype = :contest_archetype
-          AND feature_version = :feature_version AND config_sha256 = :config_sha256
-          AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        ORDER BY observed_at DESC, model_eval_id DESC
-        LIMIT 1
-        """,
-        {
-            "site": site,
-            "contest_archetype": contest_archetype,
-            "feature_version": feature_version,
-            "config_sha256": config_sha256,
-        },
-        as_of=ensure_utc(as_of),
-    )
-    if not selected:
-        return None
-    row = selected[0]
-    return "TESTING", bool(row["beat_baseline"])
 
 
 def _metrics_json(report: OwnershipEvaluationReport) -> dict[str, object]:

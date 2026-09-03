@@ -11,14 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from narrative_alpha.ownership.config import (
-    DEFAULT_OWNERSHIP_CONFIG_PATH,
-    GovernanceStatus,
-    OwnershipConfigError,
-    OwnershipModelConfig,
-    SlateKind,
-    load_ownership_config,
-)
+from narrative_alpha.ingest.timestamps import ensure_utc
 from narrative_alpha.ownership.data import (
     OwnershipDataError,
     available_fit_archetypes,
@@ -33,7 +26,6 @@ from narrative_alpha.ownership.evaluation import (
     OwnershipEvaluationError,
     OwnershipEvaluationReport,
     evaluate_forward_chaining,
-    latest_evaluation_status,
     persist_evaluation,
     render_evaluation_report,
 )
@@ -43,6 +35,16 @@ from narrative_alpha.ownership.scenarios import (
     build_scenarios,
     persist_scenarios,
 )
+from narrative_alpha.ownership_config import (
+    DEFAULT_OWNERSHIP_CONFIG_PATH,
+    GovernanceStatus,
+    OwnershipConfigError,
+    OwnershipModelConfig,
+    SlateKind,
+    load_ownership_config,
+)
+from narrative_alpha.ownership_routing import latest_evaluation_status
+from narrative_alpha.replay import PointInTimeSession
 from narrative_alpha.store import (
     MigrationError,
     StoreConfigurationError,
@@ -280,14 +282,14 @@ def _scenarios(
         as_of=now,
     )
     evaluation = latest_evaluation_status(
-        connection,
+        PointInTimeSession(connection),
         site=site,
         contest_archetype=str(archetype),
         feature_version=config.feature_version,
         config_sha256=config.config_sha256,
-        as_of=now,
+        as_of=ensure_utc(now),
     )
-    if evaluation is not None and not evaluation[1]:
+    if evaluation is not None and not evaluation.beat_baseline:
         raise OwnershipScenarioError(
             "latest out-of-week evaluation did not beat the untouched vendor baseline; "
             "scenario application refused"

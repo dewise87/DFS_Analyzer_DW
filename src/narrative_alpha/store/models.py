@@ -1716,6 +1716,7 @@ ManifestArtifactKind = Literal[
     "signal_features",
     "model_parameters",
     "contest_policy",
+    "ownership_config",
     "optimizer_request",
     "generated_lineups",
 ]

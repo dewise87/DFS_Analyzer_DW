@@ -1,4 +1,12 @@
-"""Versioned configuration for the first ownership-offset model."""
+"""Versioned configuration for the first ownership-offset model.
+
+A leaf module on purpose (standard library only, no ``narrative_alpha`` import): the
+Stage 4 permission layer in :mod:`narrative_alpha.ownership_routing` sits below the
+``narrative_alpha.ownership`` package in the import graph — that package reaches ``build``
+through ``ops.results`` → ``report_cli`` — and both must read the same file. Anything that
+needs a threshold, a cap, or the config hash imports it from here rather than mirroring the
+values, so there is one copy of ``config/ownership_model.toml``'s meaning in the tree.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +17,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-DEFAULT_OWNERSHIP_CONFIG_PATH = Path("config/ownership_model.toml")
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _shipped(relative: str) -> Path:
+    """The shipped config file: under the source tree when run from it, else the cwd.
+
+    Every lane already resolves `config/` against the repository root, but this file is
+    read by a module that `build` imports, so the path must not depend on where the
+    process happened to start.
+    """
+
+    candidate = _REPOSITORY_ROOT / relative
+    return candidate if candidate.is_file() else Path(relative)
+
+
+DEFAULT_OWNERSHIP_CONFIG_PATH = _shipped("config/ownership_model.toml")
 GovernanceStatus = Literal["UNVALIDATED", "TESTING", "PROVISIONAL", "VALIDATED"]
 SlateKind = Literal["classic", "showdown"]
 _STATUSES: tuple[GovernanceStatus, ...] = (
@@ -70,8 +93,20 @@ class OwnershipModelConfig:
     caps: dict[tuple[SlateKind, GovernanceStatus], CapConfig]
     config_sha256: str
 
+    # The exact bytes this configuration was read from, so a decision can freeze them.
+    raw_bytes: bytes = b""
+
     def cap(self, slate_kind: SlateKind, status: GovernanceStatus) -> CapConfig:
         return self.caps[(slate_kind, status)]
+
+    def cap_for(self, slate_kind: str, status: str) -> CapConfig | None:
+        """The cap for a governance status read back from the store, or ``None``.
+
+        The store holds statuses as text, and a row carrying one this configuration has no
+        cap for is a fact the caller must refuse on rather than a key error here.
+        """
+
+        return self.caps.get(cast("tuple[SlateKind, GovernanceStatus]", (slate_kind, status)))
 
 
 def load_ownership_config(
@@ -79,7 +114,17 @@ def load_ownership_config(
 ) -> OwnershipModelConfig:
     """Load and validate the exact versioned TOML whose bytes a run records."""
 
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise OwnershipConfigError(f"cannot read ownership config {path}: {error}") from error
+    return load_ownership_config_bytes(raw, source=str(path))
+
+
+def load_ownership_config_bytes(raw: bytes, *, source: str) -> OwnershipModelConfig:
+    """Validate frozen configuration bytes — the shipped file, or a decision's artifact."""
+
+    path = source
     try:
         parsed = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
@@ -138,6 +183,7 @@ def load_ownership_config(
         ),
         caps=caps,
         config_sha256=hashlib.sha256(raw).hexdigest(),
+        raw_bytes=raw,
     )
     if result.evaluation.beat_rule != "mae_and_log_score_and_brier":
         raise OwnershipConfigError("unsupported evaluation beat_rule")

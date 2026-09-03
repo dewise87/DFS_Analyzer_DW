@@ -7,7 +7,7 @@ import hashlib
 import io
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,8 +19,14 @@ from narrative_alpha.candidate_selection import (
     CandidateSelectionError,
     SelectedSourceArtifact,
 )
+from narrative_alpha.ownership_config import (
+    OwnershipConfigError,
+    OwnershipModelConfig,
+    load_ownership_config_bytes,
+)
 from narrative_alpha.ownership_routing import (
     NO_PINNED_ROUTING,
+    OWNERSHIP_CONFIG_ARTIFACT_KIND,
     OwnershipRouting,
     OwnershipRoutingError,
     PinnedOwnershipRouting,
@@ -173,6 +179,7 @@ class PointInTimeSession:
         slate_type: str = "classic",
         contest_archetype: str = ContestArchetype.CASH.value,
         ownership_routing: PinnedOwnershipRouting = NO_PINNED_ROUTING,
+        ownership_config: OwnershipModelConfig | None = None,
     ) -> tuple[CandidateSelection, OwnershipRouting]:
         """Compatibility wrapper around the shared build/replay selection seam.
 
@@ -196,6 +203,7 @@ class PointInTimeSession:
                 availability_artifacts=availability_artifacts,
                 as_of=_require_as_of(as_of),
                 pinned=ownership_routing,
+                config=ownership_config,
             )
         except CandidateSelectionError as error:
             raise ReplayError(str(error)) from error
@@ -240,6 +248,7 @@ def replay_decision(
         raise ReplayArtifactError("optimizer request slate type does not match stored slate")
 
     pinned_routing = pinned_routing_from_manifest(snapshot.manifest_hashes_json)
+    frozen_config = ownership_config_from_manifest(snapshot.manifest_hashes_json, artifact_root)
     try:
         routed = select_routed_candidate_scenario(
             session,
@@ -252,6 +261,7 @@ def replay_decision(
             availability_artifacts=availability_artifacts,
             as_of=cutoff,
             pinned=pinned_routing,
+            config=frozen_config,
         )
         verify_pinned_routing(routed.routing, pinned_routing)
     except CandidateSelectionError as error:
@@ -490,6 +500,34 @@ def _single_artifact(snapshot: DecisionSnapshotRow, artifact_kind: str) -> Decis
             f"decision manifest must contain exactly one {artifact_kind} artifact"
         )
     return artifacts[0]
+
+
+def ownership_config_from_manifest(
+    manifest: Sequence[DecisionManifestHash], artifact_root: Path
+) -> OwnershipModelConfig | None:
+    """The ownership configuration a routed decision froze, verified; None when unrouted.
+
+    A decision that applied the vendor baseline froze no configuration, and governs
+    under none on replay: the pinned routing short-circuits before any cap is read.
+    """
+
+    artifacts = tuple(
+        item for item in manifest if item.artifact_kind == OWNERSHIP_CONFIG_ARTIFACT_KIND
+    )
+    if not artifacts:
+        return None
+    if len(artifacts) != 1:
+        raise ReplayArtifactError("decision manifest carries more than one ownership config")
+    raw = _read_verified_artifact(artifact_root, artifacts[0])
+    try:
+        config = load_ownership_config_bytes(raw, source=artifacts[0].path)
+    except OwnershipConfigError as error:
+        raise ReplayArtifactError(str(error)) from error
+    if artifacts[0].source != config.config_version:
+        raise ReplayArtifactError(
+            "ownership config manifest version does not match the frozen config bytes"
+        )
+    return config
 
 
 def _contest_policy(snapshot: DecisionSnapshotRow, artifact_root: Path) -> ContestPolicies:

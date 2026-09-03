@@ -407,7 +407,10 @@ def build_mcp_server(
                     connection, selector=player, decision_snapshot_id=decision
                 )
                 audit = player_audit(
-                    connection, player_id=player_id, decision_snapshot_id=decision
+                    connection,
+                    player_id=player_id,
+                    decision_snapshot_id=decision,
+                    artifact_root=context.artifact_directory,
                 )
             except AuditError as error:
                 raise McpServerError(str(error)) from error

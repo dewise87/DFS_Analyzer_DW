@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize  # type: ignore[import-untyped]
 
-from narrative_alpha.ownership.config import OwnershipModelConfig
+from narrative_alpha.ownership_config import OwnershipModelConfig
 
 
 class OwnershipModelError(ValueError):

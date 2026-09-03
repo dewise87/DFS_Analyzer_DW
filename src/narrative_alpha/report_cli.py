@@ -99,6 +99,18 @@ def build_signals_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SOURCE_CATALOG_PATH,
         help="the reviewed catalog that grades sources; the family default is used without it",
     )
+    parser.add_argument(
+        "--artifact-directory",
+        "--artifact-dir",
+        "--artifact-root",
+        dest="artifact_root",
+        type=Path,
+        help=(
+            "where this decision's frozen artifacts live; given it, the decision's own "
+            "contest archetype is read from its optimizer request and the scenario set "
+            "explained below is scoped to that archetype"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -229,7 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _signals(arguments: argparse.Namespace) -> int:
-    """Read-only: no artifact is read, no replay is run, and nothing is written to the store."""
+    """Read-only: no replay is run and nothing is written to the store.
+
+    The only artifact this reads is the frozen optimizer request, and only when the caller
+    names an artifact directory: the decision's contest archetype is frozen there and in no
+    column, and without it the scenario set explained is the newest for the slate and site.
+    """
 
     try:
         with connect_database(arguments.database) as connection:
@@ -243,6 +260,8 @@ def _signals(arguments: argparse.Namespace) -> int:
                 connection,
                 player_id=player_id,
                 decision_snapshot_id=arguments.decision_snapshot_id,
+                catalog_path=arguments.source_catalog,
+                artifact_root=arguments.artifact_root,
             )
         rendered = render_player_audit(audit)
         if arguments.output is not None:

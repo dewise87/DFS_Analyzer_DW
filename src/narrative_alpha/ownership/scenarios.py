@@ -15,16 +15,16 @@ from numpy.typing import NDArray
 
 from narrative_alpha import __version__
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
-from narrative_alpha.ownership.config import (
-    GovernanceStatus,
-    OwnershipModelConfig,
-    SlateKind,
-)
 from narrative_alpha.ownership.model import (
     FittedOwnershipModel,
     OwnershipModelError,
     OwnershipScenarioInput,
     predict_ownership,
+)
+from narrative_alpha.ownership_config import (
+    GovernanceStatus,
+    OwnershipModelConfig,
+    SlateKind,
 )
 
 

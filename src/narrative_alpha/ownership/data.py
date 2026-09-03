@@ -16,7 +16,6 @@ from uuid import uuid4
 from narrative_alpha import __version__
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.ops.results import label_cohorts
-from narrative_alpha.ownership.config import OwnershipModelConfig
 from narrative_alpha.ownership.model import (
     FittedOwnershipModel,
     OwnershipModelError,
@@ -24,6 +23,7 @@ from narrative_alpha.ownership.model import (
     OwnershipTrainingRow,
     is_synthetic_source,
 )
+from narrative_alpha.ownership_config import OwnershipModelConfig
 from narrative_alpha.replay import PointInTimeSession
 
 

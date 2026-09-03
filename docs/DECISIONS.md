@@ -262,6 +262,21 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-04 — Slice 36 review outcomes
+
+- **Governance configuration is frozen with the decision it governed.** A routed decision
+  writes the ownership configuration bytes beside its artifacts and names them in the
+  manifest; replay governs under those bytes. A configuration edit therefore cannot make a
+  frozen decision unreplayable, and cannot re-govern its rows under caps it never saw. The
+  same rule already held for salaries, projections, availability, and the contest policy;
+  this closes the one input that was read live.
+- **A build refuses a set written under another configuration.** Stage 4 re-asserts caps
+  under the current file; a scenario set capped and calibrated under a different one is
+  refused with "regenerate", never re-governed.
+- **Shared configuration is read lazily and from the source tree.** A module under `build`
+  must not read a file at import: the failure would surface in every command, not the one
+  that needs the file.
+
 ## 2026-09-03 — Slice 34 review outcomes
 
 - **An outcome is a post-lock fact or it is not an outcome.** Availability grades use the

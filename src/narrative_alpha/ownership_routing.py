@@ -17,9 +17,14 @@ Rules 1 and 2 fall back to the vendor baseline with a stated reason the memo pri
 broken set, and a silent revert would hide that (§1.5 rule 7).
 
 This module deliberately imports nothing from ``narrative_alpha.ownership``: that package
-reaches ``ops.results`` → ``report_cli`` → ``build``, and ``build`` imports this module.
-``MATERIAL_DELTA`` therefore mirrors ``config/ownership_model.toml``'s
-``evaluation.material_delta_points``, and a test pins the two together.
+reaches ``ops.results`` → ``report_cli`` → ``build``, and ``build`` imports this module. The
+threshold and the caps are not mirrored here — :mod:`narrative_alpha.ownership_config` is a
+leaf both sides import, and :data:`ROUTING_CONFIG` is the one copy of
+``config/ownership_model.toml`` this process reads.
+
+It is also where the two reads Stage 4 shares with the audit view live: the evaluation gate
+(:func:`latest_evaluation_status`) and the provenance join (:func:`episode_provenance`),
+public so ``narrative/audit.py`` renders from the same rows the routing decided on.
 """
 
 from __future__ import annotations
@@ -40,33 +45,68 @@ from narrative_alpha.candidate_selection import (
     select_candidate_scenario,
 )
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.ownership_config import (
+    OwnershipModelConfig,
+    load_ownership_config,
+)
 from narrative_alpha.portfolio import DfsSite
 
 MANIFEST_ARTIFACT_KIND: Literal["ownership_scenarios"] = "ownership_scenarios"
 MANIFEST_PATH_PREFIX = "store/ownership_scenarios/"
 SCENARIO_SET_SCHEMA_VERSION = "ownership-routing-v1"
 
-# Mirrors config/ownership_model.toml [evaluation] material_delta_points = 2.0. A delta
-# larger than this is a claim about a player and must cite evidence; anything smaller is
-# the roster-total calibration's mechanical wobble (§12.2.6), which cites no episode
-# because it asserts nothing about that player.
-MATERIAL_DELTA = 0.02
+#: The shipped ownership configuration, read once at import from the path every lane
+#: already resolves against the repository root. Stage 4's material threshold and its
+#: magnitude caps are that file's bytes, not a copy of them: a routing that read a stale
+#: mirror would permit a move the model's own governance forbids.
+ROUTING_CONFIG: OwnershipModelConfig | None = None
+
+
+def routing_config() -> OwnershipModelConfig:
+    """The shipped configuration, read on first use and kept for the process.
+
+    Read lazily rather than at import: this module is under `build`, which nearly every
+    command imports, and a typo in the ownership file must break a build loudly — not
+    `na-ops status`.
+    """
+
+    global ROUTING_CONFIG
+    if ROUTING_CONFIG is None:
+        ROUTING_CONFIG = load_ownership_config()
+    return ROUTING_CONFIG
+
+
+#: A routed decision freezes the configuration bytes it was governed under beside its
+#: other artifacts, so a later edit to the shipped file cannot make it unreplayable.
+OWNERSHIP_CONFIG_ARTIFACT_KIND: Literal["ownership_config"] = "ownership_config"
+#: Stage 4 governs one ownership value per candidate, so the caps it re-asserts are the
+#: classic ones; the showdown path falls back to the vendor baseline before reaching them.
+ROUTING_SLATE_KIND: Literal["classic"] = "classic"
 # Float tolerance for the two comparisons below: a cap of 0.02 and a delta of exactly
 # 0.02 must not trip on the last bit of a subtraction.
 DELTA_TOLERANCE = 1e-9
-# Mirrors config/ownership_model.toml [caps.classic.*] maximum_points. Stage 4 is the
-# permission layer, so it re-asserts the magnitude cap on every stored row rather than
-# trusting that whatever wrote the row respected it. A test pins these to the config.
-CLASSIC_CAPS: Mapping[str, float] = {
-    "UNVALIDATED": 0.02,
-    "TESTING": 0.05,
-    "PROVISIONAL": 0.10,
-    "VALIDATED": 0.10,
-}
+
+
+def material_delta(config: OwnershipModelConfig | None = None) -> float:
+    """The configured threshold above which a move is a claim that must cite evidence.
+
+    Below it a move is the roster-total calibration's mechanical wobble (§12.2.6), which
+    cites no episode because it asserts nothing about that player.
+    """
+
+    return (config or routing_config()).evaluation.material_delta
 
 
 class OwnershipRoutingError(RuntimeError):
     """Raised when a scenario set cannot be routed to the optimizer safely."""
+
+
+@dataclass(frozen=True)
+class EvaluationVerdict:
+    """The newest out-of-week evaluation of one model configuration, and what it said."""
+
+    model_eval_id: str
+    beat_baseline: bool
 
 
 @dataclass(frozen=True, order=True)
@@ -83,6 +123,94 @@ class EvidenceRef:
     extract_start: int
     extract_end: int
     verbatim_extract: str | None
+
+
+@dataclass(frozen=True)
+class ProvenanceEvidence:
+    """One verbatim excerpt behind one claim, with the offsets that locate it."""
+
+    ordinal: int
+    source_item_id: int
+    source_text_sha256: str
+    extract_start: int
+    extract_end: int
+    verbatim_extract: str | None
+    observed_at: str
+
+
+@dataclass(frozen=True)
+class ProvenanceClaim:
+    """One Stage 1 claim inside one episode, with its taxonomy and its excerpts."""
+
+    claim_id: str
+    relation: str
+    similarity_score: float
+    linked_claim_id: str | None
+    source_id: str
+    source_family: str
+    source_item_id: int
+    claim_type: str
+    claim_dimension: str
+    outcome_direction: str
+    roster_behavior_direction: str
+    evidence_class: str
+    evidence_basis: str
+    falsifiable: bool
+    item_title: str | None
+    item_observed_at: str
+    evidence: tuple[ProvenanceEvidence, ...]
+
+
+@dataclass(frozen=True)
+class ProvenanceEpisode:
+    """One Stage 2 episode as of a cutoff, with everything claimed inside it."""
+
+    episode_id: str
+    claim_dimension: str
+    opened_at: str
+    last_item_at: str
+    as_of: str
+    method_version: str
+    window_hours: float
+    unique_source_count: int
+    unique_source_family_count: int
+    source_entropy: float
+    velocity_per_6h: float
+    recency_hours: float
+    n_events: int
+    item_count: int
+    claims: tuple[ProvenanceClaim, ...]
+
+    @property
+    def evidence_refs(self) -> tuple[EvidenceRef, ...]:
+        """This episode's excerpts flattened to what an applied delta must cite (§8.3)."""
+
+        return tuple(
+            EvidenceRef(
+                episode_id=self.episode_id,
+                claim_id=claim.claim_id,
+                relation=claim.relation,
+                source_id=claim.source_id,
+                source_family=claim.source_family,
+                source_item_id=excerpt.source_item_id,
+                source_text_sha256=excerpt.source_text_sha256,
+                extract_start=excerpt.extract_start,
+                extract_end=excerpt.extract_end,
+                verbatim_extract=excerpt.verbatim_extract,
+            )
+            for claim in self.claims
+            for excerpt in claim.evidence
+        )
+
+
+@dataclass(frozen=True)
+class PlayerProvenance:
+    """One player's feature row and the episodes and excerpts standing behind it."""
+
+    feature_id: str
+    episode_ids: tuple[str, ...]
+    episodes: tuple[ProvenanceEpisode, ...]
+    evidence_refs: tuple[EvidenceRef, ...]
 
 
 @dataclass(frozen=True)
@@ -106,6 +234,9 @@ class AppliedOwnershipDelta:
     # held this player at the vendor baseline because the move cited no episode.
     proposed_ownership: float | None = None
     held_at_baseline: bool = False
+    # The threshold this delta was judged against: the configuration the decision froze,
+    # so a replay years later reads the same "material" the build did.
+    material_threshold: float | None = None
 
     @property
     def delta(self) -> float:
@@ -117,7 +248,8 @@ class AppliedOwnershipDelta:
 
     @property
     def material(self) -> bool:
-        return abs(self.delta) > MATERIAL_DELTA + DELTA_TOLERANCE
+        threshold = material_delta() if self.material_threshold is None else self.material_threshold
+        return abs(self.delta) > threshold + DELTA_TOLERANCE
 
 
 @dataclass(frozen=True)
@@ -230,8 +362,12 @@ def select_routed_candidate_scenario(
     projection_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     availability_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     pinned: PinnedOwnershipRouting | None = None,
+    config: OwnershipModelConfig | None = None,
 ) -> RoutedCandidateSelection:
     """Select point-in-time candidates, then route governed ownership onto them.
+
+    ``config`` is the ownership configuration to govern under: the one a replayed
+    decision froze, or the shipped file when a build is discovering a set now.
 
     Build leaves ``pinned`` unset and discovers the newest eligible scenario set; replay
     passes exactly what the manifest froze, so the same rows come back and the request
@@ -256,6 +392,7 @@ def select_routed_candidate_scenario(
         as_of=as_of,
         candidate_player_ids=frozenset(player.player_id for player in selection.players),
         pinned=pinned,
+        config=config,
     )
     if not routing.applied:
         return RoutedCandidateSelection(selection=selection, routing=routing)
@@ -287,9 +424,11 @@ def select_ownership_routing(
     as_of: datetime,
     candidate_player_ids: frozenset[int],
     pinned: PinnedOwnershipRouting | None = None,
+    config: OwnershipModelConfig | None = None,
 ) -> OwnershipRouting:
     """Decide whether a scenario set may replace the vendor ownership, and say why."""
 
+    governance = config or routing_config()
     pinned_run_id = None if pinned is None else pinned.scenario_run_id
     if slate_type != "classic":
         # A classic optimizer candidate carries one ownership value and no captain/flex
@@ -332,7 +471,23 @@ def select_ownership_routing(
             f"{contest_archetype} as of the decision; the vendor baseline was applied",
         )
 
-    evaluation = _latest_evaluation(
+    if str(header["config_sha256"]) != governance.config_sha256:
+        # The set was capped and calibrated under one configuration; Stage 4 re-asserts
+        # caps under another. Governing rows under a configuration they were not written
+        # under is not a permission check, so refuse. A build says regenerate; a replay
+        # cannot get here, because it governs under the bytes the decision froze.
+        raise OwnershipRoutingError(
+            f"ownership scenario set {str(header['run_id'])!r} was written under ownership "
+            f"configuration {str(header['config_sha256'])!r}, but Stage 4 is governing "
+            f"under {governance.config_sha256!r} ({governance.config_version}); "
+            + (
+                "the frozen decision cannot be routed under a different configuration"
+                if pinned_run_id is not None
+                else "regenerate the set with `na-ownership scenarios` under the current file"
+            )
+        )
+
+    evaluation = latest_evaluation_status(
         session,
         site=site.value,
         contest_archetype=contest_archetype,
@@ -349,12 +504,12 @@ def select_ownership_routing(
             "so nothing has shown it beats the vendor baseline; the vendor baseline was "
             "applied",
         )
-    if not bool(evaluation["beat_baseline"]):
+    if not evaluation.beat_baseline:
         return _refuse_or_baseline(
             pinned_run_id,
             contest_archetype,
             role,
-            f"the newest out-of-week evaluation {str(evaluation['model_eval_id'])!r} did not "
+            f"the newest out-of-week evaluation {evaluation.model_eval_id!r} did not "
             "beat the untouched vendor baseline; the vendor baseline was applied",
         )
 
@@ -383,7 +538,7 @@ def select_ownership_routing(
         decision_snapshot_id=str(header["decision_snapshot_id"]),
         as_of=as_of,
     )
-    provenance = _episode_provenance(
+    provenance = feature_provenance(
         session,
         slate_id=slate_id,
         site=site.value,
@@ -393,17 +548,22 @@ def select_ownership_routing(
         as_of=as_of,
     )
     deltas = tuple(
-        _delta(row, provenance.get(int(row["player_id"])))
+        _delta(
+            row,
+            provenance.get(int(row["player_id"])),
+            threshold=governance.evaluation.material_delta,
+        )
         for row in rows
         if int(row["player_id"]) in candidate_player_ids
     )
     governance_status = str(header["governance_status"])
-    cap = CLASSIC_CAPS.get(governance_status)
-    if cap is None:
+    capped = governance.cap_for(ROUTING_SLATE_KIND, governance_status)
+    if capped is None:
         raise OwnershipRoutingError(
             f"ownership scenario set {str(header['run_id'])!r} carries governance status "
             f"{governance_status!r}, which Stage 4 has no cap for"
         )
+    cap = capped.maximum_delta
     # The permission layer re-asserts the magnitude cap (§12.2.5) on the stored rows: a
     # row that moved past its own status's cap is a broken set, whoever wrote it.
     over_cap = tuple(delta for delta in deltas if abs(delta.delta) > cap + DELTA_TOLERANCE)
@@ -425,7 +585,8 @@ def select_ownership_routing(
     if broken:
         raise OwnershipRoutingError(
             f"ownership scenario set {str(header['run_id'])!r} moves {len(broken)} player(s) "
-            f"by more than {MATERIAL_DELTA * 100:.1f} point(s) on episodes with no evidence "
+            f"by more than {governance.evaluation.material_delta * 100:.1f} point(s) on "
+            "episodes with no evidence "
             "excerpt behind them, so the delta cannot be traced to evidence (§8.3): "
             + ", ".join(
                 f"player {delta.player_id} {delta.delta_points:+.2f}pt" for delta in broken[:10]
@@ -448,7 +609,8 @@ def select_ownership_routing(
         if not held
         else (
             f"; {len(held)} player(s) held at the vendor baseline because the set moved them "
-            f"more than {MATERIAL_DELTA * 100:.1f} point(s) with no narrative episode behind "
+            f"more than {governance.evaluation.material_delta * 100:.1f} point(s) with no "
+            "narrative episode behind "
             "the move: "
             + ", ".join(
                 f"player {delta.player_id} "
@@ -463,7 +625,7 @@ def select_ownership_routing(
             f"applied ownership scenario set {str(header['run_id'])!r} at governance status "
             f"{governance_status} "
             f"(multiplier {float(header['status_multiplier']):.2f}); evaluation "
-            f"{str(evaluation['model_eval_id'])!r} beat the untouched vendor baseline"
+            f"{evaluation.model_eval_id!r} beat the untouched vendor baseline"
             + held_note
         ),
         contest_archetype=contest_archetype,
@@ -472,7 +634,7 @@ def select_ownership_routing(
         scenario_decision_snapshot_id=str(header["decision_snapshot_id"]),
         model_run_id=str(header["model_run_id"]),
         model_version=str(header["model_version"]),
-        model_eval_id=str(evaluation["model_eval_id"]),
+        model_eval_id=evaluation.model_eval_id,
         governance_status=str(header["governance_status"]),
         status_multiplier=float(header["status_multiplier"]),
         config_sha256=str(header["config_sha256"]),
@@ -606,7 +768,7 @@ def _scenario_set(
     return rows[0] if rows else None
 
 
-def _latest_evaluation(
+def latest_evaluation_status(
     session: PointInTimeQuery,
     *,
     site: str,
@@ -614,10 +776,18 @@ def _latest_evaluation(
     feature_version: str,
     config_sha256: str,
     as_of: datetime,
-) -> sqlite3.Row | None:
+) -> EvaluationVerdict | None:
+    """The newest out-of-week ownership evaluation for this model and configuration.
+
+    The one gate: Stage 4 asks it before routing a set to the optimizer, `na-ownership
+    scenarios` asks it before writing rows at all, and the audit view asks it to say which
+    number reached the optimizer. ``None`` means no evaluation exists yet — which is not
+    the same as a losing one, and the three callers say so in their own words.
+    """
+
     rows = session.query(
         """
-        SELECT model_eval_id, beat_baseline, report_path, observed_at
+        SELECT model_eval_id, beat_baseline
         FROM model_evals
         WHERE evaluation_kind = 'ownership' AND ownership_site = :site
           AND ownership_archetype = :contest_archetype
@@ -637,7 +807,12 @@ def _latest_evaluation(
         },
         as_of=as_of,
     )
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    return EvaluationVerdict(
+        model_eval_id=str(rows[0]["model_eval_id"]),
+        beat_baseline=bool(rows[0]["beat_baseline"]),
+    )
 
 
 def _scenario_rows(
@@ -680,7 +855,7 @@ def _scenario_feature_instant(
     return str(rows[0]["decision_at"])
 
 
-def _episode_provenance(
+def feature_provenance(
     session: PointInTimeQuery,
     *,
     slate_id: int,
@@ -689,8 +864,13 @@ def _episode_provenance(
     feature_as_of: str,
     feature_version: str,
     as_of: datetime,
-) -> Mapping[int, tuple[str, tuple[str, ...], tuple[EvidenceRef, ...]]]:
-    """Join each player's heat features back to their episodes and evidence excerpts."""
+) -> Mapping[int, PlayerProvenance]:
+    """Join each player's heat features back to their episodes and evidence excerpts.
+
+    The one provenance read: Stage 4 asks it which episodes stand behind a delta before
+    applying one, and the audit view asks it the same question afterwards so a reader sees
+    the rows the routing decided on rather than a second query that could disagree.
+    """
 
     parameters = {
         "slate_id": slate_id,
@@ -714,87 +894,205 @@ def _episode_provenance(
         parameters,
         as_of=as_of,
     )
-    evidence = session.query(
-        """
-        SELECT nf.player_id, episode.value AS episode_id, ec.claim_id, ec.relation,
-               ec.source_id, ec.source_family, ref.source_item_id,
-               ref.source_text_sha256, ref.extract_start, ref.extract_end,
-               ref.verbatim_extract
-        FROM narrative_features AS nf,
-             json_each(nf.episode_ids_json) AS episode
-        JOIN narrative_episodes AS ne
-          ON ne.episode_id = episode.value
-         AND rtrim(ne.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ne.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ne.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-         AND (ne.valid_to IS NULL OR rtrim(ne.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        JOIN episode_claims AS ec
-          ON ec.episode_id = ne.episode_id
-         AND rtrim(ec.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ec.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ec.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-         AND (ec.valid_to IS NULL OR rtrim(ec.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        JOIN claim_evidence_refs AS ref
-          ON ref.claim_id = ec.claim_id
-         AND rtrim(ref.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ref.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-         AND rtrim(ref.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-         AND (ref.valid_to IS NULL OR rtrim(ref.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        WHERE nf.slate_id = :slate_id AND nf.site = :site AND nf.role = :role
-          AND nf.as_of = :feature_as_of AND nf.feature_version = :feature_version
-          AND rtrim(nf.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(nf.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-        ORDER BY nf.player_id, episode.value, ec.claim_id, ref.ordinal
-        """,
-        parameters,
-        as_of=as_of,
-    )
-    refs: dict[int, list[EvidenceRef]] = {}
-    for row in evidence:
-        refs.setdefault(int(row["player_id"]), []).append(
-            EvidenceRef(
-                episode_id=str(row["episode_id"]),
-                claim_id=str(row["claim_id"]),
-                relation=str(row["relation"]),
-                source_id=str(row["source_id"]),
-                source_family=str(row["source_family"]),
-                source_item_id=int(row["source_item_id"]),
-                source_text_sha256=str(row["source_text_sha256"]),
-                extract_start=int(row["extract_start"]),
-                extract_end=int(row["extract_end"]),
-                verbatim_extract=(
-                    None
-                    if row["verbatim_extract"] is None
-                    else str(row["verbatim_extract"])
-                ),
-            )
-        )
-    provenance: dict[int, tuple[str, tuple[str, ...], tuple[EvidenceRef, ...]]] = {}
+    cited: dict[int, tuple[str, tuple[str, ...]]] = {}
     for row in features:
-        player_id = int(row["player_id"])
         episode_ids = json.loads(str(row["episode_ids_json"]))
         if not isinstance(episode_ids, list):
             raise OwnershipRoutingError(
                 f"narrative feature {row['feature_id']} stores non-array episode ids"
             )
-        provenance[player_id] = (
+        cited[int(row["player_id"])] = (
             str(row["feature_id"]),
             tuple(str(value) for value in episode_ids),
-            tuple(sorted(refs.get(player_id, ()))),
         )
-    return provenance
+    everything = {
+        episode.episode_id: episode
+        for episode in episode_provenance(
+            session,
+            tuple(sorted({value for _, ids in cited.values() for value in ids})),
+            as_of=as_of,
+        )
+    }
+    return {
+        player_id: PlayerProvenance(
+            feature_id=feature_id,
+            episode_ids=episode_ids,
+            episodes=tuple(
+                everything[value] for value in episode_ids if value in everything
+            ),
+            evidence_refs=tuple(
+                sorted(
+                    reference
+                    for value in episode_ids
+                    if value in everything
+                    for reference in everything[value].evidence_refs
+                )
+            ),
+        )
+        for player_id, (feature_id, episode_ids) in cited.items()
+    }
+
+
+def episode_provenance(
+    session: PointInTimeQuery,
+    episode_ids: Sequence[str],
+    *,
+    as_of: datetime,
+) -> tuple[ProvenanceEpisode, ...]:
+    """Read the named episodes with their claims and verbatim evidence, as of ``as_of``.
+
+    Three bounded reads rather than one row-multiplying join, so an episode with no claim
+    and a claim with no surviving excerpt both come back — the audit view shows them, and
+    Stage 4 refuses on the second (§8.3). Episodes are ordered as they opened, claims by
+    relation then id, excerpts by their ordinal in the source text.
+    """
+
+    if not episode_ids:
+        return ()
+    ordered = tuple(dict.fromkeys(episode_ids))
+    placeholders, parameters = _id_list("episode", ordered)
+    episodes = session.query(
+        f"""
+        SELECT episode_id, claim_dimension, opened_at, last_item_at, as_of,
+               method_version, window_hours, unique_source_count,
+               unique_source_family_count, source_entropy, velocity_per_6h,
+               recency_hours, n_events, item_count
+        FROM narrative_episodes
+        WHERE episode_id IN ({placeholders})
+          AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
+        ORDER BY rtrim(opened_at, 'Z'), episode_id
+        """,
+        parameters,
+        as_of=as_of,
+    )
+    claims = session.query(
+        f"""
+        SELECT ec.episode_id, ec.claim_id, ec.relation, ec.similarity_score,
+               ec.linked_claim_id, ec.source_id, ec.source_family, ec.source_item_id,
+               c.claim_type, c.claim_dimension, c.outcome_direction,
+               c.roster_behavior_direction, c.evidence_class, c.evidence_basis,
+               c.falsifiable, item.title, item.observed_at
+        FROM episode_claims AS ec
+        JOIN claims AS c ON c.claim_id = ec.claim_id
+        JOIN source_items AS item ON item.source_item_id = ec.source_item_id
+        WHERE ec.episode_id IN ({placeholders})
+          AND rtrim(ec.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ec.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ec.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (ec.valid_to IS NULL OR rtrim(ec.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(c.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(c.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(c.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (c.valid_to IS NULL OR rtrim(c.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(item.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(item.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(item.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (item.valid_to IS NULL OR rtrim(item.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+        ORDER BY ec.episode_id, ec.relation, ec.claim_id
+        """,
+        parameters,
+        as_of=as_of,
+    )
+    excerpts: dict[str, list[ProvenanceEvidence]] = {}
+    claim_ids = tuple(dict.fromkeys(str(row["claim_id"]) for row in claims))
+    if claim_ids:
+        claim_placeholders, claim_parameters = _id_list("claim", claim_ids)
+        for row in session.query(
+            f"""
+            SELECT claim_id, ordinal, source_item_id, source_text_sha256, extract_start,
+                   extract_end, verbatim_extract, observed_at
+            FROM claim_evidence_refs
+            WHERE claim_id IN ({claim_placeholders})
+              AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
+            ORDER BY claim_id, ordinal
+            """,
+            claim_parameters,
+            as_of=as_of,
+        ):
+            excerpts.setdefault(str(row["claim_id"]), []).append(
+                ProvenanceEvidence(
+                    ordinal=int(row["ordinal"]),
+                    source_item_id=int(row["source_item_id"]),
+                    source_text_sha256=str(row["source_text_sha256"]),
+                    extract_start=int(row["extract_start"]),
+                    extract_end=int(row["extract_end"]),
+                    # A tombstoned excerpt is cleared, not deleted; offsets and hash remain.
+                    verbatim_extract=(
+                        None
+                        if row["verbatim_extract"] is None
+                        else str(row["verbatim_extract"])
+                    ),
+                    observed_at=str(row["observed_at"]),
+                )
+            )
+    by_episode: dict[str, list[ProvenanceClaim]] = {}
+    for row in claims:
+        by_episode.setdefault(str(row["episode_id"]), []).append(
+            ProvenanceClaim(
+                claim_id=str(row["claim_id"]),
+                relation=str(row["relation"]),
+                similarity_score=float(row["similarity_score"]),
+                linked_claim_id=(
+                    None if row["linked_claim_id"] is None else str(row["linked_claim_id"])
+                ),
+                source_id=str(row["source_id"]),
+                source_family=str(row["source_family"]),
+                source_item_id=int(row["source_item_id"]),
+                claim_type=str(row["claim_type"]),
+                claim_dimension=str(row["claim_dimension"]),
+                outcome_direction=str(row["outcome_direction"]),
+                roster_behavior_direction=str(row["roster_behavior_direction"]),
+                evidence_class=str(row["evidence_class"]),
+                evidence_basis=str(row["evidence_basis"]),
+                falsifiable=bool(row["falsifiable"]),
+                item_title=None if row["title"] is None else str(row["title"]),
+                item_observed_at=str(row["observed_at"]),
+                evidence=tuple(excerpts.get(str(row["claim_id"]), ())),
+            )
+        )
+    return tuple(
+        ProvenanceEpisode(
+            episode_id=str(row["episode_id"]),
+            claim_dimension=str(row["claim_dimension"]),
+            opened_at=str(row["opened_at"]),
+            last_item_at=str(row["last_item_at"]),
+            as_of=str(row["as_of"]),
+            method_version=str(row["method_version"]),
+            window_hours=float(row["window_hours"]),
+            unique_source_count=int(row["unique_source_count"]),
+            unique_source_family_count=int(row["unique_source_family_count"]),
+            source_entropy=float(row["source_entropy"]),
+            velocity_per_6h=float(row["velocity_per_6h"]),
+            recency_hours=float(row["recency_hours"]),
+            n_events=int(row["n_events"]),
+            item_count=int(row["item_count"]),
+            claims=tuple(by_episode.get(str(row["episode_id"]), ())),
+        )
+        for row in episodes
+    )
+
+
+def _id_list(prefix: str, values: Sequence[str]) -> tuple[str, dict[str, object]]:
+    """Bind an id list by name; SQLite has no array parameter and this stays escaped."""
+
+    placeholders = ", ".join(f":{prefix}_{index}" for index in range(len(values)))
+    return placeholders, {f"{prefix}_{index}": value for index, value in enumerate(values)}
 
 
 def _delta(
-    row: sqlite3.Row,
-    provenance: tuple[str, tuple[str, ...], tuple[EvidenceRef, ...]] | None,
+    row: sqlite3.Row, provenance: PlayerProvenance | None, *, threshold: float
 ) -> AppliedOwnershipDelta:
     if provenance is None:
         raise OwnershipRoutingError(
             f"ownership scenario for player {int(row['player_id'])} has no narrative "
             "feature row at the instant it was built, so its delta cannot be traced"
         )
-    feature_id, episode_ids, evidence = provenance
     return AppliedOwnershipDelta(
         player_id=int(row["player_id"]),
         role=str(row["role"]),
@@ -806,10 +1104,11 @@ def _delta(
         ownership_p90=float(row["ownership_p90"]),
         delta_p50=float(row["delta_p50"]),
         prob_delta_positive=float(row["prob_delta_positive"]),
-        feature_id=feature_id,
-        episode_ids=episode_ids,
-        evidence_refs=evidence,
+        feature_id=provenance.feature_id,
+        episode_ids=provenance.episode_ids,
+        evidence_refs=provenance.evidence_refs,
         proposed_ownership=float(row["applied_ownership"]),
+        material_threshold=threshold,
     )
 
 

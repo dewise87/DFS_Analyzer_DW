@@ -23,14 +23,17 @@ from narrative_alpha.candidate_selection import (
 )
 from narrative_alpha.identity import PlayerCrosswalk
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
+from narrative_alpha.ownership_config import OwnershipModelConfig
 from narrative_alpha.ownership_routing import (
     MANIFEST_ARTIFACT_KIND as OWNERSHIP_SCENARIO_ARTIFACT_KIND,
 )
 from narrative_alpha.ownership_routing import (
+    OWNERSHIP_CONFIG_ARTIFACT_KIND,
     OwnershipRouting,
     OwnershipRoutingError,
     PinnedOwnershipRouting,
     record_ownership_routing,
+    routing_config,
     select_routed_candidate_scenario,
 )
 from narrative_alpha.portfolio import (
@@ -171,6 +174,7 @@ def build_decision(
     ownership_routing: PinnedOwnershipRouting | None = None,
     contest_policy: ContestPolicies | None = None,
     contest_policy_path: Path = DEFAULT_CONTEST_POLICIES_PATH,
+    ownership_config: OwnershipModelConfig | None = None,
 ) -> BuildResult:
     """Build, freeze, replay, and atomically commit one DFS decision.
 
@@ -244,6 +248,7 @@ def build_decision(
             adapter=selected_adapter,
             ownership_routing=ownership_routing,
             contest_policy=policies,
+            ownership_config=ownership_config,
         )
     with connect_database(database_path) as owned:
         apply_migrations(owned)
@@ -265,6 +270,7 @@ def build_decision(
                 adapter=selected_adapter,
                 ownership_routing=ownership_routing,
                 contest_policy=policies,
+                ownership_config=ownership_config,
             )
         except Exception:
             owned.rollback()
@@ -305,8 +311,10 @@ def _build_in_transaction(
     adapter: OptimizerAdapter,
     ownership_routing: PinnedOwnershipRouting | None = None,
     contest_policy: ContestPolicies,
+    ownership_config: OwnershipModelConfig | None = None,
 ) -> BuildResult:
     session = PointInTimeSession(connection)
+    governance = ownership_config or routing_config()
     try:
         slate = session.slate(slate_id, as_of=decision_at)
     except ReplayError as error:
@@ -329,6 +337,7 @@ def _build_in_transaction(
             contest_archetype=contest_archetype.value,
             as_of=decision_at,
             pinned=ownership_routing,
+            config=governance,
         )
     except CandidateSelectionError as error:
         raise BuildDataError(str(error)) from error
@@ -383,10 +392,15 @@ def _build_in_transaction(
 
     request_relative_path = f"{decision_snapshot_id}/optimizer_request.json"
     lineups_relative_path = f"{decision_snapshot_id}/generated_lineups.csv"
+    if routing.applied and not governance.raw_bytes:
+        raise BuildRoutingError(
+            "the ownership configuration carries no bytes to freeze beside the decision"
+        )
     manifest = _decision_manifest(
         selected,
         routing,
         contest_policy=contest_policy,
+        ownership_config=governance if routing.applied else None,
         request_sha256=request_sha256,
         request_path=request_relative_path,
         lineups_sha256=upload_sha256,
@@ -400,6 +414,7 @@ def _build_in_transaction(
         lineups_bytes=upload_bytes,
         manifest_bytes=manifest_bytes,
         contest_policy_bytes=contest_policy.raw_bytes,
+        ownership_config_bytes=governance.raw_bytes if routing.applied else None,
     )
     try:
         return _commit_and_verify(
@@ -561,6 +576,7 @@ def _decision_manifest(
     routing: OwnershipRouting,
     contest_policy: ContestPolicies,
     *,
+    ownership_config: OwnershipModelConfig | None = None,
     request_sha256: str,
     request_path: str,
     lineups_sha256: str,
@@ -590,7 +606,20 @@ def _decision_manifest(
             ),
         )
     )
+    frozen_config = (
+        ()
+        if ownership_config is None
+        else (
+            DecisionManifestHash(
+                artifact_kind=OWNERSHIP_CONFIG_ARTIFACT_KIND,
+                sha256=ownership_config.config_sha256,
+                path=f"{request_path.rsplit('/', 1)[0]}/ownership_config.toml",
+                source=ownership_config.config_version,
+            ),
+        )
+    )
     generated = (
+        *frozen_config,
         DecisionManifestHash(
             artifact_kind=CONTEST_POLICY_ARTIFACT_KIND,
             sha256=contest_policy.sha256,
@@ -637,6 +666,7 @@ def _write_artifacts(
     lineups_bytes: bytes,
     manifest_bytes: bytes,
     contest_policy_bytes: bytes,
+    ownership_config_bytes: bytes | None = None,
 ) -> _WrittenArtifacts:
     directory = artifact_root / decision_snapshot_id
     request_path = directory / "optimizer_request.json"
@@ -650,6 +680,8 @@ def _write_artifacts(
         lineups_path.write_bytes(lineups_bytes)
         manifest_path.write_bytes(manifest_bytes)
         contest_policy_path.write_bytes(contest_policy_bytes)
+        if ownership_config_bytes is not None:
+            (directory / "ownership_config.toml").write_bytes(ownership_config_bytes)
     except OSError as error:
         raise BuildArtifactError(f"cannot write decision artifacts: {error}") from error
     return _WrittenArtifacts(

@@ -36,7 +36,11 @@ from narrative_alpha.portfolio import (
     UploadEntry,
     ValidationResult,
 )
-from narrative_alpha.replay import FrozenDecision, read_frozen_decision
+from narrative_alpha.replay import (
+    FrozenDecision,
+    ownership_config_from_manifest,
+    read_frozen_decision,
+)
 from narrative_alpha.snapshots import CaptureKind, capture_files
 from narrative_alpha.store import (
     ModelRunRow,
@@ -314,6 +318,9 @@ def process_official_inactives(
                 # pinned lineups and replacements must be priced from one ownership.
                 ownership_routing=pinned_routing_from_manifest(
                     base.snapshot.manifest_hashes_json
+                ),
+                ownership_config=ownership_config_from_manifest(
+                    base.snapshot.manifest_hashes_json, artifact_directory
                 ),
                 # Re-freeze against the exact policy bytes named by the base manifest.
                 # This carries its ownership band, uniqueness, objective, and exposure

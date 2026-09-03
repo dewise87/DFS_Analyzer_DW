@@ -16,11 +16,18 @@ the decision's ``decision_at`` is the cutoff, and every query is bound to it.
 Read-only by construction. Every query goes through :class:`PointInTimeSession`, which
 refuses SQL that omits the ``:as_of`` bind, so a claim observed after the decision cannot
 appear here however the caller asks. There is no write path in this module.
+
+The episode, claim, and evidence rows are not read here at all: they come from
+:func:`narrative_alpha.ownership_routing.episode_provenance`, the same join Stage 4 decides
+on, so this page cannot exonerate a delta the permission layer refused. The one file this
+module can read is a decision's frozen optimizer request, and only when the caller names an
+artifact root: a decision's contest archetype is frozen there and in no column.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import sqlite3
@@ -39,12 +46,20 @@ from narrative_alpha.narrative.source_catalog import (
 )
 from narrative_alpha.ownership_routing import (
     MANIFEST_ARTIFACT_KIND,
+    EvaluationVerdict,
+    ProvenanceClaim,
+    episode_provenance,
+    latest_evaluation_status,
     pinned_routing_from_manifest,
     stored_ownership_routing,
 )
 from narrative_alpha.replay import PointInTimeSession, ReplayError
 
 DEFAULT_SOURCE_CATALOG_PATH = Path("config/narrative_sources.toml")
+
+#: The manifest entry naming the request a decision froze — the only record of which
+#: contest archetype that decision asked the optimizer for.
+OPTIMIZER_REQUEST_ARTIFACT_KIND = "optimizer_request"
 
 # How many excerpts an evidence search returns when the caller names no limit, and the
 # ceiling it may raise that to. A search is a way in, not a bulk export: a reader who
@@ -301,8 +316,16 @@ def player_audit(
     player_id: int,
     decision_snapshot_id: str,
     catalog_path: Path | None = DEFAULT_SOURCE_CATALOG_PATH,
+    artifact_root: Path | None = None,
 ) -> PlayerAudit:
-    """Assemble one player's signal and evidence lineage as of a frozen decision."""
+    """Assemble one player's signal and evidence lineage as of a frozen decision.
+
+    ``artifact_root`` is optional and read-only: given it, the decision's own contest
+    archetype is read from its frozen optimizer request, and the scenario set this page
+    explains is scoped to that archetype the way Stage 4's own lookup was. Without it the
+    store alone is read — a decision's archetype is frozen in the request, not in a
+    column — and the page says which scenario set it fell back to describing.
+    """
 
     session = PointInTimeSession(connection)
     decision_at = _decision_instant(connection, decision_snapshot_id)
@@ -336,12 +359,18 @@ def player_audit(
     if feature_note is not None:
         notes.append(feature_note)
 
+    contest_archetype, archetype_note = _frozen_contest_archetype(
+        snapshot.manifest_hashes_json, artifact_root
+    )
+    if archetype_note is not None:
+        notes.append(archetype_note)
     ownership = _ownership(
         session,
         snapshot_manifest=snapshot.manifest_hashes_json,
         player_id=player_id,
         slate_id=slate.slate_id,
         site=slate.site,
+        contest_archetype=contest_archetype,
         as_of=decision_at,
     )
 
@@ -986,6 +1015,61 @@ def _routing_record(row: sqlite3.Row) -> DecisionRoutingRecord:
     )
 
 
+def _frozen_contest_archetype(
+    manifest: tuple[object, ...], artifact_root: Path | None
+) -> tuple[str | None, str | None]:
+    """The decision's own contest archetype, read from the request it froze.
+
+    A decision's archetype lives in the optimizer request and in no column, so without an
+    artifact root there is nothing sound to scope by and the caller is told so. With one,
+    the request must hash to what the manifest recorded: an artifact that contradicts the
+    manifest is a store the reader must not be quietly shown around.
+    """
+
+    if artifact_root is None:
+        return None, None
+    artifacts = [
+        item
+        for item in manifest
+        if getattr(item, "artifact_kind", None) == OPTIMIZER_REQUEST_ARTIFACT_KIND
+    ]
+    if len(artifacts) != 1:
+        raise AuditError(
+            f"decision manifest must contain exactly one {OPTIMIZER_REQUEST_ARTIFACT_KIND} "
+            f"artifact; it names {len(artifacts)}"
+        )
+    relative = str(getattr(artifacts[0], "path", ""))
+    root = artifact_root.resolve()
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise AuditError(f"artifact path escapes artifact root: {relative}") from error
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        return None, (
+            f"the frozen optimizer request is not readable under {root} ({error.strerror}), "
+            "so the scenario set below is the newest for this slate and site rather than "
+            "the newest for this decision's contest archetype"
+        )
+    if hashlib.sha256(raw).hexdigest() != str(getattr(artifacts[0], "sha256", "")):
+        raise AuditError(
+            f"frozen optimizer request {relative} does not hash to the value the decision "
+            "manifest recorded"
+        )
+    try:
+        request = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuditError(f"frozen optimizer request {relative} is not valid JSON") from error
+    archetype = None if not isinstance(request, dict) else request.get("contest_archetype")
+    if not isinstance(archetype, str) or not archetype.strip():
+        raise AuditError(
+            f"frozen optimizer request {relative} names no contest archetype"
+        )
+    return archetype, None
+
+
 def _decision_instant(connection: sqlite3.Connection, decision_snapshot_id: str) -> datetime:
     """The one unbounded read: the cutoff every other read in this module is bound to."""
 
@@ -1124,6 +1208,7 @@ def _ownership(
     player_id: int,
     slate_id: int,
     site: str,
+    contest_archetype: str | None,
     as_of: datetime,
 ) -> AuditOwnership:
     """The vendor number, the applied number, and which of the two the optimizer got."""
@@ -1147,46 +1232,34 @@ def _ownership(
     vendor_source = None if not baseline else str(baseline[0]["source"])
     vendor_at = None if not baseline else _stamp(str(baseline[0]["observed_at"]))
 
+    # Scoped by the decision's own contest archetype when the frozen request named one:
+    # Stage 4 looked for a set of *this* decision's archetype, and a newer set built for
+    # another one explains nothing about the number this optimizer read.
     available = session.query(
         """
         SELECT run_id, governance_status, contest_archetype, feature_version,
                config_sha256
         FROM ownership_scenarios
         WHERE slate_id = :slate_id AND site = :site
+          AND (:contest_archetype IS NULL OR contest_archetype = :contest_archetype)
           AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
           AND rtrim(created_at, 'Z') <= rtrim(:as_of, 'Z')
         ORDER BY rtrim(observed_at, 'Z') DESC, run_id DESC
         LIMIT 1
         """,
-        {"slate_id": slate_id, "site": site},
+        {"slate_id": slate_id, "site": site, "contest_archetype": contest_archetype},
         as_of=as_of,
     )
-    verdict: sqlite3.Row | None = None
+    verdict: EvaluationVerdict | None = None
     if available:
-        verdict_rows = session.query(
-            """
-            SELECT model_eval_id, beat_baseline
-            FROM model_evals
-            WHERE evaluation_kind = 'ownership' AND ownership_site = :site
-              AND ownership_archetype = :contest_archetype
-              AND feature_version = :feature_version
-              AND config_sha256 = :config_sha256
-              AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
-              AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-              AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
-              AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
-            ORDER BY rtrim(observed_at, 'Z') DESC, model_eval_id DESC
-            LIMIT 1
-            """,
-            {
-                "site": site,
-                "contest_archetype": str(available[0]["contest_archetype"]),
-                "feature_version": str(available[0]["feature_version"]),
-                "config_sha256": str(available[0]["config_sha256"]),
-            },
+        verdict = latest_evaluation_status(
+            session,
+            site=site,
+            contest_archetype=str(available[0]["contest_archetype"]),
+            feature_version=str(available[0]["feature_version"]),
+            config_sha256=str(available[0]["config_sha256"]),
             as_of=as_of,
         )
-        verdict = verdict_rows[0] if verdict_rows else None
 
     common: dict[str, object] = {
         "vendor_baseline": vendor,
@@ -1197,12 +1270,8 @@ def _ownership(
         "available_scenario_status": (
             None if not available else str(available[0]["governance_status"])
         ),
-        "evaluation_model_eval_id": (
-            None if verdict is None else str(verdict["model_eval_id"])
-        ),
-        "evaluation_beat_baseline": (
-            None if verdict is None else bool(verdict["beat_baseline"])
-        ),
+        "evaluation_model_eval_id": None if verdict is None else verdict.model_eval_id,
+        "evaluation_beat_baseline": None if verdict is None else verdict.beat_baseline,
     }
 
     # The manifest is the decision's own record of Stage 4: an `ownership_scenarios`
@@ -1262,7 +1331,7 @@ def _ownership(
     )
 
 
-def _baseline_reason(available: bool, verdict: sqlite3.Row | None) -> str:
+def _baseline_reason(available: bool, verdict: EvaluationVerdict | None) -> str:
     if not available:
         return (
             "the vendor baseline reached the optimizer: no ownership scenario set existed "
@@ -1273,10 +1342,10 @@ def _baseline_reason(available: bool, verdict: sqlite3.Row | None) -> str:
             "the vendor baseline reached the optimizer: a scenario set existed but no "
             "out-of-week evaluation had shown it beats the baseline"
         )
-    if not bool(verdict["beat_baseline"]):
+    if not verdict.beat_baseline:
         return (
             "the vendor baseline reached the optimizer: the newest out-of-week evaluation "
-            f"{verdict['model_eval_id']!s} did not beat the untouched vendor baseline"
+            f"{verdict.model_eval_id!s} did not beat the untouched vendor baseline"
         )
     return (
         "the vendor baseline reached the optimizer: a set existed and its evaluation won, "
@@ -1319,167 +1388,74 @@ def _episodes(
     as_of: datetime,
     grades: _GradeBook,
 ) -> tuple[AuditEpisode, ...]:
-    if not episode_ids:
-        return ()
-    placeholders = ", ".join(f":episode_{index}" for index in range(len(episode_ids)))
-    parameters = {f"episode_{index}": value for index, value in enumerate(episode_ids)}
-    rows = session.query(
-        f"""
-        SELECT episode_id, claim_dimension, opened_at, last_item_at, as_of,
-               method_version, window_hours, unique_source_count,
-               unique_source_family_count, source_entropy, velocity_per_6h,
-               recency_hours, n_events, item_count
-        FROM narrative_episodes
-        WHERE episode_id IN ({placeholders})
-          AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        ORDER BY rtrim(opened_at, 'Z'), episode_id
-        """,
-        parameters,
-        as_of=as_of,
-    )
+    """Render the one provenance join Stage 4 routes on, grading each source as it goes.
+
+    The join itself lives in :mod:`narrative_alpha.ownership_routing`: what the audit shows
+    a reader and what the routing permitted must come from the same rows, or the page can
+    exonerate a delta the permission layer refused. Grades are a rendering concern — they
+    come from the reviewed catalog, not the store — so they are applied here.
+    """
+
     return tuple(
         AuditEpisode(
-            episode_id=str(row["episode_id"]),
-            claim_dimension=str(row["claim_dimension"]),
-            opened_at=_stamp(str(row["opened_at"])),
-            last_item_at=_stamp(str(row["last_item_at"])),
-            as_of=_stamp(str(row["as_of"])),
-            method_version=str(row["method_version"]),
-            window_hours=float(row["window_hours"]),
-            unique_source_count=int(row["unique_source_count"]),
-            unique_source_family_count=int(row["unique_source_family_count"]),
-            source_entropy=float(row["source_entropy"]),
-            velocity_per_6h=float(row["velocity_per_6h"]),
-            recency_hours=float(row["recency_hours"]),
-            n_events=int(row["n_events"]),
-            item_count=int(row["item_count"]),
-            claims=_claims(
-                session, episode_id=str(row["episode_id"]), as_of=as_of, grades=grades
-            ),
+            episode_id=episode.episode_id,
+            claim_dimension=episode.claim_dimension,
+            opened_at=_stamp(episode.opened_at),
+            last_item_at=_stamp(episode.last_item_at),
+            as_of=_stamp(episode.as_of),
+            method_version=episode.method_version,
+            window_hours=episode.window_hours,
+            unique_source_count=episode.unique_source_count,
+            unique_source_family_count=episode.unique_source_family_count,
+            source_entropy=episode.source_entropy,
+            velocity_per_6h=episode.velocity_per_6h,
+            recency_hours=episode.recency_hours,
+            n_events=episode.n_events,
+            item_count=episode.item_count,
+            claims=tuple(_claim(claim, grades) for claim in episode.claims),
         )
-        for row in rows
+        for episode in episode_provenance(session, episode_ids, as_of=as_of)
     )
 
 
-def _claims(
-    session: PointInTimeSession,
-    *,
-    episode_id: str,
-    as_of: datetime,
-    grades: _GradeBook,
-) -> tuple[AuditClaim, ...]:
-    rows = session.query(
-        """
-        SELECT ec.claim_id, ec.relation, ec.similarity_score, ec.linked_claim_id,
-               ec.source_id, ec.source_family, c.claim_type, c.claim_dimension,
-               c.outcome_direction, c.roster_behavior_direction, c.evidence_class,
-               c.evidence_basis, c.falsifiable, item.title, item.observed_at
-        FROM episode_claims AS ec
-        JOIN claims AS c ON c.claim_id = ec.claim_id
-        JOIN source_items AS item ON item.source_item_id = ec.source_item_id
-        WHERE ec.episode_id = :episode_id
-          AND rtrim(ec.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(ec.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(ec.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (ec.valid_to IS NULL OR rtrim(ec.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-          AND rtrim(c.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(c.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(c.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (c.valid_to IS NULL OR rtrim(c.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-          AND rtrim(item.observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(item.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(item.valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (item.valid_to IS NULL OR rtrim(item.valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        ORDER BY ec.relation, ec.claim_id
-        """,
-        {"episode_id": episode_id},
-        as_of=as_of,
+def _claim(claim: ProvenanceClaim, grades: _GradeBook) -> AuditClaim:
+    grade, basis = grades.grade(
+        source_id=claim.source_id, source_family=claim.source_family
     )
-    claims: list[AuditClaim] = []
-    for row in rows:
-        grade, basis = grades.grade(
-            source_id=str(row["source_id"]), source_family=str(row["source_family"])
-        )
-        claims.append(
-            AuditClaim(
-                claim_id=str(row["claim_id"]),
-                relation=str(row["relation"]),
-                similarity_score=float(row["similarity_score"]),
-                linked_claim_id=(
-                    None if row["linked_claim_id"] is None else str(row["linked_claim_id"])
-                ),
-                claim_type=str(row["claim_type"]),
-                claim_dimension=str(row["claim_dimension"]),
-                outcome_direction=str(row["outcome_direction"]),
-                roster_behavior_direction=str(row["roster_behavior_direction"]),
-                evidence_class=str(row["evidence_class"]),
-                evidence_basis=str(row["evidence_basis"]),
-                falsifiable=bool(row["falsifiable"]),
-                source_id=str(row["source_id"]),
-                source_family=str(row["source_family"]),
+    return AuditClaim(
+        claim_id=claim.claim_id,
+        relation=claim.relation,
+        similarity_score=claim.similarity_score,
+        linked_claim_id=claim.linked_claim_id,
+        claim_type=claim.claim_type,
+        claim_dimension=claim.claim_dimension,
+        outcome_direction=claim.outcome_direction,
+        roster_behavior_direction=claim.roster_behavior_direction,
+        evidence_class=claim.evidence_class,
+        evidence_basis=claim.evidence_basis,
+        falsifiable=claim.falsifiable,
+        source_id=claim.source_id,
+        source_family=claim.source_family,
+        source_grade=grade,
+        source_grade_basis=basis,
+        item_title=claim.item_title,
+        item_observed_at=_stamp(claim.item_observed_at),
+        evidence=tuple(
+            AuditEvidence(
+                ordinal=excerpt.ordinal,
+                source_item_id=excerpt.source_item_id,
+                source_id=claim.source_id,
+                source_family=claim.source_family,
                 source_grade=grade,
                 source_grade_basis=basis,
-                item_title=None if row["title"] is None else str(row["title"]),
-                item_observed_at=_stamp(str(row["observed_at"])),
-                evidence=_evidence(
-                    session,
-                    claim_id=str(row["claim_id"]),
-                    source_id=str(row["source_id"]),
-                    source_family=str(row["source_family"]),
-                    as_of=as_of,
-                    grades=grades,
-                ),
+                extract_start=excerpt.extract_start,
+                extract_end=excerpt.extract_end,
+                verbatim_extract=excerpt.verbatim_extract,
+                source_text_sha256=excerpt.source_text_sha256,
+                observed_at=_stamp(excerpt.observed_at),
             )
-        )
-    return tuple(claims)
-
-
-def _evidence(
-    session: PointInTimeSession,
-    *,
-    claim_id: str,
-    source_id: str,
-    source_family: str,
-    as_of: datetime,
-    grades: _GradeBook,
-) -> tuple[AuditEvidence, ...]:
-    rows = session.query(
-        """
-        SELECT ordinal, source_item_id, source_text_sha256, extract_start, extract_end,
-               verbatim_extract, observed_at
-        FROM claim_evidence_refs
-        WHERE claim_id = :claim_id
-          AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
-          AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
-          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(:as_of, 'Z'))
-        ORDER BY ordinal
-        """,
-        {"claim_id": claim_id},
-        as_of=as_of,
-    )
-    grade, basis = grades.grade(source_id=source_id, source_family=source_family)
-    return tuple(
-        AuditEvidence(
-            ordinal=int(row["ordinal"]),
-            source_item_id=int(row["source_item_id"]),
-            source_id=source_id,
-            source_family=source_family,
-            source_grade=grade,
-            source_grade_basis=basis,
-            extract_start=int(row["extract_start"]),
-            extract_end=int(row["extract_end"]),
-            # A tombstoned excerpt is cleared, not deleted; the offsets and hash remain.
-            verbatim_extract=(
-                None if row["verbatim_extract"] is None else str(row["verbatim_extract"])
-            ),
-            source_text_sha256=str(row["source_text_sha256"]),
-            observed_at=_stamp(str(row["observed_at"])),
-        )
-        for row in rows
+            for excerpt in claim.evidence
+        ),
     )
 
 

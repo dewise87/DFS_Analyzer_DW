@@ -13,6 +13,7 @@ import pytest
 from test_ownership_routing import (
     FIRST_DECISION_AT,
     NARRATIVE_PLAYER_NAME,
+    OWNERSHIP_CONFIG_PATH,
     SCENARIOS_AT,
     SECOND_DECISION_AT,
     RoutingFixture,
@@ -21,6 +22,7 @@ from test_ownership_routing import (
     _insert_evaluation,
     _insert_scenario_set,
     _ops_config,
+    _persist_synthetic_fit,
     _seed_narrative_claim,
 )
 
@@ -34,7 +36,8 @@ from narrative_alpha.narrative.audit import (
     resolve_audit_player,
 )
 from narrative_alpha.ops.dashboard import DashboardServer, build_dashboard
-from narrative_alpha.ownership_routing import MATERIAL_DELTA
+from narrative_alpha.ownership import load_ownership_config
+from narrative_alpha.ownership_routing import material_delta
 from narrative_alpha.report_cli import main as report_main
 from narrative_alpha.store import connect_database
 
@@ -172,7 +175,7 @@ def test_an_applied_scenario_set_is_reported_with_its_governance_status(
         baselines = _baselines(connection, fixture)
         applied = dict(baselines)
         applied[fixture.narrative_player_id] = (
-            baselines[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
+            baselines[fixture.narrative_player_id] + material_delta() + 0.01
         )
         run_id = _insert_scenario_set(
             connection, fixture, applied=applied, status="TESTING", at=SCENARIOS_AT
@@ -203,12 +206,89 @@ def test_an_applied_scenario_set_is_reported_with_its_governance_status(
     assert ownership.applied_ownership == pytest.approx(
         applied[fixture.narrative_player_id]
     )
-    assert ownership.delta_points == pytest.approx((MATERIAL_DELTA + 0.01) * 100)
+    assert ownership.delta_points == pytest.approx((material_delta() + 0.01) * 100)
     assert ownership.evaluation_beat_baseline is True
     rendered = render_player_audit(audit)
     assert "ownership_source=scenario_model" in rendered
     assert f"scenario_run_id={run_id}" in rendered
     assert "governance_status=TESTING" in rendered
+
+
+def test_the_available_scenario_set_is_scoped_to_the_decisions_own_archetype(
+    tmp_path: Path,
+) -> None:
+    """A set built for another contest archetype explains nothing about this decision.
+
+    Stage 4 looked for a set of the archetype the request named. The audit says why the
+    vendor baseline reached the optimizer, so it must look for the same one — and the
+    decision's archetype is frozen in its optimizer request, not in a column, which is why
+    the artifact root is what turns the scoping on.
+    """
+
+    fixture = _fixture(tmp_path)
+    with connect_database(fixture.database) as connection:
+        tournament_fit = _persist_synthetic_fit(
+            connection,
+            load_ownership_config(OWNERSHIP_CONFIG_PATH),
+            contest_archetype="3max",
+        )
+        baselines = _baselines(connection, fixture)
+        applied = dict(baselines)
+        applied[fixture.narrative_player_id] = (
+            baselines[fixture.narrative_player_id] + material_delta() + 0.01
+        )
+        other_archetype_run_id = _insert_scenario_set(
+            connection,
+            fixture,
+            applied=applied,
+            status="TESTING",
+            at=SCENARIOS_AT,
+            contest_archetype="3max",
+            model_run_id=tournament_fit,
+        )
+        connection.commit()
+
+    cash = build_decision(
+        fixture.database,
+        slate_id=fixture.slate_id,
+        site="draftkings",
+        decision_at=SECOND_DECISION_AT,
+        artifact_directory=fixture.artifacts,
+        contest_archetype="cash",
+    )
+    assert not cash.ownership_routing.applied
+    decision = cash.snapshot.decision_snapshot_id
+
+    with connect_database(fixture.database) as connection:
+        unscoped = player_audit(
+            connection,
+            player_id=fixture.narrative_player_id,
+            decision_snapshot_id=decision,
+        )
+        scoped = player_audit(
+            connection,
+            player_id=fixture.narrative_player_id,
+            decision_snapshot_id=decision,
+            artifact_root=fixture.artifacts,
+        )
+        missing = player_audit(
+            connection,
+            player_id=fixture.narrative_player_id,
+            decision_snapshot_id=decision,
+            artifact_root=tmp_path / "artifacts-that-moved",
+        )
+
+    # Without the frozen request there is nothing sound to scope by, so the newest set on
+    # the slate is described whichever archetype it was built for.
+    assert unscoped.ownership.available_scenario_run_id == other_archetype_run_id
+    assert scoped.ownership.scenario_set_available is False
+    assert scoped.ownership.available_scenario_run_id is None
+    assert "no ownership scenario set existed" in scoped.ownership.reason
+    # An artifact root that holds no request degrades loudly rather than pretending.
+    assert missing.ownership.available_scenario_run_id == other_archetype_run_id
+    assert any(
+        "frozen optimizer request is not readable" in note for note in missing.notes
+    )
 
 
 def test_the_cli_and_the_page_render_the_same_model(

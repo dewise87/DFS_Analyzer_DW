@@ -21,9 +21,9 @@ from narrative_alpha.interface.red_team import (
     render_red_team_review,
 )
 from narrative_alpha.ownership_routing import (
-    MATERIAL_DELTA,
     AppliedOwnershipDelta,
     OwnershipRouting,
+    material_delta,
     pinned_routing_from_manifest,
 )
 from narrative_alpha.portfolio import (
@@ -38,7 +38,12 @@ from narrative_alpha.portfolio import (
     build_heuristic_report,
     render_heuristic_report,
 )
-from narrative_alpha.replay import PointInTimeSession, ReplayArtifactError, ReplayError
+from narrative_alpha.replay import (
+    PointInTimeSession,
+    ReplayArtifactError,
+    ReplayError,
+    ownership_config_from_manifest,
+)
 from narrative_alpha.store import ContestRow, DecisionSnapshotRow, SlateRow
 
 if TYPE_CHECKING:
@@ -131,7 +136,7 @@ class SlateMemoOwnershipRouting(BaseModel):
         untraceable = tuple(
             delta.player_id
             for delta in self.applied_deltas
-            if abs(delta.delta_points) > MATERIAL_DELTA * 100 and not delta.episode_ids
+            if abs(delta.delta_points) > material_delta() * 100 and not delta.episode_ids
         )
         if untraceable:
             raise ValueError(f"applied deltas without episode provenance: {sorted(untraceable)}")
@@ -585,6 +590,9 @@ def _validate_build_result(
             contest_archetype=request.contest_archetype.value,
             ownership_routing=pinned_routing_from_manifest(
                 build_result.snapshot.manifest_hashes_json
+            ),
+            ownership_config=ownership_config_from_manifest(
+                build_result.snapshot.manifest_hashes_json, build_result.artifact_root
             ),
             as_of=build_result.snapshot.decision_at,
         )

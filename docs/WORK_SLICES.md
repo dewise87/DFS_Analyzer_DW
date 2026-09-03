@@ -2392,6 +2392,57 @@ files as the oracle.
 > Tests: the existing suites and golden files pass unchanged; add one test that the
 > routing threshold and caps come from the config file's bytes. Gates green.
 
+**Implementation status (2026-09-04):** all four, no golden file changed. (1)
+`ownership/config.py` is now the leaf `ownership_config.py` (standard library only), which
+both `ownership_routing` and the `ownership` package import; `MATERIAL_DELTA` and
+`CLASSIC_CAPS` are gone and Stage 4 reads `ROUTING_CONFIG`, loaded once at import from
+`config/ownership_model.toml`. A pinned decision now also checks that hash: a replay whose
+process loaded a different configuration than the set recorded refuses rather than
+re-governing frozen rows under caps that decision never saw. (2) One evaluation gate,
+`ownership_routing.latest_evaluation_status`, returning the eval id and the verdict; the
+routing, `na-ownership scenarios`, and `audit._ownership` all call it, and the copy in
+`ownership/evaluation.py` is deleted. (3) One provenance join: `episode_provenance` reads
+episodes, claims, and excerpts as of a cutoff, `feature_provenance` maps players onto it,
+and `audit.py` renders `AuditEpisode`/`AuditClaim`/`AuditEvidence` from that result —
+grades stay in the audit because they come from the reviewed catalog, not the store. The
+audit's three nested queries (one per episode, one per claim) are gone; it now makes three
+bounded reads however many episodes a player has. (4) `audit._ownership`'s available-set
+query is scoped by the decision's own contest archetype, read from the frozen optimizer
+request; `player_audit` takes an optional `artifact_root` for it (`na-report signals
+--artifact-directory`, and the MCP server passes its own), and without one the store alone
+is read and the page says the set it describes is the newest for the slate, not for the
+archetype. An artifact root that holds no request degrades with that note; one that holds a
+request contradicting the manifest hash refuses.
+
+**Deviations, deliberate:** a decision's contest archetype exists only in its frozen
+optimizer request — no column holds it — so the scoping cannot be unconditional without
+making `player_audit` require artifacts it was designed not to need; the dashboard has no
+artifact root and passes none, so its `/audit` page keeps today's slate-and-site answer.
+Merging the two provenance joins also settled a disagreement between them: the routing's
+join did not require the `claims` and `source_items` rows to be visible at the cutoff and
+the audit's did, so the shared join takes the audit's stricter bounds and Stage 4 is fail
+closed where the two used to differ. Two dead things found on the way and dropped:
+`na-report signals --source-catalog` was parsed and never passed (it now reaches
+`player_audit`), and the routing's config mirror comment. Suite 714 → 715 (two constant-
+pinning tests became one config-bytes test; three added: the config bytes, the pinned-hash
+refusal, and the archetype scoping).
+
+**Review outcome (2026-09-04):** the refactor is sound — no golden file moved and the
+three duplications are gone — with two changes to how the single configuration is read.
+(1) It was loaded at import time from a cwd-relative path, by a module `build` imports and
+nearly every command reaches: a typo in `config/ownership_model.toml` would have broken
+`na-ops status`, and a process started outside the repository root would have failed to
+import anything. The default path now resolves against the source tree, and the routing
+reads the file on first use, so a broken file breaks a build loudly and nothing else.
+(2) A pinned decision was refused on replay whenever the process had loaded a different
+configuration than the set recorded — honest, but it made every routed decision
+unreplayable after the first edit to the file, which the design does not permit. A routed
+decision now freezes the configuration bytes it was governed under beside its other
+artifacts (`ownership_config.toml`, hashed in the manifest), and replay, the memo, and the
+fast lane's re-freeze govern under those bytes. The refusal remains where it belongs: a
+*build* that finds a scenario set written under a different configuration than the current
+file refuses and says to regenerate the set. Suite 715 → 716.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
