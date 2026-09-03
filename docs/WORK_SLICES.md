@@ -2012,7 +2012,7 @@ the reported sums and not one roster — is said once at the block level. The ap
 table says it shows the ten largest of N. Noted, not changed: `_latest_evaluation` in the
 routing duplicates `ownership.evaluation.latest_evaluation_status` because the ownership
 package reaches `build` through `ops.results`; the showdown path labels its role
-"showdown". Suite 629 → 649.
+"showdown". Suite 629 → 648.
 
 ### Slice 31 — Signal and evidence audit view
 
