@@ -1596,6 +1596,9 @@ ManifestArtifactKind = Literal[
     "salary",
     "projection",
     "ownership",
+    # The Stage 4 scenario set whose applied ownership replaced the vendor view; its
+    # hash is over the exact applied rows, not a file (§5.3 Stage 4, §8.4).
+    "ownership_scenarios",
     "market",
     "weather",
     "availability",

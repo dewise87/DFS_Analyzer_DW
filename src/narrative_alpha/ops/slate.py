@@ -762,10 +762,17 @@ def _build_decision(
         )
         reused = True
     into.append(result)
+    routing = result.ownership_routing
     return (
         "succeeded",
         summary
         | {
+            "ownership_source": "scenario_model" if routing.applied else "vendor_baseline",
+            "ownership_routing_reason": routing.reason,
+            "ownership_scenario_run_id": routing.scenario_run_id,
+            "ownership_governance_status": routing.governance_status,
+            "ownership_status_multiplier": routing.status_multiplier,
+            "ownership_material_deltas": len(routing.material_deltas),
             "decision_snapshot_id": result.snapshot.decision_snapshot_id,
             "manifest_hash_set_sha256": result.snapshot.manifest_hash_set_sha256,
             "lineup_count": len(result.lineups),

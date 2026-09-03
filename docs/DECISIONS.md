@@ -262,6 +262,32 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slices 30–31 review outcomes
+
+- **No adjustment without provenance, and no refusal for a move the model did not make.**
+  Stage 4 holds a materially moved player with no episode at the vendor baseline and says
+  so; it refuses only a broken set (episodes with no evidence, or a row past its governance
+  cap). A refusal that fires on intercept and calibration noise would take down every
+  Sunday build for a reason no operator could act on; a silent application would break
+  §8.3. Holding the player is the third option, and it is stated in the record.
+- **Stage 4 re-asserts the cap.** The permission layer checks every stored row against the
+  cap for its governance status rather than trusting whatever wrote the row. The caps are
+  mirrored as constants beside the material-delta threshold and pinned to the config by a
+  test, because the ownership package cannot be imported from the build path.
+- **A re-freeze applies the base decision's routing.** The fast lane passes the base
+  decision's pinned routing into the build, so pinned and replacement lineups are priced
+  from one ownership and a set that landed between Saturday and the inactives cannot enter
+  through the emergency lane.
+- **The reason a decision was or was not routed is a stored fact.** Migration 0017's
+  `decision_ownership_routing` is written by the build in the same transaction as the
+  snapshot. A replay can prove the rows but can only re-derive "no set pinned" for an
+  unrouted decision; the memo and status print the stored reason.
+- **Red-team counts are distinct over the episode set.** Summing per-episode source
+  counts hid the duplicate-source illusion the question exists to expose.
+- **Every dashboard read goes through the point-in-time session.** The audit view's player
+  index was the one bare query in the slice; it now uses the session with normalized
+  timestamps. Bad audit input is a 400, not a 200 with an apology.
+
 ## 2026-09-03 — Slice 29 review outcomes
 
 - **The posterior is quasi-binomial, not binomial.** Actual-ownership labels are counts

@@ -23,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import sqlite3
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -32,7 +33,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
 from narrative_alpha.identity import CrosswalkError, PlayerCrosswalk
@@ -41,6 +42,12 @@ from narrative_alpha.narrative import (
     list_execution_leases,
     list_inflight_extractions,
     list_pending_review_flags,
+)
+from narrative_alpha.narrative.audit import (
+    AuditError,
+    list_audit_candidates,
+    player_audit,
+    resolve_audit_player,
 )
 from narrative_alpha.ops.batch import (
     DEFAULT_DEPENDENCIES,
@@ -333,7 +340,7 @@ def _loopback_host(host: str) -> str:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    """Four read pages, three POST actions, and a 404 that names the four pages."""
+    """Five read pages, three POST actions, and a 404 that names the way back."""
 
     server_version = "na-ops-dashboard"
 
@@ -353,6 +360,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._html(_runs_page(self.context))
             elif path == "/memo":
                 self._html(_memo_page(self.context))
+            elif path == "/audit":
+                self._html(_audit_page(self.context, parse_qs(urlsplit(self.path).query)))
             elif path == "/favicon.ico":
                 # The page has no icon, and a 404 HTML body for every page view would
                 # bury the request log this tool is read through.
@@ -363,6 +372,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._html(
                 _problem_page("The request was refused", str(error)),
                 status=HTTPStatus.MISDIRECTED_REQUEST,
+            )
+        except AuditError as error:
+            self._html(
+                _problem_page("The audit could not be read", str(error)),
+                status=HTTPStatus.BAD_REQUEST,
             )
         except DASHBOARD_REQUEST_ERRORS as error:
             self._html(
@@ -1021,10 +1035,129 @@ def _memo_page(context: DashboardContext) -> str:
         f"<dt>file</dt><dd>{escape(str(path))}</dd>"
         "</dl>"
     )
+    audit_link = (
+        ""
+        if not isinstance(decision, str) or not decision
+        else (
+            "<p><a href=\"/audit?decision="
+            f"{escape(quote(decision, safe=''))}\">signal and evidence audit for this "
+            "decision</a> — every episode, claim, and excerpt behind one player's "
+            "ownership number.</p>"
+        )
+    )
     return _page(
         "latest memo",
-        f"<section><h2>Latest slate memo</h2>{head}<pre>{escape(text)}</pre></section>",
+        f"<section><h2>Latest slate memo</h2>{head}{audit_link}"
+        f"<pre>{escape(text)}</pre></section>",
     )
+
+
+def _audit_page(context: DashboardContext, query: Mapping[str, list[str]]) -> str:
+    """`/audit?decision=<id>&player=<id|name>` — the same model `na-report signals` renders.
+
+    Read-only, like every GET here: it calls :func:`player_audit` and renders what comes
+    back. With no player it lists the decision's candidates, because an operator arrives
+    here from the memo knowing the decision and not yet the player id.
+    """
+
+    decision = _query_value(query, "decision")
+    named_by_caller = decision is not None
+    with connect_database(context.database) as connection:
+        if decision is None:
+            run = last_run(connection, step="slate_memo", status="succeeded")
+            raw = None if run is None else run.summary.get("decision_snapshot_id")
+            decision = raw if isinstance(raw, str) and raw else None
+        if decision is None:
+            return _page(
+                "signal audit",
+                "<section><h2>Signal and evidence audit</h2><p>No decision was named and "
+                "no memo step has recorded one. Open this page from the "
+                '<a href="/memo">latest memo</a>, or add '
+                "<code>?decision=&lt;decision_snapshot_id&gt;</code>.</p></section>",
+            )
+        selector = _query_value(query, "player")
+        if selector is None:
+            try:
+                return _page("signal audit", _audit_player_index(connection, decision))
+            except AuditError as error:
+                if named_by_caller:
+                    raise
+                # The memo step pointed at a decision the store no longer holds. The
+                # caller asked for nothing wrong, so say what happened instead of 400.
+                return _page(
+                    "signal audit",
+                    "<section><h2>Signal and evidence audit</h2><p>The latest memo names "
+                    f"decision <code>{escape(decision)}</code>, and the store cannot audit "
+                    f"it: {escape(str(error))}. Add <code>?decision=&lt;id&gt;</code> to "
+                    "audit another.</p></section>",
+                )
+        # An unknown decision or player, or an ambiguous name, is the caller's error and
+        # is answered as one: `do_GET` turns an AuditError into a 400 problem page.
+        player_id = resolve_audit_player(
+            connection, selector=selector, decision_snapshot_id=decision
+        )
+        audit = player_audit(connection, player_id=player_id, decision_snapshot_id=decision)
+
+    payload = audit.model_dump(mode="json")
+    ownership = audit.ownership
+    head = (
+        "<dl>"
+        f"<dt>player</dt><dd>{escape(audit.player_name)} "
+        f"(id {audit.player_id})</dd>"
+        f"<dt>decision</dt><dd>{escape(audit.decision_snapshot_id)}</dd>"
+        f"<dt>as of</dt><dd>{escape(utc_timestamp(audit.decision_at))}</dd>"
+        f"<dt>slate</dt><dd>{audit.slate_id} {escape(audit.site)} "
+        f"{escape(audit.slate_type)} {audit.season} week {audit.week:02d}</dd>"
+        "<dt>ownership source</dt><dd>"
+        + ("scenario model" if ownership.applied else "vendor baseline")
+        + "</dd>"
+        f"<dt>why</dt><dd>{escape(ownership.reason)}</dd>"
+        "</dl>"
+    )
+    # Rendered from the model itself, section by section, so a field added to the audit
+    # appears here without anyone remembering to add it and none can be quietly dropped.
+    sections = "".join(
+        f"<section><h2>{escape(_label(key))}</h2>{_render(payload[key])}</section>"
+        for key in ("ownership", "features", "episodes", "notes")
+    )
+    return _page(
+        "signal audit",
+        f"<section><h2>Signal and evidence audit</h2>{head}"
+        f'<p><a href="/audit?decision={escape(quote(audit.decision_snapshot_id, safe=""))}">'
+        "another player on this decision</a> · "
+        '<a href="/memo">back to the memo</a></p></section>' + sections,
+    )
+
+
+def _audit_player_index(connection: sqlite3.Connection, decision: str) -> str:
+    """List the decision's salaried players as links; naming no player is not an error."""
+
+    rows = list_audit_candidates(connection, decision_snapshot_id=decision)
+    if not rows:
+        return (
+            "<section><h2>Signal and evidence audit</h2><p>Decision "
+            f"<code>{escape(decision)}</code> has no salaried player visible at its "
+            "cutoff, so there is nobody to audit.</p></section>"
+        )
+    encoded = escape(quote(decision, safe=""))
+    items = "".join(
+        f'<li><a href="/audit?decision={encoded}&amp;player={player_id}">'
+        f"{escape(name)}</a> {escape(position or '')}</li>"
+        for player_id, name, position in rows
+    )
+    return (
+        "<section><h2>Signal and evidence audit</h2>"
+        f"<p>Decision <code>{escape(decision)}</code>. Choose a player to see every "
+        "episode, claim, excerpt, and feature value behind their ownership number.</p>"
+        f"<ul>{items}</ul></section>"
+    )
+
+
+def _query_value(query: Mapping[str, list[str]], key: str) -> str | None:
+    """The first non-blank value for a query key, or ``None`` — absence is not an error."""
+
+    value = _one(query, key).strip()
+    return value or None
 
 
 def _not_found_page(path: str) -> str:
@@ -1032,7 +1165,9 @@ def _not_found_page(path: str) -> str:
     return _page(
         "not found",
         f"<section><h2>No such page</h2><p>There is no <code>{escape(path)}</code>. "
-        f"The dashboard has four pages:</p><ul>{links}</ul></section>",
+        f"The dashboard has these pages:</p><ul>{links}"
+        '<li><a href="/audit">signal and evidence audit</a> — reached from a memo, for '
+        "one player at one decision</li></ul></section>",
     )
 
 

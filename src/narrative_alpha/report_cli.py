@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -29,6 +30,14 @@ from narrative_alpha.interface import (
     build_slate_memo,
     render_slate_memo,
 )
+from narrative_alpha.narrative.audit import (
+    DEFAULT_SOURCE_CATALOG_PATH,
+    AuditError,
+    player_audit,
+    render_player_audit,
+    resolve_audit_player,
+)
+from narrative_alpha.ownership_routing import OwnershipRouting, stored_ownership_routing
 from narrative_alpha.portfolio import OptimizerError, PydfsAdapter
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -56,6 +65,38 @@ BASELINE_NOT_REQUESTED_NOTICE = (
 
 class ReportCliError(RuntimeError):
     """Raised when persisted decision state cannot produce a report bundle."""
+
+
+def build_signals_parser() -> argparse.ArgumentParser:
+    """`na-report signals`: the audit view for one player at one frozen decision."""
+
+    parser = argparse.ArgumentParser(
+        prog="na-report signals",
+        description=(
+            "Show every episode, claim, evidence excerpt, source grade, feature value, "
+            "and applied delta behind one player's ownership, as of the decision."
+        ),
+    )
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument(
+        "--decision-snapshot-id",
+        "--decision-snapshot",
+        dest="decision_snapshot_id",
+        required=True,
+    )
+    parser.add_argument(
+        "--player",
+        required=True,
+        help="a player id, or a canonical name exactly as the store holds it",
+    )
+    parser.add_argument(
+        "--source-catalog",
+        type=Path,
+        default=DEFAULT_SOURCE_CATALOG_PATH,
+        help="the reviewed catalog that grades sources; the family default is used without it",
+    )
+    parser.add_argument("--output", type=Path)
+    return parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,7 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = build_parser().parse_args(argv)
+    """Dispatch the one subcommand, or fall through to the bundle this CLI has always been.
+
+    `signals` is a word, not a flag, so the existing flag-only invocation keeps working
+    exactly as scripts and the slate lane already call it.
+    """
+
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] == "signals":
+        return _signals(build_signals_parser().parse_args(values[1:]))
+    arguments = build_parser().parse_args(values)
     output_path = arguments.output or default_report_path(arguments.decision_snapshot_id)
     try:
         thresholds = BaselineThresholds(
@@ -152,6 +202,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     sys.stdout.write(bundle)
+    return 0
+
+
+def _signals(arguments: argparse.Namespace) -> int:
+    """Read-only: no artifact is read, no replay is run, and nothing is written to the store."""
+
+    try:
+        with connect_database(arguments.database) as connection:
+            apply_migrations(connection)
+            player_id = resolve_audit_player(
+                connection,
+                selector=str(arguments.player),
+                decision_snapshot_id=arguments.decision_snapshot_id,
+            )
+            audit = player_audit(
+                connection,
+                player_id=player_id,
+                decision_snapshot_id=arguments.decision_snapshot_id,
+            )
+        rendered = render_player_audit(audit)
+        if arguments.output is not None:
+            write_report_atomic(Path(arguments.output), rendered)
+    except (
+        AuditError,
+        MigrationError,
+        OSError,
+        ReplayError,
+        StoreConfigurationError,
+        ValueError,
+        sqlite3.Error,
+    ) as error:
+        print(
+            json.dumps(
+                {"error": {"code": "signals_failed", "message": str(error)}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(rendered)
     return 0
 
 
@@ -225,6 +315,7 @@ def load_build_result(
     if manifest_bytes != expected_manifest:
         raise ReportCliError("decision manifest file differs from the stored hash-set")
     return _reconstructed_build_result(
+        connection=connection,
         snapshot=snapshot,
         replay=replay,
         artifact_root=root,
@@ -237,6 +328,7 @@ def load_build_result(
 
 def _reconstructed_build_result(
     *,
+    connection: sqlite3.Connection,
     snapshot: DecisionSnapshotRow,
     replay: ReplayResult,
     artifact_root: Path,
@@ -250,12 +342,28 @@ def _reconstructed_build_result(
         request=replay.request,
         lineups=replay.lineups,
         replay=replay,
+        ownership_routing=_stored_reason(connection, snapshot, replay.ownership_routing),
         artifact_root=artifact_root,
         artifact_directory=artifact_directory,
         optimizer_request_path=request_path,
         generated_lineups_path=lineups_path,
         manifest_path=manifest_path,
     )
+
+
+def _stored_reason(
+    connection: sqlite3.Connection,
+    snapshot: DecisionSnapshotRow,
+    routing: OwnershipRouting,
+) -> OwnershipRouting:
+    """Replay re-derives the routing; the build recorded why. Prefer the record."""
+
+    stored = stored_ownership_routing(
+        connection, decision_snapshot_id=snapshot.decision_snapshot_id
+    )
+    if stored is None:
+        return routing
+    return replace(routing, reason=str(stored["reason"]))
 
 
 def _single_artifact(

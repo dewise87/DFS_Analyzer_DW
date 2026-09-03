@@ -133,7 +133,7 @@ def empty(tmp_path: Path) -> Any:
 
 @pytest.fixture
 def seeded(tmp_path: Path) -> Any:
-    """A store carrying one of everything the four pages render."""
+    """A store carrying one of everything the read pages render."""
 
     config = load_ops_config(_write_config(tmp_path))
     staged = tmp_path / "staged" / "DKSalaries.csv"
@@ -289,7 +289,7 @@ def seeded_client(seeded: Any) -> Iterator[_Client]:
 # The read pages
 # --------------------------------------------------------------------------------------
 
-PAGES = ("/", "/queues", "/runs", "/memo")
+PAGES = ("/", "/queues", "/runs", "/memo", "/audit")
 
 
 @pytest.mark.parametrize("path", PAGES)
@@ -380,6 +380,8 @@ def test_memo_page_shows_the_memo_the_last_successful_step_wrote(seeded_client: 
     assert "SLATE DECISION MEMO" in body
     assert "fixture body line" in body
     assert "decision-fixture" in body
+    # The audit view is reached from here, carrying this memo's decision.
+    assert '/audit?decision=decision-fixture"' in body
 
 
 def test_memo_page_says_so_when_the_file_is_gone(seeded: Any) -> None:

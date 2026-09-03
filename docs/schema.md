@@ -40,8 +40,11 @@ posterior covariance, exact input hash, missing-row counts, and training decisio
 Stores immutable §12.2.9 player-role scenarios for a frozen decision: untouched baseline,
 p10/p50/p90, median delta and sign probability, governance status/multiplier, and the capped,
 roster-calibrated applied ownership. Every row binds the producing scenario run, fitted-model run,
-configuration hash, feature version, and decision snapshot. This table is not consumed by
-`na-build`; that integration belongs to Slice 30.
+configuration hash, feature version, and decision snapshot. Stage 4 routing consumes these rows:
+`na-build` replaces the vendor ownership with `applied_ownership` only when a set exists as of
+`decision_at`, its `model_evals` record says the model beat the baseline, and the set covers every
+candidate; the decision manifest then carries an `ownership_scenarios` entry naming the run, so
+replay reads the same rows and stays byte-identical.
 
 ## `teams`
 
@@ -290,3 +293,17 @@ remain explicitly `NULL` rather than fabricated.
 
 Freezes a slate decision cutoff with canonical JSON containing the complete §8.4 artifact hash-set.  
 `manifest_hash_set_sha256` authenticates that set; the optional run reference links its producing pipeline.
+An `ownership_scenarios` entry is present only when Stage 4 routing applied a scenario set: its `path`
+is `store/ownership_scenarios/<run_id>` and its `sha256` covers the exact player/baseline/applied rows
+consumed, since the set lives in the store rather than in a file. Its absence is the positive record
+that the decision used the vendor baseline.
+
+## `decision_ownership_routing`
+
+One row per decision snapshot, written by the build inside the same transaction: whether
+Stage 4 applied an ownership scenario set (`applied`, `scenario_run_id`,
+`scenario_set_sha256`, `governance_status`, `status_multiplier`, `model_eval_id`), how many
+players the routing held at the vendor baseline for lack of an episode (`held_at_baseline`),
+and the reason in words (`reason`). Immutable. The memo and `na-ops status` print this
+reason, because a replay can only re-derive "the manifest carries no set" for an unrouted
+decision and that is not why.

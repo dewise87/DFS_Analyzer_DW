@@ -20,10 +20,19 @@ from narrative_alpha.candidate_selection import (
     CandidateSelection,
     CandidateSelectionError,
     SelectedSourceArtifact,
-    select_candidate_scenario,
 )
 from narrative_alpha.identity import PlayerCrosswalk
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
+from narrative_alpha.ownership_routing import (
+    MANIFEST_ARTIFACT_KIND as OWNERSHIP_SCENARIO_ARTIFACT_KIND,
+)
+from narrative_alpha.ownership_routing import (
+    OwnershipRouting,
+    OwnershipRoutingError,
+    PinnedOwnershipRouting,
+    record_ownership_routing,
+    select_routed_candidate_scenario,
+)
 from narrative_alpha.portfolio import (
     CLASSIC_SITE_RULES,
     CandidatePlayerScenario,
@@ -91,6 +100,12 @@ class BuildDataError(BuildError):
     code = "candidate_selection_failed"
 
 
+class BuildRoutingError(BuildError):
+    """Raised when a Stage 4 ownership scenario set cannot be applied or reproduced."""
+
+    code = "ownership_routing_refused"
+
+
 class BuildArtifactError(BuildError):
     """Raised when immutable decision artifacts cannot be written."""
 
@@ -111,6 +126,7 @@ class BuildResult:
     request: OptimizationRequest
     lineups: tuple[Lineup, ...]
     replay: ReplayResult
+    ownership_routing: OwnershipRouting
     artifact_root: Path
     artifact_directory: Path
     optimizer_request_path: Path
@@ -143,8 +159,14 @@ def build_decision(
     note: str = "na-build immediate replay verified",
     adapter: OptimizerAdapter | None = None,
     connection: sqlite3.Connection | None = None,
+    ownership_routing: PinnedOwnershipRouting | None = None,
 ) -> BuildResult:
     """Build, freeze, replay, and atomically commit one DFS decision.
+
+    ``ownership_routing`` left unset discovers the newest eligible Stage 4 scenario set;
+    a caller re-freezing an earlier decision (the fast lane) passes that decision's own
+    routing from its manifest, so the new snapshot applies the same set or the same
+    baseline and never a set that landed in between.
 
     ``decision_at`` is deliberately required here. The CLI may resolve its optional
     argument to the current time before entering this deterministic path, but no code in
@@ -190,6 +212,7 @@ def build_decision(
             run_type=run_type,
             note=note,
             adapter=selected_adapter,
+            ownership_routing=ownership_routing,
         )
     with connect_database(database_path) as owned:
         apply_migrations(owned)
@@ -210,6 +233,7 @@ def build_decision(
                 run_type=run_type,
                 note=note,
                 adapter=selected_adapter,
+                ownership_routing=ownership_routing,
             )
         except Exception:
             owned.rollback()
@@ -249,6 +273,7 @@ def _build_in_transaction(
     run_type: str,
     note: str,
     adapter: OptimizerAdapter,
+    ownership_routing: PinnedOwnershipRouting | None = None,
 ) -> BuildResult:
     session = PointInTimeSession(connection)
     try:
@@ -265,17 +290,24 @@ def _build_in_transaction(
     # an unresolved active player to slip through.
     PlayerCrosswalk(connection).require_all_resolved(site=site.value)
     try:
-        selected = select_candidate_scenario(
+        routed = select_routed_candidate_scenario(
             session,
             slate_id=slate_id,
             site=site,
+            slate_type=slate.slate_type,
+            contest_archetype=contest_archetype.value,
             as_of=decision_at,
+            pinned=ownership_routing,
         )
     except CandidateSelectionError as error:
         raise BuildDataError(str(error)) from error
+    except OwnershipRoutingError as error:
+        raise BuildRoutingError(str(error)) from error
+    selected = routed.selection
+    routing = routed.routing
 
     scenario = CandidatePlayerScenario(
-        scenario_id=_scenario_id(selected, slate_id, site, decision_at),
+        scenario_id=_scenario_id(selected, routing, slate_id, site, decision_at),
         players=selected.players,
         projection_source_versions=selected.projection_source_versions,
     )
@@ -318,6 +350,7 @@ def _build_in_transaction(
     lineups_relative_path = f"{decision_snapshot_id}/generated_lineups.csv"
     manifest = _decision_manifest(
         selected,
+        routing,
         request_sha256=request_sha256,
         request_path=request_relative_path,
         lineups_sha256=upload_sha256,
@@ -348,6 +381,7 @@ def _build_in_transaction(
             run_type=run_type,
             note=note,
             adapter=adapter,
+            routing=routing,
         )
     except Exception:
         # The DB transaction rolls back in build_decision; the on-disk artifacts must
@@ -373,6 +407,7 @@ def _commit_and_verify(
     run_type: str,
     note: str,
     adapter: OptimizerAdapter,
+    routing: OwnershipRouting,
 ) -> BuildResult:
     run = ModelRunRow(
         run_id=run_id,
@@ -399,6 +434,12 @@ def _commit_and_verify(
     )
     _insert_row(connection, "model_runs", run)
     _insert_row(connection, "decision_snapshots", snapshot)
+    record_ownership_routing(
+        connection,
+        decision_snapshot_id=decision_snapshot_id,
+        routing=routing,
+        created_at=utc_timestamp(decision_at),
+    )
 
     try:
         replay = replay_decision(
@@ -430,6 +471,7 @@ def _commit_and_verify(
         request=request,
         lineups=lineups,
         replay=replay,
+        ownership_routing=routing,
         artifact_root=artifact_root,
         artifact_directory=written.directory,
         optimizer_request_path=written.request_path,
@@ -440,6 +482,7 @@ def _commit_and_verify(
 
 def _scenario_id(
     selected: CandidateSelection,
+    routing: OwnershipRouting,
     slate_id: int,
     site: DfsSite,
     decision_at: datetime,
@@ -464,11 +507,17 @@ def _scenario_id(
             {"sha256": artifact.sha256, "source": artifact.source}
             for artifact in selected.availability_artifacts
         ]
+    if routing.applied:
+        payload["ownership_scenario_set"] = {
+            "run_id": routing.scenario_run_id,
+            "sha256": routing.sha256,
+        }
     return f"scenario-{_sha256(canonical_json_bytes(payload))}"
 
 
 def _decision_manifest(
     selected: CandidateSelection,
+    routing: OwnershipRouting,
     *,
     request_sha256: str,
     request_path: str,
@@ -485,6 +534,20 @@ def _decision_manifest(
         _source_manifest_item("availability", artifact)
         for artifact in selected.availability_artifacts
     )
+    scenarios = (
+        ()
+        if not routing.applied
+        else (
+            DecisionManifestHash(
+                artifact_kind=OWNERSHIP_SCENARIO_ARTIFACT_KIND,
+                sha256=routing.sha256,
+                # The applied rows live in the store, not a file; the hash covers the
+                # exact player/baseline/applied triples this decision consumed.
+                path=routing.manifest_path,
+                source=routing.scenario_source,
+            ),
+        )
+    )
     generated = (
         DecisionManifestHash(
             artifact_kind="optimizer_request",
@@ -499,7 +562,7 @@ def _decision_manifest(
             source="narrative-alpha",
         ),
     )
-    return (*salary, *projections, *availability, *generated)
+    return (*salary, *projections, *availability, *scenarios, *generated)
 
 
 def _source_manifest_item(

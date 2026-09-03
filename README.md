@@ -496,6 +496,14 @@ unresolved players, and conflicting contest cohort metadata remain explicit rath
 The Tuesday `na-ops results` lane matches each export to the append-only `contests` record by the
 external contest ID in its filename and refuses with the `na-contest add` remedy when it cannot.
 
+## Signal and evidence audit
+
+`na-report signals --decision-snapshot <id> --player <id|name>` prints, for one player on
+one frozen decision, the vendor baseline and the applied ownership with the routing reason,
+every feature value, every episode and claim, and every evidence excerpt with its source and
+grade — all read as-of the decision. The dashboard's `/audit` page renders the same model;
+the memo page links to it. Read-only.
+
 ## Sunday fast lane (`na-fast`)
 
 Two pre-approved actions, governed by the signed rule file `config/fast_lane_rules.yaml`

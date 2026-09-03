@@ -1958,6 +1958,62 @@ to baseline when the model does not add value").
 > delta; replay byte-identity with scenarios on and off; the red-team section renders on a
 > seeded fixture with each of the five answers. Gates green; not the production database.
 
+**Implementation status (2026-09-03):** landed as `src/narrative_alpha/ownership_routing.py`
+(Stage 4) and `src/narrative_alpha/interface/red_team.py` (Stage 5). `select_routed_candidate_scenario`
+is the new shared build/replay seam: it calls the unchanged `select_candidate_scenario`, then
+replaces `projected_ownership` with `applied_ownership` from the newest scenario set for the
+slate/site/archetype as-of `decision_at` — but only when that set's `model_evals` record says the
+model beat the untouched baseline *and* the set covers every candidate. A missing set, a missing
+or losing evaluation, partial coverage, and showdown each fall back to the vendor baseline with a
+stated reason the memo, the `slate_build` step summary, and `na-ops status` all print. The decision
+manifest gains an `ownership_scenarios` entry (`store/ownership_scenarios/<run_id>`, hashed over the
+exact applied rows); replay pins that entry — and its absence is the positive record that the
+baseline was used — so both routed and unrouted decisions stay byte-identical. Provenance joins
+`narrative_features` → episodes → `episode_claims` → `claim_evidence_refs`, and a delta larger than
+the config's two points with no episode behind it refuses the build rather than reverting quietly.
+The memo carries an OWNERSHIP ROUTING block, the applied deltas with their episode and evidence
+refs, and a RED TEAM block answering all five Stage 5 questions deterministically from the store
+(contrary claims, whether the vendor baseline already moved, duplicate-source count, confounders
+from odds/weather/availability, and the "do nothing" case, which states plainly that this request
+set no `ownership_sum_range` so no roster would change). `na-ops status` gains an OWNERSHIP ROUTING
+(Stage 4) block naming the active set, its governance status and multiplier, its evaluation verdict,
+and whether the newest decision applied it; the dashboard follow-on stays with Slice 32. Suite
+629 → 636.
+
+**Known limit, deliberate:** routing applies to classic slates only. A `CandidatePlayer` carries one
+ownership value and no captain/flex split, so a showdown scenario set has nowhere to land; the
+routing states that rather than guessing. `MATERIAL_DELTA` is a module constant mirroring
+`config/ownership_model.toml`'s `material_delta_points` because `ownership_routing` sits below the
+`narrative_alpha.ownership` package in the import graph (that package reaches `build` through
+`ops.results` → `report_cli`); a test pins the two together.
+
+**Review outcome (2026-09-03):** two blockers and four majors, fixed. (1) The provenance
+gate refused the whole build for any material move on a player with no episode — but a
+no-episode player's move is the intercept, the standardization of "no heat", and the
+roster-total calibration landing on someone the narrative never touched, and under TESTING
+the 2–5 point band is exactly where that lands. The routing now holds such a player at the
+vendor baseline, says so in its reason, and applies the rest of the set; it refuses only a
+genuinely broken set — episodes cited with no evidence behind them, or a row past its own
+governance cap, which Stage 4 now re-asserts (`CLASSIC_CAPS`, pinned to the config by a
+test). (2) The fast lane's re-freeze rediscovered the newest set at 11:30, so pinned lineups
+priced under Saturday's ownership could sit beside replacements priced under a set that
+landed in between, and a Stage 4 refusal could take down the emergency lane minutes before
+lock; `build_decision` takes the base decision's own routing from its manifest. (3) The
+recorded fallback reason was the generic "the manifest carries no set" on every reload,
+because a replay cannot know whether no set existed, the evaluation lost, or coverage was
+partial; migration 0017 adds `decision_ownership_routing`, written by the build in the same
+transaction, and the memo, `load_build_result`, and `na-ops status` print it. (4) Red-team
+question 3 summed per-episode source counts, so a source in three episodes counted three
+times and the duplicate-source illusion it exists to expose was hidden; it counts distinct
+sources and items over the episode set. Question 2 compared first-ever with last and could
+subtract one vendor from another; it compares the newest vendor's last two captures. The
+"do nothing" scope — no `ownership_sum_range`, so routing changed the request bytes and
+the reported sums and not one roster — is said once at the block level. The applied-delta
+table says it shows the ten largest of N. Noted, not changed: `_latest_evaluation` in the
+routing duplicates `ownership.evaluation.latest_evaluation_status` because the ownership
+package reaches `build` through `ops.results`; the showdown path labels its role
+"showdown". Suite 629 → 649.
+
 ### Slice 31 — Signal and evidence audit view
 
 **Goal:** the Phase 2 "signal/evidence audit view": for any player on the current slate, one
@@ -1991,6 +2047,45 @@ parallel with Slice 30 (reads only).
 > Tests: as-of correctness (a claim observed after `decision_at` does not appear); the
 > renderers agree with the model on a seeded fixture; the page passes the existing
 > dashboard security tests unchanged. Gates green.
+
+**Implementation status (2026-09-03):** landed as `src/narrative_alpha/narrative/audit.py`.
+`player_audit(connection, *, player_id, decision_snapshot_id)` returns one `PlayerAudit`
+Pydantic model: the player and the decision instant, the vendor baseline beside the applied
+ownership with its governance status and multiplier, the whole Appendix B row with its
+feature/formula/config versions and all ten heat channels raw and standardized, every
+episode behind those features, every claim in those episodes with its Stage 1 taxonomy, and
+every verbatim evidence excerpt with source id, family, grade, and `observed_at`. Every
+query runs through `PointInTimeSession`, which refuses SQL without an `:as_of` bind, so a
+claim observed after the decision cannot appear however the caller asks; the single
+unbounded read is the decision's own `decision_at`, which is the bound for all the rest.
+There is no write path in the module.
+
+Two thin renderers read that one model: `na-report signals --decision-snapshot <id>
+--player <id|name>` (text; `signals` is a word, not a flag, so the existing flag-only
+`na-report` invocation is untouched) and a dashboard page at
+`/audit?decision=<id>&player=<id|name>`, linked from the memo page and rendering the model
+dump section by section the way the status page renders its payload. With no player named
+the page lists the decision's candidates rather than erroring. `/audit` was added to the
+dashboard tests' `PAGES` tuple, so it inherits the loopback, Host-rebinding, and
+no-secrets checks unchanged.
+
+Whose grade: source grades resolve from the reviewed catalog when it is readable and from
+the source-family default otherwise, and every grade carries the basis beside it rather
+than implying a review that did not happen. A player with no episodes says so and says the
+heat channels are slate-population values, not a claim about them; a decision with no
+scenarios shows the vendor baseline and states which of the three reasons applied (no set,
+no evaluation, a losing evaluation). Suite 636 → 644.
+
+**Review outcome (2026-09-03):** no blocker; two fixes. The dashboard's player index for a
+decision was a bare query with unnormalized timestamps outside `PointInTimeSession` — the
+one read in the slice that stepped around the project's point-in-time contract; it is now
+`audit.list_audit_candidates`, bound to the decision's instant like every other read. A bad
+decision id or player selector rendered a 200 with an inline message; it is now a 400
+problem page, while a memo pointing at a decision the store no longer holds still renders
+an explanation, since the caller asked for nothing wrong. Noted, not changed: the
+provenance join in `audit.py` duplicates `ownership_routing._episode_provenance` and the
+two should become one helper; the "available scenario set" query is not scoped by contest
+archetype (one archetype per decision today).
 
 ### Slice 32 — Dashboard follow-on: results from the page, lanes from the store
 
@@ -2034,7 +2129,8 @@ attempt touches the security checks.
   the no-episode ratio features (both noted at Slices 20–21) once a month of live episodes
   shows what the clusters actually look like.
 - **Slice 34 — MCP server (Phase 3):** one tool per read the dashboard already makes,
-  after Slice 31 gives it the audit view to expose.
+  now unblocked: Slice 31 landed `player_audit`, which is the read an MCP tool would
+  expose first.
 
 ---
 

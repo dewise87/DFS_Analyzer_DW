@@ -161,7 +161,10 @@ def test_build_refuses_pending_player_identity(tmp_path: Path) -> None:
 
 
 def test_build_and_replay_share_candidate_selection_function() -> None:
-    assert build_module.select_candidate_scenario is replay_module.select_candidate_scenario
+    assert (
+        build_module.select_routed_candidate_scenario
+        is replay_module.select_routed_candidate_scenario
+    )
 
 
 def _seed_database(database: Path) -> None:

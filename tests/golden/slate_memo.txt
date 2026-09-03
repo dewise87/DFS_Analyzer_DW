@@ -40,6 +40,30 @@ lineup_id,slot,player_id,site_player_id,name,team,opponent,position,salary,proje
 0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,FLEX,4,10004,RB Player 4,CCC,DDD,RB,5000,18.000000,0.100000,game-2
 0c8d6a604c15ae00d48ed82a0b7a71147e50792cd6165810c41d0e78492ad228,DST,9,10009,DST Player 9,DDD,CCC,DST,2500,12.000000,0.100000,game-2
 
+OWNERSHIP ROUTING (Stage 4)
+ownership_source=vendor_baseline
+ownership_routing_reason=no ownership scenario set exists for slate 1 draftkings cash as of the decision; the vendor baseline was applied
+ownership_contest_archetype=cash
+ownership_role=classic
+ownership_scenario_run_id=unavailable
+ownership_scenario_decision_snapshot_id=unavailable
+ownership_model_run_id=unavailable
+ownership_model_version=unavailable
+ownership_model_eval_id=unavailable
+ownership_governance_status=unavailable
+ownership_status_multiplier=unavailable
+ownership_config_sha256=unavailable
+ownership_feature_version=unavailable
+ownership_scenario_set_sha256=unavailable
+ownership_applied_rows=0
+ownership_material_deltas=0
+
+APPLIED OWNERSHIP DELTAS
+applied_delta_status=none — the vendor baseline reached the optimizer
+
+RED TEAM (Stage 5)
+red_team_status=not applicable — the decision used the vendor baseline
+
 ATTACHED CONTEST
 contest_status=available
 contest_id=1

@@ -28,6 +28,7 @@ from narrative_alpha.fast.rules import (
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput, normalize_name
 from narrative_alpha.ingest.slates import SlateSummary, list_slates, normalize_site
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
+from narrative_alpha.ownership_routing import pinned_routing_from_manifest
 from narrative_alpha.portfolio import (
     Lineup,
     OptimizerAdapter,
@@ -308,6 +309,12 @@ def process_official_inactives(
                 ),
                 adapter=capped,
                 connection=connection,
+                # The base decision's own Stage 4 routing — its scenario set, or the
+                # vendor baseline — never a set that landed between Saturday and now:
+                # pinned lineups and replacements must be priced from one ownership.
+                ownership_routing=pinned_routing_from_manifest(
+                    base.snapshot.manifest_hashes_json
+                ),
             )
             _mark_run(connection, run_id=run_id, status="succeeded", at=observed_at)
         except Exception as error:

@@ -18,11 +18,20 @@ from narrative_alpha.candidate_selection import (
     CandidateSelection,
     CandidateSelectionError,
     SelectedSourceArtifact,
-    select_candidate_scenario,
+)
+from narrative_alpha.ownership_routing import (
+    NO_PINNED_ROUTING,
+    OwnershipRouting,
+    OwnershipRoutingError,
+    PinnedOwnershipRouting,
+    pinned_routing_from_manifest,
+    select_routed_candidate_scenario,
+    verify_pinned_routing,
 )
 from narrative_alpha.portfolio import (
     CLASSIC_SITE_RULES,
     CandidatePlayerScenario,
+    ContestArchetype,
     DfsSite,
     Lineup,
     LineupPlayer,
@@ -72,6 +81,7 @@ class ReplayResult:
     output_bytes: bytes
     request: OptimizationRequest
     lineups: tuple[Lineup, ...]
+    ownership_routing: OwnershipRouting
 
 
 class PointInTimeSession:
@@ -154,28 +164,38 @@ class PointInTimeSession:
         projection_artifacts: frozenset[SelectedSourceArtifact],
         as_of: datetime | None,
         availability_artifacts: frozenset[SelectedSourceArtifact] = frozenset(),
-    ) -> CandidateSelection:
+        slate_type: str = "classic",
+        contest_archetype: str = ContestArchetype.CASH.value,
+        ownership_routing: PinnedOwnershipRouting = NO_PINNED_ROUTING,
+    ) -> tuple[CandidateSelection, OwnershipRouting]:
         """Compatibility wrapper around the shared build/replay selection seam.
 
         The availability set defaults to empty, which selects exactly what a decision
         frozen before availability existed selected; a caller reading a manifest must
-        pass what the manifest carries, or the selection will not match.
+        pass what the manifest carries, or the selection will not match. The Stage 4
+        routing defaults to "the vendor baseline was applied" for the same reason.
         """
 
         if not salary_artifacts or not projection_artifacts:
             raise ReplayArtifactError("decision manifest requires salary and projection artifacts")
         try:
-            return select_candidate_scenario(
+            routed = select_routed_candidate_scenario(
                 self,
                 slate_id=slate_id,
                 site=site,
+                slate_type=slate_type,
+                contest_archetype=contest_archetype,
                 salary_artifacts=salary_artifacts,
                 projection_artifacts=projection_artifacts,
                 availability_artifacts=availability_artifacts,
                 as_of=_require_as_of(as_of),
+                pinned=ownership_routing,
             )
         except CandidateSelectionError as error:
             raise ReplayError(str(error)) from error
+        except OwnershipRoutingError as error:
+            raise ReplayArtifactError(str(error)) from error
+        return routed.selection, routed.routing
 
 
 def replay_decision(
@@ -212,18 +232,26 @@ def replay_decision(
     if original_request.slate_type.value != slate.slate_type:
         raise ReplayArtifactError("optimizer request slate type does not match stored slate")
 
+    pinned_routing = pinned_routing_from_manifest(snapshot.manifest_hashes_json)
     try:
-        rebuilt = select_candidate_scenario(
+        routed = select_routed_candidate_scenario(
             session,
             slate_id=snapshot.slate_id,
             site=original_request.site,
+            slate_type=slate.slate_type,
+            contest_archetype=original_request.contest_archetype.value,
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
             availability_artifacts=availability_artifacts,
             as_of=cutoff,
+            pinned=pinned_routing,
         )
+        verify_pinned_routing(routed.routing, pinned_routing)
     except CandidateSelectionError as error:
         raise ReplayError(str(error)) from error
+    except OwnershipRoutingError as error:
+        raise ReplayArtifactError(str(error)) from error
+    rebuilt = routed.selection
     if frozenset(rebuilt.salary_artifacts) != salary_artifacts:
         raise ReplayArtifactError(
             "not every salary manifest source/hash pair contributed replay rows"
@@ -271,6 +299,7 @@ def replay_decision(
         # consumers can therefore compare the two and fail if any candidate value drifted.
         request=original_request,
         lineups=lineups,
+        ownership_routing=routed.routing,
     )
 
 

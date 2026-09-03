@@ -111,6 +111,26 @@ class SlateLaneStatus:
 
 
 @dataclass(frozen=True)
+class OwnershipScenarioStatus:
+    """The newest Stage 4 scenario set for one slate, and whether it reached a build."""
+
+    slate_id: int
+    site: str
+    scenario_run_id: str
+    contest_archetype: str
+    governance_status: str
+    status_multiplier: float
+    scenario_rows: int
+    generated_at: datetime
+    model_run_id: str
+    feature_version: str
+    beat_baseline: bool | None
+    applied_in_newest_decision: bool
+    # What the newest decision's own routing record says, in its words.
+    newest_decision_routing: str | None = None
+
+
+@dataclass(frozen=True)
 class LabelCohortStatus:
     """One season/week/site/archetype label population."""
 
@@ -188,6 +208,7 @@ class OpsStatus:
     snapshot_week: SnapshotWeekStatus | None
     snapshot_problems: tuple[str, ...]
     slate: SlateLaneStatus | None
+    ownership_scenarios: tuple[OwnershipScenarioStatus, ...]
     labels: LabelsStatus
     narrative: NarrativeStatus
     fast_lane_rules: FastLaneRulesStatus | None
@@ -368,6 +389,7 @@ def collect_ops_status(
         snapshot_week=snapshot_week,
         snapshot_problems=snapshot_problems,
         slate=slate,
+        ownership_scenarios=_ownership_scenario_status(connection, slate=slate),
         labels=_label_status(connection),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
@@ -701,6 +723,85 @@ def _count(
     return int(connection.execute(sql, parameters).fetchone()[0])
 
 
+def _ownership_scenario_status(
+    connection: sqlite3.Connection, *, slate: SlateLaneStatus | None
+) -> tuple[OwnershipScenarioStatus, ...]:
+    """The newest scenario set per slate of the week, and the build that consumed it.
+
+    Reads only. "Newest set exists" and "a decision applied it" are different facts, and
+    the screen shows both rather than letting the operator infer one from the other.
+    """
+
+    if slate is None:
+        return ()
+    rows: list[OwnershipScenarioStatus] = []
+    for summary in slate.slates:
+        newest = connection.execute(
+            """
+            SELECT os.run_id, os.contest_archetype, os.governance_status,
+                   os.status_multiplier, os.model_run_id, os.feature_version,
+                   os.config_sha256, os.observed_at, count(*) AS scenario_rows
+            FROM ownership_scenarios AS os
+            JOIN model_runs AS run ON run.run_id = os.run_id AND run.status = 'succeeded'
+            WHERE os.slate_id = ? AND os.site = ?
+            GROUP BY os.run_id
+            ORDER BY rtrim(os.observed_at, 'Z') DESC, os.run_id DESC
+            LIMIT 1
+            """,
+            (summary.slate_id, summary.site),
+        ).fetchone()
+        if newest is None:
+            continue
+        verdict = connection.execute(
+            """
+            SELECT beat_baseline FROM model_evals
+            WHERE evaluation_kind = 'ownership' AND ownership_site = ?
+              AND ownership_archetype = ? AND feature_version = ? AND config_sha256 = ?
+            ORDER BY rtrim(observed_at, 'Z') DESC, model_eval_id DESC
+            LIMIT 1
+            """,
+            (
+                summary.site,
+                str(newest["contest_archetype"]),
+                str(newest["feature_version"]),
+                str(newest["config_sha256"]),
+            ),
+        ).fetchone()
+        applied = False
+        newest_decision_routing: str | None = None
+        if summary.decision_snapshot_id is not None:
+            # The build's own record of what it routed, not an inference from the newest
+            # set: a decision that applied an earlier set, or the baseline, says so.
+            stored = connection.execute(
+                "SELECT applied, reason, scenario_run_id FROM decision_ownership_routing "
+                "WHERE decision_snapshot_id = ?",
+                (summary.decision_snapshot_id,),
+            ).fetchone()
+            if stored is not None:
+                applied = bool(stored["applied"]) and str(stored["scenario_run_id"]) == str(
+                    newest["run_id"]
+                )
+                newest_decision_routing = str(stored["reason"])
+        rows.append(
+            OwnershipScenarioStatus(
+                slate_id=summary.slate_id,
+                site=summary.site,
+                scenario_run_id=str(newest["run_id"]),
+                contest_archetype=str(newest["contest_archetype"]),
+                governance_status=str(newest["governance_status"]),
+                status_multiplier=float(newest["status_multiplier"]),
+                scenario_rows=int(newest["scenario_rows"]),
+                generated_at=_parse_stamp(str(newest["observed_at"])),
+                model_run_id=str(newest["model_run_id"]),
+                feature_version=str(newest["feature_version"]),
+                beat_baseline=None if verdict is None else bool(verdict["beat_baseline"]),
+                applied_in_newest_decision=applied,
+                newest_decision_routing=newest_decision_routing,
+            )
+        )
+    return tuple(rows)
+
+
 def _label_status(connection: sqlite3.Connection) -> LabelsStatus:
     """The label gate, from the one query the results lane records it with.
 
@@ -830,6 +931,35 @@ def render_status(status: OpsStatus) -> str:
         if step.last_failure_at is not None:
             lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
+
+    lines.extend(("", "OWNERSHIP ROUTING (Stage 4)"))
+    if not status.ownership_scenarios:
+        lines.append("  no ownership scenario set exists for this week's slate(s)")
+    for scenario in status.ownership_scenarios:
+        verdict = (
+            "no evaluation yet"
+            if scenario.beat_baseline is None
+            else ("beat the vendor baseline" if scenario.beat_baseline else "LOST to the baseline")
+        )
+        lines.append(
+            f"  slate {scenario.slate_id} {scenario.site:<12} {scenario.contest_archetype:<18} "
+            f"{scenario.governance_status} x{scenario.status_multiplier:.2f} "
+            f"({scenario.scenario_rows} row(s))"
+        )
+        lines.append(f"  {'':<16} set          {scenario.scenario_run_id}")
+        lines.append(
+            f"  {'':<16} generated    {_stamp(scenario.generated_at, status.as_of)} — {verdict}"
+        )
+        lines.append(
+            f"  {'':<16} newest build "
+            + (
+                "applied this set"
+                if scenario.applied_in_newest_decision
+                else "did not apply this set"
+            )
+        )
+        if scenario.newest_decision_routing is not None:
+            lines.append(f"  {'':<16}   {scenario.newest_decision_routing}")
 
     lines.extend(("", "RESULT LABELS"))
     lines.append(f"  weeks with labels       {status.labels.weeks_with_labels} of 3 needed")
@@ -993,6 +1123,24 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                 for row in status.slate.slates
             ],
         },
+        "ownership_scenarios": [
+            {
+                "slate_id": row.slate_id,
+                "site": row.site,
+                "scenario_run_id": row.scenario_run_id,
+                "contest_archetype": row.contest_archetype,
+                "governance_status": row.governance_status,
+                "status_multiplier": row.status_multiplier,
+                "scenario_rows": row.scenario_rows,
+                "generated_at": utc_timestamp(row.generated_at),
+                "model_run_id": row.model_run_id,
+                "feature_version": row.feature_version,
+                "beat_baseline": row.beat_baseline,
+                "applied_in_newest_decision": row.applied_in_newest_decision,
+                "newest_decision_routing": row.newest_decision_routing,
+            }
+            for row in status.ownership_scenarios
+        ],
         "labels": {
             "weeks_with_labels": status.labels.weeks_with_labels,
             "by_week_and_archetype": [

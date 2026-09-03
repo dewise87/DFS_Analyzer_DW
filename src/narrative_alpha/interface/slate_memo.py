@@ -6,13 +6,26 @@ import csv
 import io
 import math
 import sqlite3
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from narrative_alpha.candidate_selection import SelectedSourceArtifact
+from narrative_alpha.candidate_selection import CandidateSelection, SelectedSourceArtifact
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
+from narrative_alpha.interface.red_team import (
+    RED_TEAM_LIMIT,
+    RedTeamAnswer,
+    build_red_team_review,
+    render_red_team_review,
+)
+from narrative_alpha.ownership_routing import (
+    MATERIAL_DELTA,
+    AppliedOwnershipDelta,
+    OwnershipRouting,
+    pinned_routing_from_manifest,
+)
 from narrative_alpha.portfolio import (
     HEURISTIC_NOTICE,
     CandidatePlayer,
@@ -62,6 +75,70 @@ class SlateMemoInputArtifact(BaseModel):
         return normalized
 
 
+class SlateMemoAppliedDelta(BaseModel):
+    """One governed ownership move with the episodes and evidence behind it (§8.3)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    player_id: int
+    role: str
+    position: str
+    baseline_ownership: float = Field(ge=0, le=1)
+    applied_ownership: float = Field(ge=0, le=1)
+    delta_points: float
+    ownership_p10: float = Field(ge=0, le=1)
+    ownership_p50: float = Field(ge=0, le=1)
+    ownership_p90: float = Field(ge=0, le=1)
+    prob_delta_positive: float = Field(ge=0, le=1)
+    feature_id: str
+    episode_ids: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+
+
+class SlateMemoOwnershipRouting(BaseModel):
+    """Stage 4's verdict for this decision: applied or vendor baseline, and why."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    applied: bool
+    reason: str
+    contest_archetype: str
+    role: str
+    scenario_run_id: str | None = None
+    scenario_decision_snapshot_id: str | None = None
+    model_run_id: str | None = None
+    model_version: str | None = None
+    model_eval_id: str | None = None
+    governance_status: str | None = None
+    status_multiplier: float | None = Field(default=None, ge=0, le=1)
+    config_sha256: str | None = None
+    feature_version: str | None = None
+    scenario_set_sha256: str | None = None
+    applied_row_count: int = Field(default=0, ge=0)
+    material_delta_count: int = Field(default=0, ge=0)
+    applied_deltas: tuple[SlateMemoAppliedDelta, ...] = ()
+    red_team: tuple[RedTeamAnswer, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_applied_provenance(self) -> SlateMemoOwnershipRouting:
+        if not self.applied:
+            if self.scenario_run_id is not None or self.applied_deltas:
+                raise ValueError("a baseline routing carries no scenario set")
+            return self
+        if self.scenario_run_id is None or self.model_eval_id is None:
+            raise ValueError("an applied routing must name its scenario set and evaluation")
+        untraceable = tuple(
+            delta.player_id
+            for delta in self.applied_deltas
+            if abs(delta.delta_points) > MATERIAL_DELTA * 100 and not delta.episode_ids
+        )
+        if untraceable:
+            raise ValueError(
+                f"applied deltas without episode provenance: {sorted(untraceable)}"
+            )
+        return self
+
+
 class SlateMemoLineup(BaseModel):
     """One reproducible lineup summary plus its exact ordered roster."""
 
@@ -93,6 +170,7 @@ class SlateMemo(BaseModel):
         "DECISION INPUT SUMMARY — projections and ownership are point-in-time inputs, "
         "not realized outcomes; no EV or probability claim is simulator-backed."
     ] = SLATE_MEMO_NOTICE
+    ownership_routing: SlateMemoOwnershipRouting
     attached_contest: ContestRow | None = None
     heuristic_report: HeuristicReport | None = None
 
@@ -140,7 +218,7 @@ def build_slate_memo(
     except ReplayError as error:
         raise SlateMemoError(str(error)) from error
     _validate_snapshot(build_result.snapshot, stored_snapshot)
-    _validate_build_result(build_result, session, slate)
+    selected, routing = _validate_build_result(build_result, session, slate)
 
     artifacts = _input_artifacts(stored_snapshot)
     memo_lineups = tuple(_memo_lineup(lineup) for lineup in build_result.lineups)
@@ -163,6 +241,15 @@ def build_slate_memo(
             raise SlateMemoError(str(error)) from error
     if stored_snapshot.run_id is None:
         raise SlateMemoError("decision snapshot has no run_id")
+    memo_routing = _memo_routing(
+        session,
+        routing,
+        slate=slate,
+        decision_at=cutoff,
+        candidates={player.player_id: player for player in selected.players},
+        lineups=build_result.lineups,
+        optimizer_reads_ownership=build_result.request.ownership_sum_range is not None,
+    )
     return SlateMemo(
         as_of=cutoff,
         decision_at=cutoff,
@@ -176,6 +263,7 @@ def build_slate_memo(
         ),
         input_artifacts=artifacts,
         lineups=memo_lineups,
+        ownership_routing=memo_routing,
         attached_contest=contest,
         heuristic_report=heuristic,
     )
@@ -279,6 +367,91 @@ def render_slate_memo(memo: SlateMemo) -> str:
                 )
             )
 
+    output.write("\nOWNERSHIP ROUTING (Stage 4)\n")
+    routing = memo.ownership_routing
+    output.write(
+        "ownership_source=" + ("scenario_model" if routing.applied else "vendor_baseline") + "\n"
+    )
+    output.write(f"ownership_routing_reason={routing.reason}\n")
+    output.write(f"ownership_contest_archetype={routing.contest_archetype}\n")
+    output.write(f"ownership_role={routing.role}\n")
+    output.write("ownership_scenario_run_id=" + _optional_scalar(routing.scenario_run_id) + "\n")
+    output.write(
+        "ownership_scenario_decision_snapshot_id="
+        + _optional_scalar(routing.scenario_decision_snapshot_id)
+        + "\n"
+    )
+    output.write("ownership_model_run_id=" + _optional_scalar(routing.model_run_id) + "\n")
+    output.write("ownership_model_version=" + _optional_scalar(routing.model_version) + "\n")
+    output.write("ownership_model_eval_id=" + _optional_scalar(routing.model_eval_id) + "\n")
+    output.write(
+        "ownership_governance_status=" + _optional_scalar(routing.governance_status) + "\n"
+    )
+    output.write(
+        "ownership_status_multiplier="
+        + (
+            "unavailable"
+            if routing.status_multiplier is None
+            else f"{routing.status_multiplier:.6f}"
+        )
+        + "\n"
+    )
+    output.write("ownership_config_sha256=" + _optional_scalar(routing.config_sha256) + "\n")
+    output.write("ownership_feature_version=" + _optional_scalar(routing.feature_version) + "\n")
+    output.write(
+        "ownership_scenario_set_sha256=" + _optional_scalar(routing.scenario_set_sha256) + "\n"
+    )
+    output.write(f"ownership_applied_rows={routing.applied_row_count}\n")
+    output.write(f"ownership_material_deltas={routing.material_delta_count}\n")
+
+    output.write("\nAPPLIED OWNERSHIP DELTAS\n")
+    if not routing.applied_deltas:
+        output.write("applied_delta_status=none — the vendor baseline reached the optimizer\n")
+    else:
+        output.write(
+            f"applied_delta_status=showing the {len(routing.applied_deltas)} largest of "
+            f"{routing.applied_row_count} applied row(s); every row is in "
+            "ownership_scenarios under ownership_scenario_run_id\n"
+        )
+        writer.writerow(
+            (
+                "player_id",
+                "role",
+                "position",
+                "baseline_ownership",
+                "applied_ownership",
+                "delta_points",
+                "ownership_p10",
+                "ownership_p50",
+                "ownership_p90",
+                "prob_delta_positive",
+                "feature_id",
+                "episode_ids",
+                "evidence_refs",
+            )
+        )
+        for delta in routing.applied_deltas:
+            writer.writerow(
+                (
+                    delta.player_id,
+                    delta.role,
+                    delta.position,
+                    f"{delta.baseline_ownership:.6f}",
+                    f"{delta.applied_ownership:.6f}",
+                    f"{delta.delta_points:+.6f}",
+                    f"{delta.ownership_p10:.6f}",
+                    f"{delta.ownership_p50:.6f}",
+                    f"{delta.ownership_p90:.6f}",
+                    f"{delta.prob_delta_positive:.6f}",
+                    delta.feature_id,
+                    "|".join(delta.episode_ids),
+                    "|".join(delta.evidence_refs),
+                )
+            )
+
+    output.write("\nRED TEAM (Stage 5)\n")
+    output.write(render_red_team_review(routing.red_team))
+
     output.write("\nATTACHED CONTEST\n")
     if memo.attached_contest is None:
         output.write("contest_status=unavailable — no contest attached\n")
@@ -335,7 +508,7 @@ def _validate_build_result(
     build_result: BuildResult,
     session: PointInTimeSession,
     slate: SlateRow,
-) -> None:
+) -> tuple[CandidateSelection, OwnershipRouting]:
     request = build_result.request
     if request.slate_id != slate.slate_id or request.site.value != slate.site:
         raise SlateMemoError("optimizer request does not match the point-in-time slate")
@@ -356,16 +529,30 @@ def _validate_build_result(
         if item.artifact_kind == "availability"
     )
     try:
-        selected = session.candidate_scenario(
+        selected, routing = session.candidate_scenario(
             slate_id=slate.slate_id,
             site=DfsSite(slate.site),
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
             availability_artifacts=availability_artifacts,
+            slate_type=slate.slate_type,
+            contest_archetype=request.contest_archetype.value,
+            ownership_routing=pinned_routing_from_manifest(
+                build_result.snapshot.manifest_hashes_json
+            ),
             as_of=build_result.snapshot.decision_at,
         )
     except (ReplayError, ValueError) as error:
         raise SlateMemoError(str(error)) from error
+    recorded = build_result.ownership_routing
+    if recorded.applied != routing.applied or recorded.scenario_run_id != routing.scenario_run_id:
+        raise SlateMemoError(
+            "the frozen decision's ownership routing cannot be reproduced from the store"
+        )
+    # The re-derivation proves the rows; the reason comes from the build's own record (a
+    # live BuildResult, or the stored routing row a reload carries), because a replay of
+    # an unrouted decision can only say "no set pinned" and that is not why.
+    routing = replace(routing, reason=recorded.reason)
     if frozenset(selected.salary_artifacts) != salary_artifacts:
         raise SlateMemoError(
             "not every salary manifest source/hash pair contributed memo rows"
@@ -396,6 +583,83 @@ def _validate_build_result(
                 raise SlateMemoError(
                     f"lineup player {player.player_id} cannot be reproduced from the store"
                 )
+    return selected, routing
+
+
+def _memo_routing(
+    session: PointInTimeSession,
+    routing: OwnershipRouting,
+    *,
+    slate: SlateRow,
+    decision_at: datetime,
+    candidates: dict[int, CandidatePlayer],
+    lineups: tuple[Lineup, ...],
+    optimizer_reads_ownership: bool,
+) -> SlateMemoOwnershipRouting:
+    """Carry Stage 4's verdict and Stage 5's review into the memo, applied or not."""
+
+    if not routing.applied:
+        return SlateMemoOwnershipRouting(
+            applied=False,
+            reason=routing.reason,
+            contest_archetype=routing.contest_archetype,
+            role=routing.role,
+        )
+    red_team = build_red_team_review(
+        session,
+        routing,
+        slate_id=slate.slate_id,
+        site=slate.site,
+        decision_at=decision_at,
+        candidates=candidates,
+        lineups=lineups,
+        optimizer_reads_ownership=optimizer_reads_ownership,
+        limit=RED_TEAM_LIMIT,
+    )
+    return SlateMemoOwnershipRouting(
+        applied=True,
+        reason=routing.reason,
+        contest_archetype=routing.contest_archetype,
+        role=routing.role,
+        scenario_run_id=routing.scenario_run_id,
+        scenario_decision_snapshot_id=routing.scenario_decision_snapshot_id,
+        model_run_id=routing.model_run_id,
+        model_version=routing.model_version,
+        model_eval_id=routing.model_eval_id,
+        governance_status=routing.governance_status,
+        status_multiplier=routing.status_multiplier,
+        config_sha256=routing.config_sha256,
+        feature_version=routing.feature_version,
+        scenario_set_sha256=routing.sha256,
+        applied_row_count=len(routing.deltas),
+        material_delta_count=len(routing.material_deltas),
+        applied_deltas=tuple(
+            _memo_delta(delta) for delta in routing.largest_deltas(RED_TEAM_LIMIT)
+        ),
+        red_team=red_team,
+    )
+
+
+def _memo_delta(delta: AppliedOwnershipDelta) -> SlateMemoAppliedDelta:
+    return SlateMemoAppliedDelta(
+        player_id=delta.player_id,
+        role=delta.role,
+        position=delta.position,
+        baseline_ownership=delta.baseline_ownership,
+        applied_ownership=delta.applied_ownership,
+        delta_points=round(delta.delta_points, 6),
+        ownership_p10=delta.ownership_p10,
+        ownership_p50=delta.ownership_p50,
+        ownership_p90=delta.ownership_p90,
+        prob_delta_positive=delta.prob_delta_positive,
+        feature_id=delta.feature_id,
+        episode_ids=delta.episode_ids,
+        evidence_refs=tuple(
+            f"{ref.episode_id}/{ref.claim_id}/{ref.source_id}/item-{ref.source_item_id}"
+            f"[{ref.extract_start}:{ref.extract_end}]"
+            for ref in delta.evidence_refs
+        ),
+    )
 
 
 def _lineup_player_matches(player: LineupPlayer, candidate: CandidatePlayer) -> bool:
