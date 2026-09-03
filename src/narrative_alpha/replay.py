@@ -30,8 +30,11 @@ from narrative_alpha.ownership_routing import (
 )
 from narrative_alpha.portfolio import (
     CLASSIC_SITE_RULES,
+    CONTEST_POLICY_ARTIFACT_KIND,
     CandidatePlayerScenario,
     ContestArchetype,
+    ContestPolicies,
+    ContestPolicyError,
     DfsSite,
     Lineup,
     LineupPlayer,
@@ -39,6 +42,8 @@ from narrative_alpha.portfolio import (
     OptimizerAdapter,
     export_upload_csv,
     lineup_sha256,
+    load_contest_policies_bytes,
+    policy_request_fields,
 )
 from narrative_alpha.store import DecisionManifestHash, DecisionSnapshotRow, SlateRow
 
@@ -82,6 +87,7 @@ class ReplayResult:
     request: OptimizationRequest
     lineups: tuple[Lineup, ...]
     ownership_routing: OwnershipRouting
+    contest_policy: ContestPolicies
 
 
 class PointInTimeSession:
@@ -216,6 +222,7 @@ def replay_decision(
     salary_artifacts = _source_artifacts(snapshot, "salary")
     projection_artifacts = _source_artifacts(snapshot, "projection")
     availability_artifacts = _source_artifacts(snapshot, "availability", required=False)
+    contest_policy = _contest_policy(snapshot, artifact_root)
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
     expected_output_bytes = _read_verified_artifact(artifact_root, expected_output)
@@ -279,7 +286,23 @@ def replay_decision(
         players=rebuilt.players,
         projection_source_versions=rebuilt.projection_source_versions,
     )
-    request = original_request.model_copy(update={"candidate_player_scenario": scenario})
+    try:
+        policy_fields = policy_request_fields(
+            contest_policy,
+            original_request.contest_archetype,
+            scenario,
+        )
+    except ContestPolicyError as error:
+        raise ReplayArtifactError(str(error)) from error
+    for field, expected in policy_fields.as_update().items():
+        if getattr(original_request, field) != expected:
+            raise ReplayArtifactError(
+                f"optimizer request {field} differs from frozen contest policy "
+                f"{contest_policy.policy_version!r}"
+            )
+    request = original_request.model_copy(
+        update={"candidate_player_scenario": scenario, **policy_fields.as_update()}
+    )
     lineups = adapter.build_lineups(request)
     output = adapter.export_upload_csv(lineups, request.site, request.upload_entries)
     actual_hash = hashlib.sha256(output).hexdigest()
@@ -300,6 +323,7 @@ def replay_decision(
         request=original_request,
         lineups=lineups,
         ownership_routing=routed.routing,
+        contest_policy=contest_policy,
     )
 
 
@@ -311,6 +335,7 @@ class FrozenDecision:
     request: OptimizationRequest
     lineups: tuple[Lineup, ...]
     upload_bytes: bytes
+    contest_policy: ContestPolicies
 
 
 def read_frozen_decision(
@@ -336,10 +361,25 @@ def read_frozen_decision(
     output_artifact = _single_artifact(snapshot, "generated_lineups")
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
     upload_bytes = _read_verified_artifact(artifact_root, output_artifact)
+    contest_policy = _contest_policy(snapshot, artifact_root)
     try:
         request = OptimizationRequest.model_validate_json(request_bytes)
     except ValidationError as error:
         raise ReplayArtifactError(f"frozen optimizer request is not valid: {error}") from error
+    try:
+        policy_fields = policy_request_fields(
+            contest_policy,
+            request.contest_archetype,
+            request.candidate_player_scenario,
+        )
+    except ContestPolicyError as error:
+        raise ReplayArtifactError(str(error)) from error
+    for field, expected in policy_fields.as_update().items():
+        if getattr(request, field) != expected:
+            raise ReplayArtifactError(
+                f"frozen optimizer request {field} differs from contest policy "
+                f"{contest_policy.policy_version!r}"
+            )
     lineups = _lineups_from_upload(request, upload_bytes)
     try:
         rendered = export_upload_csv(lineups, request.site, request.upload_entries)
@@ -350,7 +390,11 @@ def read_frozen_decision(
             "generated_lineups.csv does not round-trip through the frozen request's candidates"
         )
     return FrozenDecision(
-        snapshot=snapshot, request=request, lineups=lineups, upload_bytes=upload_bytes
+        snapshot=snapshot,
+        request=request,
+        lineups=lineups,
+        upload_bytes=upload_bytes,
+        contest_policy=contest_policy,
     )
 
 
@@ -446,6 +490,20 @@ def _single_artifact(snapshot: DecisionSnapshotRow, artifact_kind: str) -> Decis
             f"decision manifest must contain exactly one {artifact_kind} artifact"
         )
     return artifacts[0]
+
+
+def _contest_policy(snapshot: DecisionSnapshotRow, artifact_root: Path) -> ContestPolicies:
+    artifact = _single_artifact(snapshot, CONTEST_POLICY_ARTIFACT_KIND)
+    raw = _read_verified_artifact(artifact_root, artifact)
+    try:
+        policies = load_contest_policies_bytes(raw, source=artifact.path)
+    except ContestPolicyError as error:
+        raise ReplayArtifactError(str(error)) from error
+    if artifact.source != policies.policy_version:
+        raise ReplayArtifactError(
+            "contest policy manifest version does not match the frozen policy bytes"
+        )
+    return policies
 
 
 def _source_artifacts(

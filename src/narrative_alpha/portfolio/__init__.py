@@ -7,6 +7,18 @@ from narrative_alpha.portfolio.adapter import (
     OptimizerError,
     UnsupportedOptimizationFeature,
 )
+from narrative_alpha.portfolio.contest_policies import (
+    CONTEST_POLICY_ARTIFACT_KIND,
+    DEFAULT_CONTEST_POLICIES_PATH,
+    ContestPolicies,
+    ContestPolicy,
+    ContestPolicyError,
+    OwnershipSumPoints,
+    PolicyRequestFields,
+    load_contest_policies,
+    load_contest_policies_bytes,
+    policy_request_fields,
+)
 from narrative_alpha.portfolio.export import export_upload_csv
 from narrative_alpha.portfolio.heuristic_report import (
     HEURISTIC_NOTICE,
@@ -48,12 +60,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CLASSIC_SITE_RULES",
+    "CONTEST_POLICY_ARTIFACT_KIND",
+    "DEFAULT_CONTEST_POLICIES_PATH",
     "HEURISTIC_NOTICE",
     "BringBackRule",
     "CandidatePlayer",
     "CandidatePlayerScenario",
     "ClassicSiteRules",
     "ContestArchetype",
+    "ContestPolicies",
+    "ContestPolicy",
+    "ContestPolicyError",
     "DfsSite",
     "ExposureLimit",
     "HeuristicLineupRow",
@@ -66,7 +83,9 @@ __all__ = [
     "OptimizationRequest",
     "OptimizerAdapter",
     "OptimizerError",
+    "OwnershipSumPoints",
     "PlayerExposureRange",
+    "PolicyRequestFields",
     "PydfsAdapter",
     "SlateType",
     "StackRule",
@@ -77,6 +96,9 @@ __all__ = [
     "build_heuristic_report",
     "export_upload_csv",
     "lineup_sha256",
+    "load_contest_policies",
+    "load_contest_policies_bytes",
+    "policy_request_fields",
     "render_heuristic_report",
     "validate_lineup",
     "validate_portfolio",

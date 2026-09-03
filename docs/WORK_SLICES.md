@@ -2186,6 +2186,31 @@ are stated assumptions to be tuned, not statistics.
 > band refuses with the pool's range; the fast lane's re-freeze carries the policy; the
 > memo golden updated with the new block only. Gates green; never the production database.
 
+**Implementation status (2026-09-03):** landed. `config/contest_policies.toml`
+(`contest-policy-v1`) and `portfolio/contest_policies.py` (strict loader, byte hash) give
+each classic archetype an ownership-sum band in points, a lineup uniqueness, a player
+exposure maximum, and `objective = "projection"`. `build_decision` fills the request from
+the policy, writes the exact policy bytes beside the other artifacts, and records them in
+the manifest (schema 1.1) so replay and `read_frozen_decision` re-derive the same request
+fields and refuse a request that disagrees with its frozen policy. The adapter accepts the
+four non-cash archetypes under the projection objective, enforces exposure maxima across
+the whole portfolio including pinned lineups, and refuses an ownership-sum band no valid
+lineup can satisfy by naming the band and the candidate pool's own range (two bounding
+solves). The fast lane re-freezes against the base decision's policy bytes; the memo
+prints a DECISION INPUT block; `na-ops status` shows the policy version beside the decision.
+
+**Review outcome (2026-09-03):** accepted with two changes. (1) A policy exposure maximum
+of 1.0 constrains nothing, yet the cash request carried one exposure range per candidate;
+the request now omits vacuous ranges, so a cash decision's bytes stay what they were before
+this slice. (2) A cap of 0.40 in a one-lineup portfolio allows no player a slot and would
+have failed inside the optimizer with an opaque message; the build now refuses before
+building and names the smallest portfolio the cap permits. Noted, accepted: manifest schema
+1.0 decisions (no policy artifact) are no longer replayable by this code — production holds
+zero decision snapshots, so nothing is orphaned, and a 1.0 fallback would have been dead
+code with a byte-identity promise nobody could test. The exposure strategy reaches into a
+pydfs private (`_solver_class.build_player_var_name`); acceptable under the pinned 3.6.1
+and a reason not to bump it casually. Suite 653 → 663.
+
 ### Slice 34 — Tuesday grading and the source credibility ledger (§5.9)
 
 **Goal:** the third Tuesday step the design asks for: grade every falsifiable claim against

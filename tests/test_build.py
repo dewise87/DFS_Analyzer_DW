@@ -47,6 +47,14 @@ def test_build_then_replay_is_byte_identical_and_commits_run(tmp_path: Path) -> 
     assert built.manifest_path.read_bytes() == canonical_manifest_hashes(
         built.snapshot.manifest_hashes_json
     ).encode("utf-8")
+    policy_artifact = next(
+        item
+        for item in built.snapshot.manifest_hashes_json
+        if item.artifact_kind == "contest_policy"
+    )
+    assert policy_artifact.source == built.contest_policy.policy_version
+    assert policy_artifact.sha256 == built.contest_policy.sha256
+    assert built.contest_policy_path.read_bytes() == built.contest_policy.raw_bytes
     assert {
         item.sha256
         for item in built.snapshot.manifest_hashes_json

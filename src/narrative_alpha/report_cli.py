@@ -343,11 +343,15 @@ def _reconstructed_build_result(
         lineups=replay.lineups,
         replay=replay,
         ownership_routing=_stored_reason(connection, snapshot, replay.ownership_routing),
+        contest_policy=replay.contest_policy,
         artifact_root=artifact_root,
         artifact_directory=artifact_directory,
         optimizer_request_path=request_path,
         generated_lineups_path=lineups_path,
         manifest_path=manifest_path,
+        contest_policy_path=_safe_artifact_path(
+            artifact_root, _single_artifact(snapshot, "contest_policy")
+        ),
     )
 
 
@@ -368,7 +372,7 @@ def _stored_reason(
 
 def _single_artifact(
     snapshot: DecisionSnapshotRow,
-    artifact_kind: Literal["optimizer_request", "generated_lineups"],
+    artifact_kind: Literal["optimizer_request", "generated_lineups", "contest_policy"],
 ) -> DecisionManifestHash:
     values = tuple(
         item for item in snapshot.manifest_hashes_json if item.artifact_kind == artifact_kind

@@ -315,6 +315,10 @@ def process_official_inactives(
                 ownership_routing=pinned_routing_from_manifest(
                     base.snapshot.manifest_hashes_json
                 ),
+                # Re-freeze against the exact policy bytes named by the base manifest.
+                # This carries its ownership band, uniqueness, objective, and exposure
+                # limits together, even if the shipped file changes after Saturday.
+                contest_policy=base.contest_policy,
             )
             _mark_run(connection, run_id=run_id, status="succeeded", at=observed_at)
         except Exception as error:

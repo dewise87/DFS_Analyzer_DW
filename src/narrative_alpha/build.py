@@ -35,8 +35,12 @@ from narrative_alpha.ownership_routing import (
 )
 from narrative_alpha.portfolio import (
     CLASSIC_SITE_RULES,
+    CONTEST_POLICY_ARTIFACT_KIND,
+    DEFAULT_CONTEST_POLICIES_PATH,
     CandidatePlayerScenario,
     ContestArchetype,
+    ContestPolicies,
+    ContestPolicyError,
     DfsSite,
     Lineup,
     OptimizationRequest,
@@ -44,6 +48,8 @@ from narrative_alpha.portfolio import (
     PydfsAdapter,
     SlateType,
     UploadEntry,
+    load_contest_policies,
+    policy_request_fields,
 )
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -61,7 +67,7 @@ from narrative_alpha.store import (
     manifest_hash_set_sha256,
 )
 
-MANIFEST_SCHEMA_VERSION = "1.0"
+MANIFEST_SCHEMA_VERSION = "1.1"
 
 
 class BuildError(RuntimeError):
@@ -127,11 +133,13 @@ class BuildResult:
     lineups: tuple[Lineup, ...]
     replay: ReplayResult
     ownership_routing: OwnershipRouting
+    contest_policy: ContestPolicies
     artifact_root: Path
     artifact_directory: Path
     optimizer_request_path: Path
     generated_lineups_path: Path
     manifest_path: Path
+    contest_policy_path: Path
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,7 @@ class _WrittenArtifacts:
     request_path: Path
     lineups_path: Path
     manifest_path: Path
+    contest_policy_path: Path
 
 
 def build_decision(
@@ -154,12 +163,14 @@ def build_decision(
     excluded_lineup_player_ids: tuple[tuple[int, ...], ...] = (),
     pinned_lineups: tuple[Lineup, ...] = (),
     upload_entries: tuple[UploadEntry, ...] = (),
-    lineup_uniqueness: int = 1,
+    lineup_uniqueness: int | None = None,
     run_type: str = "decision_build",
     note: str = "na-build immediate replay verified",
     adapter: OptimizerAdapter | None = None,
     connection: sqlite3.Connection | None = None,
     ownership_routing: PinnedOwnershipRouting | None = None,
+    contest_policy: ContestPolicies | None = None,
+    contest_policy_path: Path = DEFAULT_CONTEST_POLICIES_PATH,
 ) -> BuildResult:
     """Build, freeze, replay, and atomically commit one DFS decision.
 
@@ -192,6 +203,26 @@ def build_decision(
         raise BuildInputError("slate_id must be positive")
     if number_of_lineups < 1 or number_of_lineups > 150:
         raise BuildInputError("number_of_lineups must be between 1 and 150")
+    try:
+        policies = contest_policy or load_contest_policies(contest_policy_path)
+        selected_policy = policies.for_archetype(requested_archetype)
+    except ContestPolicyError as error:
+        raise BuildInputError(str(error)) from error
+    if selected_policy.max_player_exposure < 1.0:
+        smallest = math.ceil(1.0 / selected_policy.max_player_exposure - 1e-9)
+        if number_of_lineups < smallest:
+            raise BuildInputError(
+                f"contest policy {policies.policy_version!r} caps player exposure at "
+                f"{selected_policy.max_player_exposure:.2f} for {requested_archetype.value}, "
+                f"which allows no player a slot in a {number_of_lineups}-lineup portfolio; "
+                f"build at least {smallest} lineups or change the policy"
+            )
+    if lineup_uniqueness is not None and lineup_uniqueness != selected_policy.lineup_uniqueness:
+        raise BuildInputError(
+            f"lineup_uniqueness {lineup_uniqueness} conflicts with contest policy "
+            f"{policies.policy_version!r} value {selected_policy.lineup_uniqueness} for "
+            f"{requested_archetype.value}"
+        )
 
     selected_adapter = adapter or PydfsAdapter()
     if connection is not None:
@@ -208,11 +239,11 @@ def build_decision(
             excluded_lineup_player_ids=excluded_lineup_player_ids,
             pinned_lineups=pinned_lineups,
             upload_entries=upload_entries,
-            lineup_uniqueness=lineup_uniqueness,
             run_type=run_type,
             note=note,
             adapter=selected_adapter,
             ownership_routing=ownership_routing,
+            contest_policy=policies,
         )
     with connect_database(database_path) as owned:
         apply_migrations(owned)
@@ -229,11 +260,11 @@ def build_decision(
                 excluded_lineup_player_ids=excluded_lineup_player_ids,
                 pinned_lineups=pinned_lineups,
                 upload_entries=upload_entries,
-                lineup_uniqueness=lineup_uniqueness,
                 run_type=run_type,
                 note=note,
                 adapter=selected_adapter,
                 ownership_routing=ownership_routing,
+                contest_policy=policies,
             )
         except Exception:
             owned.rollback()
@@ -269,11 +300,11 @@ def _build_in_transaction(
     excluded_lineup_player_ids: tuple[tuple[int, ...], ...],
     pinned_lineups: tuple[Lineup, ...],
     upload_entries: tuple[UploadEntry, ...],
-    lineup_uniqueness: int,
     run_type: str,
     note: str,
     adapter: OptimizerAdapter,
     ownership_routing: PinnedOwnershipRouting | None = None,
+    contest_policy: ContestPolicies,
 ) -> BuildResult:
     session = PointInTimeSession(connection)
     try:
@@ -311,6 +342,7 @@ def _build_in_transaction(
         players=selected.players,
         projection_source_versions=selected.projection_source_versions,
     )
+    policy_fields = policy_request_fields(contest_policy, contest_archetype, scenario)
     request = OptimizationRequest(
         site=site,
         slate_id=slate_id,
@@ -322,7 +354,10 @@ def _build_in_transaction(
         excluded_lineup_player_ids=excluded_lineup_player_ids,
         pinned_lineups=pinned_lineups,
         upload_entries=upload_entries,
-        lineup_uniqueness=lineup_uniqueness,
+        objective=policy_fields.objective,
+        ownership_sum_range=policy_fields.ownership_sum_range,
+        lineup_uniqueness=policy_fields.lineup_uniqueness,
+        player_exposure_ranges=policy_fields.player_exposure_ranges,
     )
     request_bytes = canonical_json_bytes(request)
     request_sha256 = _sha256(request_bytes)
@@ -351,6 +386,7 @@ def _build_in_transaction(
     manifest = _decision_manifest(
         selected,
         routing,
+        contest_policy=contest_policy,
         request_sha256=request_sha256,
         request_path=request_relative_path,
         lineups_sha256=upload_sha256,
@@ -363,6 +399,7 @@ def _build_in_transaction(
         request_bytes=request_bytes,
         lineups_bytes=upload_bytes,
         manifest_bytes=manifest_bytes,
+        contest_policy_bytes=contest_policy.raw_bytes,
     )
     try:
         return _commit_and_verify(
@@ -382,6 +419,7 @@ def _build_in_transaction(
             note=note,
             adapter=adapter,
             routing=routing,
+            contest_policy=contest_policy,
         )
     except Exception:
         # The DB transaction rolls back in build_decision; the on-disk artifacts must
@@ -408,6 +446,7 @@ def _commit_and_verify(
     note: str,
     adapter: OptimizerAdapter,
     routing: OwnershipRouting,
+    contest_policy: ContestPolicies,
 ) -> BuildResult:
     run = ModelRunRow(
         run_id=run_id,
@@ -472,11 +511,13 @@ def _commit_and_verify(
         lineups=lineups,
         replay=replay,
         ownership_routing=routing,
+        contest_policy=contest_policy,
         artifact_root=artifact_root,
         artifact_directory=written.directory,
         optimizer_request_path=written.request_path,
         generated_lineups_path=written.lineups_path,
         manifest_path=written.manifest_path,
+        contest_policy_path=written.contest_policy_path,
     )
 
 
@@ -518,6 +559,7 @@ def _scenario_id(
 def _decision_manifest(
     selected: CandidateSelection,
     routing: OwnershipRouting,
+    contest_policy: ContestPolicies,
     *,
     request_sha256: str,
     request_path: str,
@@ -549,6 +591,12 @@ def _decision_manifest(
         )
     )
     generated = (
+        DecisionManifestHash(
+            artifact_kind=CONTEST_POLICY_ARTIFACT_KIND,
+            sha256=contest_policy.sha256,
+            path=f"{request_path.rsplit('/', 1)[0]}/contest_policy.toml",
+            source=contest_policy.policy_version,
+        ),
         DecisionManifestHash(
             artifact_kind="optimizer_request",
             sha256=request_sha256,
@@ -588,17 +636,20 @@ def _write_artifacts(
     request_bytes: bytes,
     lineups_bytes: bytes,
     manifest_bytes: bytes,
+    contest_policy_bytes: bytes,
 ) -> _WrittenArtifacts:
     directory = artifact_root / decision_snapshot_id
     request_path = directory / "optimizer_request.json"
     lineups_path = directory / "generated_lineups.csv"
     manifest_path = directory / "manifest.json"
+    contest_policy_path = directory / "contest_policy.toml"
     try:
         artifact_root.mkdir(parents=True, exist_ok=True)
         directory.mkdir()
         request_path.write_bytes(request_bytes)
         lineups_path.write_bytes(lineups_bytes)
         manifest_path.write_bytes(manifest_bytes)
+        contest_policy_path.write_bytes(contest_policy_bytes)
     except OSError as error:
         raise BuildArtifactError(f"cannot write decision artifacts: {error}") from error
     return _WrittenArtifacts(
@@ -606,6 +657,7 @@ def _write_artifacts(
         request_path=request_path,
         lineups_path=lineups_path,
         manifest_path=manifest_path,
+        contest_policy_path=contest_policy_path,
     )
 
 

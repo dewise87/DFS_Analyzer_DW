@@ -1,9 +1,9 @@
 SLATE DECISION MEMO
 as_of=2026-09-13T16:55:00.000000Z
 decision_at=2026-09-13T16:55:00.000000Z
-decision_snapshot_id=decision-1add91e03437019d47e45f6efc76cf5cd905e28298d746259292a41b8704c380
-run_id=na-build-1add91e03437019d47e45f6efc76cf5cd905e28298d746259292a41b8704c380
-manifest_hash_set_sha256=e22d32f34810e666a0ee832faf94abcf864af4d07aa391b913a33a6200d8c0a7
+decision_snapshot_id=decision-d10838896e27f028ee27e813bf087c6df94f3eb544beb675106b949f736ebeab
+run_id=na-build-d10838896e27f028ee27e813bf087c6df94f3eb544beb675106b949f736ebeab
+manifest_hash_set_sha256=ab10fe26990db14deb6175f755e14d70ca0fb27442da140ec6f48af8ef7ee8cc
 slate_id=1
 external_slate_id=dk-main
 site=draftkings
@@ -15,6 +15,15 @@ starts_at=2026-09-13T17:00:00.000000Z
 locks_at=2026-09-13T17:00:00.000000Z
 scenario_id=scenario-504f21d26c54c2649c71449c7876cc115bce1b88f9c0d1eb9c797d84e867d834
 honest_labeling_notice=DECISION INPUT SUMMARY — projections and ownership are point-in-time inputs, not realized outcomes; no EV or probability claim is simulator-backed.
+
+DECISION INPUT
+contest_policy_version=contest-policy-v1
+contest_policy_sha256=3198679dff53394ddb1516835026e5040745442e0e372feea5e8e5f673eb749a
+contest_archetype=cash
+objective=projection
+ownership_sum_points=none
+lineup_uniqueness=1
+max_player_exposure=1.000000
 
 INPUT PROVENANCE
 artifact_kind,source,sha256,logical_path

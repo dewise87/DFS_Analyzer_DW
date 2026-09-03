@@ -238,6 +238,7 @@ class OptimizationRequest(BaseModel):
     slate_id: int
     slate_type: SlateType
     contest_archetype: ContestArchetype
+    objective: str = "projection"
     salary_cap: int = Field(gt=0)
     candidate_player_scenario: CandidatePlayerScenario
     stack_rules: tuple[StackRule, ...] = ()
@@ -263,6 +264,14 @@ class OptimizationRequest(BaseModel):
     min_teams: int | None = Field(default=None, ge=1, le=9)
     min_games: int | None = Field(default=None, ge=1, le=9)
     upload_entries: tuple[UploadEntry, ...] = ()
+
+    @field_validator("objective")
+    @classmethod
+    def required_objective(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("objective must not be empty")
+        return normalized
 
     @model_validator(mode="after")
     def validate_references(self) -> Self:

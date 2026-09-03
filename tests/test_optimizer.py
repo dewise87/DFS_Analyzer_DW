@@ -275,7 +275,6 @@ def test_phase_zero_adapter_rejects_advanced_controls_explicitly() -> None:
         PydfsAdapter().build_lineups(request)
 
     assert raised.value.features == (
-        "contest objective single_entry",
         "stack rules",
         "duplication penalty",
         "solver time limit",

@@ -262,6 +262,22 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slice 33 review outcomes
+
+- **The contest policy is a frozen input, like a salary file.** The exact policy bytes a
+  decision used are written beside its artifacts and hashed in the manifest; replay refuses
+  a request whose policy fields disagree with them. A policy edit on Wednesday therefore
+  cannot change what Sunday's decision meant.
+- **A constraint that constrains nothing is not in the request.** An exposure maximum of
+  1.0 emits no exposure ranges. Bytes that carry no information are a cost at every hash
+  and a source of false diffs.
+- **Manifest schema 1.1 has no 1.0 fallback.** Production holds no decision snapshots, so
+  the fallback would protect nothing and could not be tested against a real artifact. If a
+  1.0 decision ever surfaces, it is read from its bytes and not replayed.
+- **Policy numbers are assumptions until labels say otherwise.** The bands and caps in
+  `contest_policies.toml` are first-season rails, stated as such in the file; Slice 34's
+  labels and Slice 29's evaluation are what re-estimate them.
+
 ## 2026-09-03 — Slices 30–31 review outcomes
 
 - **No adjustment without provenance, and no refusal for a move the model did not make.**

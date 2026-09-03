@@ -685,13 +685,16 @@ def test_status_shows_captures_ingested_features_and_the_decision(
     slate = status.slate.slates[0]
     assert slate.slate_id == report.slate_id
     assert slate.decision_snapshot_id == report.decision_snapshot_id
+    assert slate.contest_policy_version == "contest-policy-v1"
     assert slate.feature_rows_at_decision > 0
     assert slate.unresolved_count == 0
     assert f"{SEASON} week {WEEK:02d}" in rendered
     assert "1 of 1 file(s) ingested" in rendered
     assert "none captured" in rendered
     assert str(report.decision_snapshot_id) in rendered
+    assert "policy contest-policy-v1" in rendered
     assert payload["slate"] is not None
+    assert payload["slate"]["slates"][0]["contest_policy_version"] == "contest-policy-v1"  # type: ignore[index]
 
 
 def test_cli_runs_the_lane_and_prints_the_paths(

@@ -1604,6 +1604,7 @@ ManifestArtifactKind = Literal[
     "availability",
     "signal_features",
     "model_parameters",
+    "contest_policy",
     "optimizer_request",
     "generated_lineups",
 ]

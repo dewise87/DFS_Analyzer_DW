@@ -341,9 +341,18 @@ def test_ops_status_names_the_active_scenario_set_and_its_multiplier(
             baselines[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
         )
         run_id = _insert_scenario_set(
-            connection, fixture, applied=applied, status="TESTING", at=SCENARIOS_AT
+            connection,
+            fixture,
+            applied=applied,
+            status="TESTING",
+            at=SCENARIOS_AT,
         )
-        _insert_evaluation(connection, fixture, beat_baseline=True, at=SCENARIOS_AT)
+        _insert_evaluation(
+            connection,
+            fixture,
+            beat_baseline=True,
+            at=SCENARIOS_AT,
+        )
         connection.commit()
     build_decision(
         fixture.database,
@@ -385,19 +394,38 @@ def test_replay_is_byte_identical_with_scenarios_on_and_off(tmp_path: Path) -> N
         site="draftkings",
         decision_at=SECOND_DECISION_AT,
         artifact_directory=fixture.artifacts,
+        contest_archetype="3max",
+        number_of_lineups=3,
     )
     assert not baseline_build.ownership_routing.applied
 
     with connect_database(fixture.database) as connection:
+        tournament_fit_run_id = _persist_synthetic_fit(
+            connection,
+            load_ownership_config(OWNERSHIP_CONFIG_PATH),
+            contest_archetype="3max",
+        )
         baselines = _baselines(connection, fixture)
         applied = dict(baselines)
         applied[fixture.narrative_player_id] = (
             baselines[fixture.narrative_player_id] + MATERIAL_DELTA + 0.01
         )
         run_id = _insert_scenario_set(
-            connection, fixture, applied=applied, status="TESTING", at=SCENARIOS_AT
+            connection,
+            fixture,
+            applied=applied,
+            status="TESTING",
+            at=SCENARIOS_AT,
+            contest_archetype="3max",
+            model_run_id=tournament_fit_run_id,
         )
-        _insert_evaluation(connection, fixture, beat_baseline=True, at=SCENARIOS_AT)
+        _insert_evaluation(
+            connection,
+            fixture,
+            beat_baseline=True,
+            at=SCENARIOS_AT,
+            contest_archetype="3max",
+        )
         connection.commit()
 
     routed_build = build_decision(
@@ -406,6 +434,8 @@ def test_replay_is_byte_identical_with_scenarios_on_and_off(tmp_path: Path) -> N
         site="draftkings",
         decision_at=SECOND_DECISION_AT + timedelta(minutes=1),
         artifact_directory=fixture.artifacts,
+        contest_archetype="3max",
+        number_of_lineups=3,
     )
     routed = routed_build.ownership_routing
     assert routed.applied
@@ -796,7 +826,12 @@ def _seed_narrative_item(
     assert report.claims_stored == 1
 
 
-def _persist_synthetic_fit(connection: sqlite3.Connection, config: object) -> str:
+def _persist_synthetic_fit(
+    connection: sqlite3.Connection,
+    config: object,
+    *,
+    contest_archetype: str = "cash",
+) -> str:
     """Store one real fit row so scenario provenance has a model to point at."""
 
     rows = tuple(
@@ -808,7 +843,7 @@ def _persist_synthetic_fit(connection: sqlite3.Connection, config: object) -> st
             decision_snapshot_id="decision-fixture",
             decision_at=utc_timestamp(DATA_AT),
             site="draftkings",
-            contest_archetype="cash",
+            contest_archetype=contest_archetype,
             role="classic",
             position="WR",
             baseline_ownership=0.10 + index * 0.005,
@@ -825,7 +860,7 @@ def _persist_synthetic_fit(connection: sqlite3.Connection, config: object) -> st
     model = fit_ownership_model(
         rows,
         config=config,  # type: ignore[arg-type]
-        contest_archetype="cash",
+        contest_archetype=contest_archetype,
         site="draftkings",
         allow_synthetic=True,
     )
@@ -896,6 +931,8 @@ def _insert_scenario_set(
     applied: dict[int, float],
     status: str,
     at: datetime,
+    contest_archetype: str = "cash",
+    model_run_id: str | None = None,
 ) -> str:
     """Write one governed scenario set with chosen applied values, through real triggers."""
 
@@ -911,6 +948,7 @@ def _insert_scenario_set(
         ).fetchone()[0]
     )
     baselines = _baselines(connection, fixture)
+    source_model_run_id = model_run_id or fixture.fit_run_id
     multiplier = 0.25 if status == "UNVALIDATED" else 0.50
     connection.execute(
         """
@@ -919,7 +957,7 @@ def _insert_scenario_set(
             config_sha256, parent_run_id, error_message, created_at
         ) VALUES (?, 'ownership_scenarios', ?, NULL, 'running', 'test', ?, ?, NULL, ?)
         """,
-        (run_id, stamp, fixture.config_sha256, fixture.fit_run_id, stamp),
+        (run_id, stamp, fixture.config_sha256, source_model_run_id, stamp),
     )
     for player_id, value in sorted(applied.items()):
         baseline = baselines[player_id]
@@ -933,13 +971,14 @@ def _insert_scenario_set(
                 applied_ownership, calibrated_to_roster_totals, model_run_id, run_id,
                 model_version, config_sha256, feature_version, source, observed_at,
                 created_at
-            ) VALUES (?, ?, ?, 'draftkings', 'cash', 'classic', 'WR', ?, ?, ?, ?, ?, ?,
+            ) VALUES (?, ?, ?, 'draftkings', ?, 'classic', 'WR', ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'ownership-map-laplace', ?, ?)
             """,
             (
                 f"ownership-scenario-{run_id}-{player_id}",
                 player_id,
                 fixture.slate_id,
+                contest_archetype,
                 decision_snapshot_id,
                 baseline,
                 max(0.0, value - 0.02),
@@ -950,7 +989,7 @@ def _insert_scenario_set(
                 status,
                 multiplier,
                 value,
-                fixture.fit_run_id,
+                source_model_run_id,
                 run_id,
                 fixture.model_version,
                 fixture.config_sha256,
@@ -972,6 +1011,7 @@ def _insert_evaluation(
     *,
     beat_baseline: bool,
     at: datetime,
+    contest_archetype: str = "cash",
 ) -> str:
     stamp = utc_timestamp(at)
     digest = hashlib.sha256((stamp + str(beat_baseline)).encode()).hexdigest()[:16]
@@ -994,7 +1034,7 @@ def _insert_evaluation(
             feature_version, config_sha256, report_path, beat_baseline, source,
             published_at, observed_at, ingested_at, effective_at, valid_from, valid_to,
             source_version, run_id
-        ) VALUES (?, 'ownership', NULL, ?, ?, 30, 30, '{}', 'cash', 'draftkings', ?, ?,
+        ) VALUES (?, 'ownership', NULL, ?, ?, 30, 30, '{}', ?, 'draftkings', ?, ?,
                   ?, ?, 'ownership-forward-chain', NULL, ?, ?, ?, ?, NULL,
                   'ownership-eval-v1', ?)
         """,
@@ -1002,6 +1042,7 @@ def _insert_evaluation(
             model_eval_id,
             fixture.model_version,
             "c" * 64,
+            contest_archetype,
             fixture.feature_version,
             fixture.config_sha256,
             "data/reports/ownership/cash-fixture.txt",
@@ -1095,4 +1136,3 @@ def _insert_confounders(connection: sqlite3.Connection, fixture: RoutingFixture)
             availability_at,
         ),
     )
-

@@ -43,6 +43,7 @@ from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.snapshots import MANIFEST_FILENAME, load_manifest
 from narrative_alpha.snapshots.core import collect_status, snapshot_week_path
 from narrative_alpha.snapshots.models import CaptureKind
+from narrative_alpha.store import DecisionSnapshotRow
 
 RECEIPT_DIRECTORY_SUFFIX = ".stage1-receipts"
 COLLECTION_WINDOW = timedelta(days=7)
@@ -96,6 +97,7 @@ class SlateStatus:
     feature_rows_at_decision: int
     decision_snapshot_id: str | None
     decision_at: datetime | None
+    contest_policy_version: str | None
 
 
 @dataclass(frozen=True)
@@ -605,7 +607,7 @@ def _slate_row(
 ) -> SlateStatus:
     decision = connection.execute(
         """
-        SELECT decision_snapshot_id, decision_at FROM decision_snapshots
+        SELECT * FROM decision_snapshots
         WHERE slate_id = ?
         ORDER BY rtrim(decision_at, 'Z') DESC, decision_snapshot_id DESC
         LIMIT 1
@@ -622,6 +624,16 @@ def _slate_row(
         )
     )
     decided_at = None if decision is None else _parse_stamp(str(decision["decision_at"]))
+    snapshot = None if decision is None else DecisionSnapshotRow.from_db(decision)
+    policy_versions = (
+        []
+        if snapshot is None
+        else [
+            item.source
+            for item in snapshot.manifest_hashes_json
+            if item.artifact_kind == "contest_policy" and item.source
+        ]
+    )
     return SlateStatus(
         slate_id=summary.slate_id,
         external_slate_id=summary.external_slate_id,
@@ -637,6 +649,7 @@ def _slate_row(
         feature_rows_at_decision=features,
         decision_snapshot_id=None if decision is None else str(decision["decision_snapshot_id"]),
         decision_at=decided_at,
+        contest_policy_version=policy_versions[0] if len(policy_versions) == 1 else None,
     )
 
 
@@ -1028,7 +1041,8 @@ def _render_slate_week(status: OpsStatus) -> list[str]:
             if row.decision_snapshot_id is None or row.decision_at is None
             else f"{row.decision_snapshot_id} at {utc_timestamp(row.decision_at)}"
         )
-        lines.append(f"      decision  {decision}")
+        policy = row.contest_policy_version or "unavailable"
+        lines.append(f"      decision  {decision}  policy {policy}")
     return lines
 
 
@@ -1119,6 +1133,7 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                     "feature_rows_at_decision": row.feature_rows_at_decision,
                     "decision_snapshot_id": row.decision_snapshot_id,
                     "decision_at": _optional_stamp(row.decision_at),
+                    "contest_policy_version": row.contest_policy_version,
                 }
                 for row in status.slate.slates
             ],

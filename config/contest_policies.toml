@@ -1,0 +1,35 @@
+# First-season contest-construction assumptions. These are policy rails, not fitted
+# statistics, and must be re-estimated from actual-ownership labels after season one.
+# Every semantic change requires a new policy_version; decision manifests hash these
+# exact bytes so a replay cannot silently pick up later policy numbers.
+
+policy_version = "contest-policy-v1"
+
+[archetypes.cash]
+lineup_uniqueness = 1
+max_player_exposure = 1.0
+objective = "projection"
+
+[archetypes.single_entry]
+ownership_sum_points = { min = 90.0, max = 150.0 }
+lineup_uniqueness = 1
+max_player_exposure = 1.0
+objective = "projection"
+
+[archetypes.3max]
+ownership_sum_points = { min = 80.0, max = 140.0 }
+lineup_uniqueness = 2
+max_player_exposure = 1.0
+objective = "projection"
+
+[archetypes.20max]
+ownership_sum_points = { min = 70.0, max = 130.0 }
+lineup_uniqueness = 2
+max_player_exposure = 0.50
+objective = "projection"
+
+[archetypes.mass_multi_entry]
+ownership_sum_points = { min = 60.0, max = 120.0 }
+lineup_uniqueness = 3
+max_player_exposure = 0.40
+objective = "projection"

@@ -29,6 +29,7 @@ from narrative_alpha.ownership_routing import (
 from narrative_alpha.portfolio import (
     HEURISTIC_NOTICE,
     CandidatePlayer,
+    ContestPolicy,
     DfsSite,
     HeuristicReport,
     HeuristicThresholds,
@@ -133,9 +134,7 @@ class SlateMemoOwnershipRouting(BaseModel):
             if abs(delta.delta_points) > MATERIAL_DELTA * 100 and not delta.episode_ids
         )
         if untraceable:
-            raise ValueError(
-                f"applied deltas without episode provenance: {sorted(untraceable)}"
-            )
+            raise ValueError(f"applied deltas without episode provenance: {sorted(untraceable)}")
         return self
 
 
@@ -149,6 +148,27 @@ class SlateMemoLineup(BaseModel):
     total_salary: int = Field(gt=0)
     projected_ownership_sum: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     players: tuple[LineupPlayer, ...] = Field(min_length=1)
+
+
+class SlateMemoContestPolicy(BaseModel):
+    """The exact policy selection that constrained this decision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_version: str
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    contest_archetype: str
+    ownership_sum_points_min: float | None = None
+    ownership_sum_points_max: float | None = None
+    lineup_uniqueness: int = Field(ge=1, le=9)
+    max_player_exposure: float = Field(gt=0, le=1)
+    objective: str
+
+    @model_validator(mode="after")
+    def complete_band(self) -> SlateMemoContestPolicy:
+        if (self.ownership_sum_points_min is None) != (self.ownership_sum_points_max is None):
+            raise ValueError("ownership-sum policy band must have both bounds or neither")
+        return self
 
 
 class SlateMemo(BaseModel):
@@ -171,6 +191,7 @@ class SlateMemo(BaseModel):
         "not realized outcomes; no EV or probability claim is simulator-backed."
     ] = SLATE_MEMO_NOTICE
     ownership_routing: SlateMemoOwnershipRouting
+    contest_policy: SlateMemoContestPolicy
     attached_contest: ContestRow | None = None
     heuristic_report: HeuristicReport | None = None
 
@@ -250,6 +271,7 @@ def build_slate_memo(
         lineups=build_result.lineups,
         optimizer_reads_ownership=build_result.request.ownership_sum_range is not None,
     )
+    policy = build_result.contest_policy.for_archetype(build_result.request.contest_archetype)
     return SlateMemo(
         as_of=cutoff,
         decision_at=cutoff,
@@ -264,6 +286,12 @@ def build_slate_memo(
         input_artifacts=artifacts,
         lineups=memo_lineups,
         ownership_routing=memo_routing,
+        contest_policy=_memo_policy(
+            policy,
+            policy_version=build_result.contest_policy.policy_version,
+            policy_sha256=build_result.contest_policy.sha256,
+            contest_archetype=build_result.request.contest_archetype.value,
+        ),
         attached_contest=contest,
         heuristic_report=heuristic,
     )
@@ -290,6 +318,22 @@ def render_slate_memo(memo: SlateMemo) -> str:
     output.write(f"locks_at={utc_timestamp(memo.slate.locks_at)}\n")
     output.write(f"scenario_id={memo.scenario_id}\n")
     output.write("honest_labeling_notice=" + memo.honest_labeling_notice + "\n\n")
+
+    policy = memo.contest_policy
+    output.write("DECISION INPUT\n")
+    output.write(f"contest_policy_version={policy.policy_version}\n")
+    output.write(f"contest_policy_sha256={policy.policy_sha256}\n")
+    output.write(f"contest_archetype={policy.contest_archetype}\n")
+    output.write(f"objective={policy.objective}\n")
+    if policy.ownership_sum_points_min is None:
+        output.write("ownership_sum_points=none\n")
+    else:
+        output.write(
+            f"ownership_sum_points={policy.ownership_sum_points_min:.6f}-"
+            f"{policy.ownership_sum_points_max:.6f}\n"
+        )
+    output.write(f"lineup_uniqueness={policy.lineup_uniqueness}\n")
+    output.write(f"max_player_exposure={policy.max_player_exposure:.6f}\n\n")
 
     output.write("INPUT PROVENANCE\n")
     writer = csv.writer(output, lineterminator="\n")
@@ -518,6 +562,8 @@ def _validate_build_result(
         raise SlateMemoError("BuildResult replay did not match generated lineup bytes")
     if build_result.replay.request != request:
         raise SlateMemoError("BuildResult request differs from its verified replay request")
+    if build_result.contest_policy != build_result.replay.contest_policy:
+        raise SlateMemoError("BuildResult contest policy differs from its verified replay policy")
     if build_result.replay.lineups != build_result.lineups:
         raise SlateMemoError("BuildResult lineups differ from its verified replay lineups")
 
@@ -554,13 +600,9 @@ def _validate_build_result(
     # an unrouted decision can only say "no set pinned" and that is not why.
     routing = replace(routing, reason=recorded.reason)
     if frozenset(selected.salary_artifacts) != salary_artifacts:
-        raise SlateMemoError(
-            "not every salary manifest source/hash pair contributed memo rows"
-        )
+        raise SlateMemoError("not every salary manifest source/hash pair contributed memo rows")
     if frozenset(selected.projection_artifacts) != projection_artifacts:
-        raise SlateMemoError(
-            "not every projection manifest source/hash pair contributed memo rows"
-        )
+        raise SlateMemoError("not every projection manifest source/hash pair contributed memo rows")
     scenario = request.candidate_player_scenario
     if selected.players != scenario.players:
         raise SlateMemoError(
@@ -637,6 +679,26 @@ def _memo_routing(
             _memo_delta(delta) for delta in routing.largest_deltas(RED_TEAM_LIMIT)
         ),
         red_team=red_team,
+    )
+
+
+def _memo_policy(
+    policy: ContestPolicy,
+    *,
+    policy_version: str,
+    policy_sha256: str,
+    contest_archetype: str,
+) -> SlateMemoContestPolicy:
+    points = policy.ownership_sum_points
+    return SlateMemoContestPolicy(
+        policy_version=policy_version,
+        policy_sha256=policy_sha256,
+        contest_archetype=contest_archetype,
+        ownership_sum_points_min=None if points is None else points.min,
+        ownership_sum_points_max=None if points is None else points.max,
+        lineup_uniqueness=policy.lineup_uniqueness,
+        max_player_exposure=policy.max_player_exposure,
+        objective=policy.objective,
     )
 
 
@@ -781,8 +843,7 @@ def _source_artifacts(
     missing_sources = tuple(
         item.sha256
         for item in snapshot.manifest_hashes_json
-        if item.artifact_kind == artifact_kind
-        and (item.source is None or not item.source.strip())
+        if item.artifact_kind == artifact_kind and (item.source is None or not item.source.strip())
     )
     if missing_sources:
         raise ReplayArtifactError(

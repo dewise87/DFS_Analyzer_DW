@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from typing import Any, cast
 
@@ -49,6 +51,9 @@ class PydfsAdapter:
 
         roster_size = len(CLASSIC_SITE_RULES[request.site].slots)
         ownership_bounds = _ownership_average_bounds(request, roster_size)
+        ownership_pool_range = _ownership_pool_range(request)
+        _require_ownership_band_intersection(request, ownership_pool_range)
+        exposure_maxima = _player_exposure_maxima(request)
         candidates = {
             player.site_player_id: player for player in request.candidate_player_scenario.players
         }
@@ -66,6 +71,23 @@ class PydfsAdapter:
             games = _build_game_infos(request.candidate_player_scenario.players)
             pydfs_players = []
             pydfs_by_canonical_id: dict[int, Player] = {}
+            maximum_counts = {
+                player_id: math.floor(maximum * request.number_of_lineups + 1e-9)
+                for player_id, maximum in exposure_maxima.items()
+            }
+            pinned_counts = Counter(
+                player.player_id for lineup in request.pinned_lineups for player in lineup.players
+            )
+            over_exposed = sorted(
+                player_id
+                for player_id, count in pinned_counts.items()
+                if count > maximum_counts.get(player_id, request.number_of_lineups)
+            )
+            if over_exposed:
+                raise OptimizerError(
+                    "pinned lineups already exceed player exposure policy for IDs: "
+                    + ", ".join(str(player_id) for player_id in over_exposed)
+                )
             for candidate in request.candidate_player_scenario.players:
                 game = games[candidate.game_id]
                 first_name, last_name = _split_name(candidate.name)
@@ -80,6 +102,10 @@ class PydfsAdapter:
                     is_injured=candidate.is_injured,
                     projected_ownership=candidate.projected_ownership,
                     game_info=game,
+                    max_exposure=_pydfs_max_exposure(
+                        maximum_counts.get(candidate.player_id),
+                        request.number_of_lineups,
+                    ),
                 )
                 pydfs_players.append(pydfs_player)
                 pydfs_by_canonical_id[candidate.player_id] = pydfs_player
@@ -114,7 +140,22 @@ class PydfsAdapter:
             solved: tuple[Any, ...] = (
                 ()
                 if remaining == 0
-                else tuple(optimizer.optimize(remaining, exclude_lineups=excluded_lineups))
+                else tuple(
+                    optimizer.optimize(
+                        remaining,
+                        exclude_lineups=excluded_lineups,
+                        exposure_strategy=_portfolio_exposure_strategy(
+                            optimizer,
+                            list(optimizer.player_pool.filtered_players),
+                            tuple(
+                                candidates[str(player.id)].player_id
+                                for player in optimizer.player_pool.filtered_players
+                            ),
+                            pinned_counts,
+                            request.number_of_lineups,
+                        ),
+                    )
+                )
             )
             lineups = (
                 *pinned,
@@ -148,8 +189,10 @@ def _unsupported_features(request: OptimizationRequest) -> tuple[str, ...]:
     features: list[str] = []
     if request.slate_type is not SlateType.CLASSIC:
         features.append("showdown slate rules")
-    if request.contest_archetype is not ContestArchetype.CASH:
+    if request.contest_archetype is ContestArchetype.SHOWDOWN:
         features.append(f"contest objective {request.contest_archetype.value}")
+    if request.objective != "projection":
+        features.append(f"objective {request.objective}")
     if request.stack_rules:
         features.append("stack rules")
     if request.bring_back_rules:
@@ -158,10 +201,7 @@ def _unsupported_features(request: OptimizationRequest) -> tuple[str, ...]:
         features.append("team exposure limits")
     if request.game_exposure_limits:
         features.append("game exposure limits")
-    if request.player_exposure_ranges:
-        # pydfs applies exposures progressively while building the portfolio,
-        # which diverges from the strict post-hoc validator; the OR-Tools
-        # adapter will honor these faithfully.
+    if request.player_exposure_ranges and not _player_exposures_supported(request):
         features.append("player exposure ranges")
     if request.duplication_penalty:
         features.append("duplication penalty")
@@ -188,6 +228,66 @@ def _unsupported_features(request: OptimizationRequest) -> tuple[str, ...]:
                 f"grants for {candidate.position} (missing {', '.join(narrowed)})"
             )
     return tuple(features)
+
+
+def _player_exposures_supported(request: OptimizationRequest) -> bool:
+    """pydfs can faithfully enforce a complete set of maximum-only ranges."""
+
+    ranges = request.player_exposure_ranges
+    candidate_ids = {player.player_id for player in request.candidate_player_scenario.players}
+    return {exposure.player_id for exposure in ranges} == candidate_ids and all(
+        exposure.minimum == 0 for exposure in ranges
+    )
+
+
+def _player_exposure_maxima(request: OptimizationRequest) -> dict[int, float]:
+    if not request.player_exposure_ranges:
+        return {}
+    return {exposure.player_id: exposure.maximum for exposure in request.player_exposure_ranges}
+
+
+def _pydfs_max_exposure(maximum_count: int | None, total_lineups: int) -> float | None:
+    if maximum_count is None:
+        return None
+    # TotalExposureStrategy treats zero as "no limit". A negative sentinel is truthy
+    # and is already reached before iteration one, faithfully representing zero slots.
+    return -1.0 if maximum_count == 0 else maximum_count / total_lineups
+
+
+def _portfolio_exposure_strategy(
+    optimizer: Any,
+    players: list[Player],
+    canonical_player_ids: tuple[int, ...],
+    pinned_counts: Counter[int],
+    total_lineups: int,
+) -> type[Any]:
+    """Seed pydfs exposure accounting with pinned rows and the whole portfolio size."""
+
+    initial: dict[str, int] = {}
+    for index, (player, canonical_id) in enumerate(zip(players, canonical_player_ids, strict=True)):
+        variable_name = optimizer._solver_class.build_player_var_name(player, str(index))
+        count = pinned_counts.get(canonical_id, 0)
+        if count:
+            initial[variable_name] = count
+
+    class PortfolioExposureStrategy:
+        def __init__(self, exposures: dict[str, float], _remaining_lineups: int) -> None:
+            self.exposures = exposures
+            self.total_lineups = total_lineups
+            self.used_vars = defaultdict(int, initial)
+
+        def set_used(self, variables: list[str]) -> None:
+            for variable in variables:
+                if variable in self.exposures:
+                    self.used_vars[variable] += 1
+
+        def is_reached_exposure(self, variable: str) -> bool:
+            maximum = self.exposures.get(variable)
+            if not maximum:
+                return False
+            return maximum <= self.used_vars.get(variable, 0) / self.total_lineups
+
+    return PortfolioExposureStrategy
 
 
 def _build_game_infos(players: Iterable[CandidatePlayer]) -> dict[str, GameInfo]:
@@ -254,6 +354,110 @@ def _ownership_average_bounds(
             f"got [{minimum:.6f}, {maximum:.6f}] for roster size {roster_size}"
         )
     return minimum, maximum
+
+
+def _ownership_pool_range(request: OptimizationRequest) -> tuple[float, float] | None:
+    """Return min/max ownership sums among site-valid candidate-pool lineups."""
+
+    if request.ownership_sum_range is None:
+        return None
+    players = request.candidate_player_scenario.players
+    if any(player.projected_ownership is None for player in players):
+        return None  # _ownership_average_bounds gives the stable missing-data refusal.
+    minimum = _extreme_ownership_sum(request, maximize=False)
+    maximum = _extreme_ownership_sum(request, maximize=True)
+    return minimum, maximum
+
+
+def _extreme_ownership_sum(request: OptimizationRequest, *, maximize: bool) -> float:
+    optimizer, candidates = _ownership_optimizer(request, maximize=maximize)
+    try:
+        lineup = next(optimizer.optimize(1))
+    except (LineupOptimizerException, StopIteration) as error:
+        raise OptimizerError(
+            "candidate pool has no lineup satisfying the site, salary, team, and game rules"
+        ) from error
+    return sum(cast(float, candidates[str(item.id)].projected_ownership) for item in lineup)
+
+
+def _ownership_band_is_feasible(request: OptimizationRequest) -> bool:
+    roster_size = len(CLASSIC_SITE_RULES[request.site].slots)
+    bounds = _ownership_average_bounds(request, roster_size)
+    optimizer, _ = _ownership_optimizer(request, maximize=True)
+    if bounds is not None:
+        optimizer.set_projected_ownership(*bounds)
+    try:
+        next(optimizer.optimize(1))
+    except (LineupOptimizerException, StopIteration):
+        return False
+    return True
+
+
+def _ownership_optimizer(
+    request: OptimizationRequest,
+    *,
+    maximize: bool,
+) -> tuple[Any, dict[str, CandidatePlayer]]:
+    """Build the one-lineup solver used only to characterize ownership feasibility."""
+
+    optimizer = get_optimizer(_pydfs_site(request.site), Sport.FOOTBALL)
+    optimizer.settings.budget = request.salary_cap
+    if request.max_players_per_team is not None:
+        optimizer.settings.max_from_one_team = request.max_players_per_team
+    if request.min_games is not None:
+        optimizer.settings.min_games = request.min_games
+    candidates = {
+        player.site_player_id: player for player in request.candidate_player_scenario.players
+    }
+    games = _build_game_infos(request.candidate_player_scenario.players)
+    pydfs_players = []
+    direction = 1.0 if maximize else -1.0
+    for candidate in request.candidate_player_scenario.players:
+        first_name, last_name = _split_name(candidate.name)
+        pydfs_players.append(
+            Player(
+                player_id=candidate.site_player_id,
+                first_name=first_name,
+                last_name=last_name,
+                positions=[_pydfs_position(candidate, request.site)],
+                team=candidate.team,
+                salary=candidate.salary,
+                fppg=direction * cast(float, candidate.projected_ownership),
+                is_injured=candidate.is_injured,
+                projected_ownership=candidate.projected_ownership,
+                game_info=games[candidate.game_id],
+            )
+        )
+    optimizer.player_pool.load_players(pydfs_players)
+    if request.min_teams is not None:
+        optimizer.set_total_teams(min_teams=request.min_teams)
+    return optimizer, candidates
+
+
+def _require_ownership_band_intersection(
+    request: OptimizationRequest,
+    pool_range: tuple[float, float] | None,
+) -> None:
+    band = request.ownership_sum_range
+    if band is None or pool_range is None:
+        return
+    pool_minimum, pool_maximum = pool_range
+    intersects = band.maximum >= pool_minimum - 1e-9 and band.minimum <= pool_maximum + 1e-9
+    if not intersects or not _ownership_band_is_feasible(request):
+        raise OptimizerError(_ownership_band_refusal(request, pool_range))
+
+
+def _ownership_band_refusal(
+    request: OptimizationRequest,
+    pool_range: tuple[float, float],
+) -> str:
+    band = request.ownership_sum_range
+    assert band is not None
+    return (
+        f"ownership-sum band [{band.minimum * 100:.2f}, {band.maximum * 100:.2f}] points "
+        "cannot be satisfied by a valid lineup; the candidate pool's valid-lineup "
+        f"range is [{pool_range[0] * 100:.2f}, {pool_range[1] * 100:.2f}] points"
+    )
 
 
 def _convert_lineup(

@@ -116,6 +116,13 @@ def test_inactives_refreeze_only_affected_lineups_and_replay_byte_identically(
     assert inactive.name in {name for diff in report.diffs for name in diff.out}
     assert report.upload_csv_path.read_bytes() == replayed.output_bytes
     assert replayed.report.output_matches
+    assert frozen.contest_policy.sha256 == base.contest_policy.sha256
+    assert frozen.request.objective == base.request.objective
+    assert frozen.request.ownership_sum_range == base.request.ownership_sum_range
+    assert frozen.request.lineup_uniqueness == base.request.lineup_uniqueness
+    # The cash policy caps exposure at 1.0, which constrains nothing and so puts nothing
+    # in the request — the re-freeze carries that emptiness exactly as the base did.
+    assert frozen.request.player_exposure_ranges == ()
     assert snapshot is not None
     assert availability["player_id"] == inactive.player_id
     assert availability["availability_status"] == "unavailable"

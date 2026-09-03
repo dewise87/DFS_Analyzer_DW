@@ -18,6 +18,8 @@ from narrative_alpha.portfolio import (
     PydfsAdapter,
     SlateType,
     UploadEntry,
+    load_contest_policies,
+    policy_request_fields,
 )
 from narrative_alpha.replay import (
     MissingAsOfBound,
@@ -58,6 +60,10 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
     request = _request()
     request_bytes = request.model_dump_json(indent=2).encode("utf-8")
     request_path.write_bytes(request_bytes)
+    policy = load_contest_policies()
+    policy_path = artifact_root / "policy" / "contest_policy.toml"
+    policy_path.parent.mkdir(parents=True)
+    policy_path.write_bytes(policy.raw_bytes)
     adapter = PydfsAdapter()
     expected_output = adapter.export_upload_csv(
         adapter.build_lineups(request), request.site, request.upload_entries
@@ -66,6 +72,12 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
     output_path.parent.mkdir(parents=True)
     output_path.write_bytes(expected_output)
     manifest = (
+        DecisionManifestHash(
+            artifact_kind="contest_policy",
+            sha256=policy.sha256,
+            path="policy/contest_policy.toml",
+            source=policy.policy_version,
+        ),
         DecisionManifestHash(
             artifact_kind="salary",
             sha256=SALARY_HASH,
@@ -96,7 +108,7 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
         slate_id=1,
         decision_at=DECISION_AT,
         created_at=DECISION_AT,
-        manifest_schema_version="1.0",
+        manifest_schema_version="1.1",
         manifest_hashes_json=manifest,
         manifest_hash_set_sha256=manifest_hash_set_sha256(manifest),
         run_id=None,
@@ -141,19 +153,23 @@ def test_replay_is_byte_stable_and_ignores_post_lock_projection(tmp_path: Path) 
 
 
 def _request() -> OptimizationRequest:
+    scenario = CandidatePlayerScenario(
+        scenario_id="prelock-fixture",
+        players=_players(),
+        projection_source_versions=(
+            f"fixture-projection:projection-v1:{PROJECTION_HASH}",
+        ),
+    )
+    policy_fields = policy_request_fields(
+        load_contest_policies(), ContestArchetype.CASH, scenario
+    )
     return OptimizationRequest(
         site=DfsSite.DRAFTKINGS,
         slate_id=1,
         slate_type=SlateType.CLASSIC,
         contest_archetype=ContestArchetype.CASH,
         salary_cap=50_000,
-        candidate_player_scenario=CandidatePlayerScenario(
-            scenario_id="prelock-fixture",
-            players=_players(),
-            projection_source_versions=(
-                f"fixture-projection:projection-v1:{PROJECTION_HASH}",
-            ),
-        ),
+        candidate_player_scenario=scenario,
         number_of_lineups=1,
         upload_entries=(
             UploadEntry(
@@ -163,6 +179,7 @@ def _request() -> OptimizationRequest:
                 entry_fee="$1.00",
             ),
         ),
+        **policy_fields.as_update(),
     )
 
 

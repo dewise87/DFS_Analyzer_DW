@@ -497,6 +497,15 @@ unresolved players, and conflicting contest cohort metadata remain explicit rath
 The Tuesday `na-ops results` lane matches each export to the append-only `contests` record by the
 external contest ID in its filename and refuses with the `na-contest add` remedy when it cannot.
 
+## Contest policies
+
+`config/contest_policies.toml` gives each classic contest archetype its request policy: an
+ownership-sum band in points, lineup uniqueness, and a player exposure maximum, under the
+projection objective. `na-ops slate --contest-archetype 20max` builds with that archetype's
+policy; the exact policy bytes are frozen beside the decision and named in its manifest, so
+a later edit to the file cannot change what a frozen decision meant. The numbers are
+first-season assumptions to be re-estimated from actual-ownership labels.
+
 ## Signal and evidence audit
 
 `na-report signals --decision-snapshot <id> --player <id|name>` prints, for one player on
