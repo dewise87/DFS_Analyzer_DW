@@ -2337,6 +2337,25 @@ every response and no write tool at all in this slice.
 > decision carries its `as_of`; a claim observed after the decision is absent; the server
 > exposes no tool whose name suggests a write. Gates green.
 
+**Implementation status (2026-09-04):** landed as `src/narrative_alpha/mcp_server.py`
+(`na-mcp`, official `mcp` SDK, stdio only) with three new reads in `narrative/audit.py`
+(`episode_audit`, `search_evidence`, `decision_scenarios`). Eight tools, every one a thin
+call into a library function a CLI or the dashboard already uses, every one annotated
+read-only, every response carrying `as_of`, `code_version`, and the decision or run it
+answers about. "Latest" resolves the way the dashboard's audit page does (the memo step's
+decision, else the newest frozen one) and says which. Every scraped excerpt and source
+headline is replaced on the way out by a delimited block carrying the §7.6 notice, with
+format-control characters stripped and the delimiter keyed on the text's own hash; the
+field names are checked against the audit models so a renamed field fails loudly rather
+than leaking. Startup errors go to stderr, never the stdout transport. Twenty tests: tool
+set and annotations, a name that reads like a write is refused, as-of on every response, a
+claim or episode after the decision is absent, the framing on excerpts and headlines.
+
+**Review outcome (2026-09-04):** accepted as delivered. Checked and clean: the search cap
+is enforced in the library (1–100), not only in the tool; the memo text carries evidence
+ids, not excerpts, so nothing scraped reaches a response unframed; `replay_snapshot`
+writes nothing; no write-shaped tool exists. Suite 688 → 714.
+
 ### Slice 36 — Complexity-budget pass on Slices 29–32
 
 **Goal:** three duplications left by the last four slices, removed with no behavior change:

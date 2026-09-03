@@ -15,6 +15,7 @@ dependencies = [
     "pydfs-lineup-optimizer==3.6.1",
     "rapidfuzz>=3.9",
     "scipy>=1.14",
+    "mcp>=1.9,<2",
 ]
 
 [project.scripts]
@@ -26,6 +27,7 @@ na-episodes = "narrative_alpha.episodes_cli:main"
 na-extract = "narrative_alpha.extract_cli:main"
 na-fast = "narrative_alpha.fast.cli:main"
 na-features = "narrative_alpha.features_cli:main"
+na-mcp = "narrative_alpha.mcp_server:main"
 na-ops = "narrative_alpha.ops.cli:main"
 na-ownership = "narrative_alpha.ownership.cli:main"
 na-report = "narrative_alpha.report_cli:main"

@@ -7,6 +7,12 @@ its version, every episode behind those features, every claim in those episodes,
 verbatim evidence excerpt behind those claims — each read as of ``decision_at`` and
 nothing later.
 
+Three sibling reads answer the same question from the other three directions a reader
+arrives from — an episode id (:func:`episode_audit`), a phrase they remember seeing
+(:func:`search_evidence`), and the decision's whole Stage 4 set rather than one player's
+row (:func:`decision_scenarios`). They share this module because they share its one rule:
+the decision's ``decision_at`` is the cutoff, and every query is bound to it.
+
 Read-only by construction. Every query goes through :class:`PointInTimeSession`, which
 refuses SQL that omits the ``:as_of`` bind, so a claim observed after the decision cannot
 appear here however the caller asks. There is no write path in this module.
@@ -34,10 +40,17 @@ from narrative_alpha.narrative.source_catalog import (
 from narrative_alpha.ownership_routing import (
     MANIFEST_ARTIFACT_KIND,
     pinned_routing_from_manifest,
+    stored_ownership_routing,
 )
 from narrative_alpha.replay import PointInTimeSession, ReplayError
 
 DEFAULT_SOURCE_CATALOG_PATH = Path("config/narrative_sources.toml")
+
+# How many excerpts an evidence search returns when the caller names no limit, and the
+# ceiling it may raise that to. A search is a way in, not a bulk export: a reader who
+# wants everything behind a player asks for the audit, which is bounded by the decision.
+DEFAULT_EVIDENCE_SEARCH_LIMIT = 20
+MAX_EVIDENCE_SEARCH_LIMIT = 100
 
 #: The Appendix B heat channels, in the order the memo and the design doc list them.
 HEAT_CHANNELS = (
@@ -199,6 +212,86 @@ class PlayerAudit(AuditModel):
     ownership: AuditOwnership
     features: AuditFeatures | None
     episodes: tuple[AuditEpisode, ...]
+    notes: tuple[str, ...]
+
+
+class EvidenceHit(AuditModel):
+    """One excerpt that matched a search, with the claim and episode carrying it."""
+
+    episode_id: str
+    claim_id: str
+    claim_type: str
+    claim_dimension: str
+    evidence_class: str
+    item_title: str | None
+    evidence: AuditEvidence
+
+
+class EvidenceSearch(AuditModel):
+    """A capped substring search over the excerpts visible at one decision."""
+
+    decision_snapshot_id: str
+    decision_at: datetime
+    query: str
+    limit: int
+    truncated: bool
+    hits: tuple[EvidenceHit, ...]
+
+
+class DecisionScenarioRow(AuditModel):
+    """One player's row in the scenario set this decision saw."""
+
+    player_id: int
+    player_name: str | None
+    role: str
+    position: str
+    baseline_ownership: float
+    applied_ownership: float
+    ownership_p10: float
+    ownership_p50: float
+    ownership_p90: float
+    delta_p50: float
+    delta_points: float
+    prob_delta_positive: float
+    calibrated_to_roster_totals: bool
+
+
+class DecisionRoutingRecord(AuditModel):
+    """The row the build wrote beside the snapshot saying what Stage 4 did, and why."""
+
+    applied: bool
+    reason: str
+    scenario_run_id: str | None
+    scenario_set_sha256: str | None
+    governance_status: str | None
+    status_multiplier: float | None
+    model_eval_id: str | None
+    held_at_baseline: int
+    created_at: datetime
+
+
+class DecisionScenarios(AuditModel):
+    """One decision's ownership scenario set and the routing record beside it."""
+
+    decision_snapshot_id: str
+    decision_at: datetime
+    slate_id: int
+    site: str
+    #: ``manifest_pinned`` — the set the manifest names, so the optimizer read it;
+    #: ``available_not_applied`` — a set existed at the cutoff and Stage 4 declined it;
+    #: ``none`` — no set existed at all.
+    set_status: str
+    applied: bool
+    scenario_run_id: str | None
+    contest_archetype: str | None
+    governance_status: str | None
+    status_multiplier: float | None
+    model_run_id: str | None
+    model_version: str | None
+    config_sha256: str | None
+    feature_version: str | None
+    routing_record: DecisionRoutingRecord | None
+    rows: tuple[DecisionScenarioRow, ...]
     notes: tuple[str, ...]
 
 
@@ -581,6 +674,315 @@ def list_audit_candidates(
             None if row["position"] is None else str(row["position"]),
         )
         for row in rows
+    )
+
+
+def episode_audit(
+    connection: sqlite3.Connection,
+    *,
+    episode_id: str,
+    decision_snapshot_id: str,
+    catalog_path: Path | None = DEFAULT_SOURCE_CATALOG_PATH,
+) -> AuditEpisode:
+    """One episode with its claims and excerpts, read as of a decision and nothing later.
+
+    The same rows :func:`player_audit` nests under a player, reached from the other end:
+    a reader who has an episode id from a memo or a feature row and wants the evidence
+    without first working out which player it belongs to.
+    """
+
+    decision_at = _decision_instant(connection, decision_snapshot_id)
+    episodes = _episodes(
+        PointInTimeSession(connection),
+        (episode_id,),
+        as_of=decision_at,
+        grades=_GradeBook(catalog_path),
+    )
+    if not episodes:
+        raise AuditError(
+            f"episode {episode_id!r} was not visible at {utc_timestamp(decision_at)}; it "
+            "either does not exist or was built after this decision"
+        )
+    return episodes[0]
+
+
+def search_evidence(
+    connection: sqlite3.Connection,
+    *,
+    decision_snapshot_id: str,
+    query: str,
+    limit: int = DEFAULT_EVIDENCE_SEARCH_LIMIT,
+    catalog_path: Path | None = DEFAULT_SOURCE_CATALOG_PATH,
+) -> EvidenceSearch:
+    """Case-insensitive substring search over the excerpts visible at one decision.
+
+    Capped, and the cap is reported rather than hidden: ``truncated`` says a further
+    matching excerpt exists, so a caller narrowing a phrase knows it is looking at a
+    window and not at the whole store. A tombstoned excerpt is cleared text, so it
+    matches nothing — an absence the reader can check against the surviving offsets.
+    """
+
+    stripped = query.strip()
+    if not stripped:
+        raise AuditError("search_evidence needs a non-empty query")
+    if limit < 1 or limit > MAX_EVIDENCE_SEARCH_LIMIT:
+        raise AuditError(
+            f"search_evidence limit must be between 1 and {MAX_EVIDENCE_SEARCH_LIMIT}"
+        )
+    decision_at = _decision_instant(connection, decision_snapshot_id)
+    session = PointInTimeSession(connection)
+    grades = _GradeBook(catalog_path)
+    rows = session.query(
+        """
+        SELECT ec.episode_id, ec.claim_id, ec.source_id, ec.source_family,
+               c.claim_type, c.claim_dimension, c.evidence_class,
+               item.title, ref.ordinal, ref.source_item_id, ref.source_text_sha256,
+               ref.extract_start, ref.extract_end, ref.verbatim_extract,
+               ref.observed_at
+        FROM claim_evidence_refs AS ref
+        JOIN episode_claims AS ec ON ec.claim_id = ref.claim_id
+        JOIN claims AS c ON c.claim_id = ref.claim_id
+        JOIN narrative_episodes AS ep ON ep.episode_id = ec.episode_id
+        JOIN source_items AS item ON item.source_item_id = ref.source_item_id
+        WHERE ref.verbatim_extract IS NOT NULL
+          AND instr(lower(ref.verbatim_extract), lower(:query)) > 0
+          AND rtrim(ref.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ref.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ref.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (ref.valid_to IS NULL OR rtrim(ref.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(ec.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ec.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ec.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (ec.valid_to IS NULL OR rtrim(ec.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(c.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(c.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(c.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (c.valid_to IS NULL OR rtrim(c.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(ep.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ep.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(ep.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (ep.valid_to IS NULL OR rtrim(ep.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+          AND rtrim(item.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(item.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(item.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+          AND (item.valid_to IS NULL OR rtrim(item.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+        ORDER BY ec.episode_id, ec.claim_id, ref.ordinal
+        LIMIT :fetch
+        """,
+        {"query": stripped, "fetch": limit + 1},
+        as_of=decision_at,
+    )
+    hits: list[EvidenceHit] = []
+    for row in rows[:limit]:
+        grade, basis = grades.grade(
+            source_id=str(row["source_id"]), source_family=str(row["source_family"])
+        )
+        hits.append(
+            EvidenceHit(
+                episode_id=str(row["episode_id"]),
+                claim_id=str(row["claim_id"]),
+                claim_type=str(row["claim_type"]),
+                claim_dimension=str(row["claim_dimension"]),
+                evidence_class=str(row["evidence_class"]),
+                item_title=None if row["title"] is None else str(row["title"]),
+                evidence=AuditEvidence(
+                    ordinal=int(row["ordinal"]),
+                    source_item_id=int(row["source_item_id"]),
+                    source_id=str(row["source_id"]),
+                    source_family=str(row["source_family"]),
+                    source_grade=grade,
+                    source_grade_basis=basis,
+                    extract_start=int(row["extract_start"]),
+                    extract_end=int(row["extract_end"]),
+                    verbatim_extract=str(row["verbatim_extract"]),
+                    source_text_sha256=str(row["source_text_sha256"]),
+                    observed_at=_stamp(str(row["observed_at"])),
+                ),
+            )
+        )
+    return EvidenceSearch(
+        decision_snapshot_id=decision_snapshot_id,
+        decision_at=decision_at,
+        query=stripped,
+        limit=limit,
+        truncated=len(rows) > limit,
+        hits=tuple(hits),
+    )
+
+
+def decision_scenarios(
+    connection: sqlite3.Connection, *, decision_snapshot_id: str
+) -> DecisionScenarios:
+    """The Stage 4 scenario set one decision saw, and the routing record beside it.
+
+    :func:`player_audit` answers this for one player; this answers it for the slate, so a
+    reader can see the whole set rather than the row they already suspected. The manifest
+    is the decision's own record: a set named there was applied, and its absence is the
+    positive statement that the vendor baseline was, whatever landed afterwards.
+    """
+
+    decision_at = _decision_instant(connection, decision_snapshot_id)
+    session = PointInTimeSession(connection)
+    try:
+        snapshot = session.decision_snapshot(decision_snapshot_id, as_of=decision_at)
+        slate = session.slate(snapshot.slate_id, as_of=decision_at)
+    except ReplayError as error:
+        raise AuditError(str(error)) from error
+
+    notes: list[str] = []
+    stored = stored_ownership_routing(
+        connection, decision_snapshot_id=decision_snapshot_id
+    )
+    record = None if stored is None else _routing_record(stored)
+    if record is None:
+        notes.append(
+            "this decision carries no routing record; it was frozen before Stage 4 wrote "
+            "one, so the reason for what follows is not recoverable"
+        )
+
+    pinned = pinned_routing_from_manifest(snapshot.manifest_hashes_json)
+    run_id = pinned.scenario_run_id
+    set_status = "manifest_pinned"
+    if run_id is None:
+        set_status = "none"
+        available = session.query(
+            """
+            SELECT run_id
+            FROM ownership_scenarios
+            WHERE slate_id = :slate_id AND site = :site
+              AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(created_at, 'Z') <= rtrim(:as_of, 'Z')
+            ORDER BY rtrim(observed_at, 'Z') DESC, run_id DESC
+            LIMIT 1
+            """,
+            {"slate_id": slate.slate_id, "site": slate.site},
+            as_of=decision_at,
+        )
+        if available:
+            run_id = str(available[0]["run_id"])
+            set_status = "available_not_applied"
+            notes.append(
+                f"the manifest names no {MANIFEST_ARTIFACT_KIND} set, so the optimizer "
+                f"read the vendor baseline; set {run_id} existed at the cutoff and the "
+                "rows below are what it proposed, not what was applied"
+            )
+        else:
+            notes.append(
+                "no ownership scenario set existed for this slate and site as of the "
+                "decision, so the vendor baseline reached the optimizer"
+            )
+    if run_id is None:
+        return DecisionScenarios(
+            decision_snapshot_id=decision_snapshot_id,
+            decision_at=decision_at,
+            slate_id=slate.slate_id,
+            site=slate.site,
+            set_status=set_status,
+            applied=False,
+            scenario_run_id=None,
+            contest_archetype=None,
+            governance_status=None,
+            status_multiplier=None,
+            model_run_id=None,
+            model_version=None,
+            config_sha256=None,
+            feature_version=None,
+            routing_record=record,
+            rows=(),
+            notes=tuple(notes),
+        )
+
+    rows = session.query(
+        """
+        SELECT os.player_id, os.role, os.position, os.baseline_ownership,
+               os.applied_ownership, os.ownership_p10, os.ownership_p50,
+               os.ownership_p90, os.delta_p50, os.prob_delta_positive,
+               os.calibrated_to_roster_totals, os.contest_archetype,
+               os.governance_status, os.status_multiplier, os.model_run_id,
+               os.model_version, os.config_sha256, os.feature_version,
+               p.canonical_name
+        FROM ownership_scenarios AS os
+        LEFT JOIN players AS p
+          ON p.player_id = os.player_id
+         AND rtrim(p.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+         AND rtrim(p.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+         AND rtrim(p.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+         AND (p.valid_to IS NULL OR rtrim(p.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+        WHERE os.run_id = :run_id
+          AND rtrim(os.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+          AND rtrim(os.created_at, 'Z') <= rtrim(:as_of, 'Z')
+        ORDER BY os.player_id, os.role
+        """,
+        {"run_id": run_id},
+        as_of=decision_at,
+    )
+    if not rows:
+        raise AuditError(
+            f"ownership scenario set {run_id!r} has no row visible at "
+            f"{utc_timestamp(decision_at)}; the manifest and the store disagree"
+        )
+    first = rows[0]
+    return DecisionScenarios(
+        decision_snapshot_id=decision_snapshot_id,
+        decision_at=decision_at,
+        slate_id=slate.slate_id,
+        site=slate.site,
+        set_status=set_status,
+        applied=set_status == "manifest_pinned",
+        scenario_run_id=run_id,
+        contest_archetype=str(first["contest_archetype"]),
+        governance_status=str(first["governance_status"]),
+        status_multiplier=float(first["status_multiplier"]),
+        model_run_id=str(first["model_run_id"]),
+        model_version=str(first["model_version"]),
+        config_sha256=str(first["config_sha256"]),
+        feature_version=str(first["feature_version"]),
+        routing_record=record,
+        rows=tuple(
+            DecisionScenarioRow(
+                player_id=int(row["player_id"]),
+                player_name=(
+                    None if row["canonical_name"] is None else str(row["canonical_name"])
+                ),
+                role=str(row["role"]),
+                position=str(row["position"]),
+                baseline_ownership=float(row["baseline_ownership"]),
+                applied_ownership=float(row["applied_ownership"]),
+                ownership_p10=float(row["ownership_p10"]),
+                ownership_p50=float(row["ownership_p50"]),
+                ownership_p90=float(row["ownership_p90"]),
+                delta_p50=float(row["delta_p50"]),
+                delta_points=round(
+                    (float(row["applied_ownership"]) - float(row["baseline_ownership"]))
+                    * 100.0,
+                    6,
+                ),
+                prob_delta_positive=float(row["prob_delta_positive"]),
+                calibrated_to_roster_totals=bool(row["calibrated_to_roster_totals"]),
+            )
+            for row in rows
+        ),
+        notes=tuple(notes),
+    )
+
+
+def _routing_record(row: sqlite3.Row) -> DecisionRoutingRecord:
+    return DecisionRoutingRecord(
+        applied=bool(row["applied"]),
+        reason=str(row["reason"]),
+        scenario_run_id=(
+            None if row["scenario_run_id"] is None else str(row["scenario_run_id"])
+        ),
+        scenario_set_sha256=(
+            None if row["scenario_set_sha256"] is None else str(row["scenario_set_sha256"])
+        ),
+        governance_status=(
+            None if row["governance_status"] is None else str(row["governance_status"])
+        ),
+        status_multiplier=_optional_float(row["status_multiplier"]),
+        model_eval_id=None if row["model_eval_id"] is None else str(row["model_eval_id"]),
+        held_at_baseline=int(row["held_at_baseline"]),
+        created_at=_stamp(str(row["created_at"])),
     )
 
 

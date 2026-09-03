@@ -517,6 +517,18 @@ every feature value, every episode and claim, and every evidence excerpt with it
 grade — all read as-of the decision. The dashboard's `/audit` page renders the same model;
 the memo page links to it. Read-only.
 
+## MCP server (`na-mcp`)
+
+`na-mcp` serves the read pages to an MCP client over stdio — it binds nothing to a network
+and writes nothing. Eight tools, each a thin call into the library function a CLI already
+uses: `get_status`, `get_slate_memo`, `get_player_dossier`, `list_audit_candidates`,
+`get_narrative_episode`, `get_ownership_scenarios`, `search_evidence`, `replay_snapshot`.
+Every response carries `as_of`, `code_version`, and the decision or run it answers about;
+every evidence excerpt and source headline arrives inside the §7.6 untrusted-content
+delimiters. Freezing decisions and starting lanes stay on `na-ops` and the dashboard.
+Register it with `claude mcp add narrative-alpha -- uv --directory $PWD run na-mcp`, or add
+the same command and args to `mcpServers` in Claude Desktop's `claude_desktop_config.json`.
+
 ## Sunday fast lane (`na-fast`)
 
 Two pre-approved actions, governed by the signed rule file `config/fast_lane_rules.yaml`
