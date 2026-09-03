@@ -2294,7 +2294,7 @@ that was the bare win rate under the accuracy interval; it now leads with cells 
 (source, claim type) and labels the raw rate as unshrunk with no interval. (5) Grade ids
 are content hashes, so an identical regrade on a later Tuesday inserts nothing; claims
 observed after lock are counted in the step summary rather than dropped silently; three
-inert config knobs went. Suite 663 → 690.
+inert config knobs went. Suite 663 → 688.
 
 ### Slice 35 — MCP server over the reads (Phase 3, §7.1)
 
