@@ -213,7 +213,8 @@ the same function the CLI calls, so the page cannot drift from the terminal — 
 page renders the `status_payload` dict itself, which is why a section added to `na-ops
 status` appears here the day it lands.
 
-It also does three things. "Run batch now" and "Run slate now" start the lane in a
+It also does four things. "Run batch now", "Run slate now", and "Run results now" (which
+takes standings paths under the snapshot root or `~/Downloads`) start the lane in a
 background thread through the same library call `na-ops batch` and `na-ops slate` make,
 recording `ops_runs` exactly as they do; the page refreshes itself while a lane runs, so
 the steps appear as they commit. A second start of a lane already running is refused with

@@ -14,7 +14,7 @@ Three deliberate constraints, in the spirit of the complexity budget (§1.6):
 * loopback only. The page shows the whole store — every unresolved name, every failure
   text — so it must not be reachable from the network, and a non-loopback bind is refused
   rather than quietly accepted.
-* two write actions and one resolve, all POST, all confirmed on the page, and each one a
+* three lane actions and one resolve, all POST, all confirmed on the page, and each one a
   call into the same library function the CLI uses.
 """
 
@@ -56,7 +56,23 @@ from narrative_alpha.ops.batch import (
     run_batch,
 )
 from narrative_alpha.ops.config import OpsConfig
-from narrative_alpha.ops.runs import RecordedRun, StepOutcome, last_run, recent_runs
+from narrative_alpha.ops.results import (
+    DEFAULT_RESULTS_DEPENDENCIES,
+    ResultsDependencies,
+    ResultsReport,
+    run_results,
+)
+from narrative_alpha.ops.runs import (
+    BATCH_STEPS,
+    RESULTS_STEPS,
+    SLATE_STEPS,
+    OpsStep,
+    RecordedRun,
+    StepOutcome,
+    last_run,
+    last_run_any_status,
+    recent_runs,
+)
 from narrative_alpha.ops.slate import (
     DEFAULT_SLATE_DEPENDENCIES,
     SlateDependencies,
@@ -84,7 +100,21 @@ MAX_REQUEST_BODY_BYTES = 64 * 1024
 # The sites the slate lane accepts, in the order the CLI lists them.
 SITES = ("dk", "fd")
 
-LANES = ("batch", "slate")
+LANES = ("batch", "slate", "results")
+
+# Which `ops_runs` steps belong to which lane, so the lane block can show the last step a
+# lane recorded however it was started. The tuples are the lane's own, not a copy: a step
+# added to `OpsResultsStep` is watched here the day it lands.
+LANE_STEPS: dict[str, tuple[OpsStep, ...]] = {
+    "batch": BATCH_STEPS,
+    "slate": SLATE_STEPS,
+    "results": RESULTS_STEPS,
+}
+
+# The name of the operator's download folder, under their home directory. A contest
+# standings export arrives there from the browser; the other allowed root is the
+# configured snapshot root, where `na-snapshot` files already live.
+DOWNLOADS_DIRECTORY_NAME = "Downloads"
 
 # While a lane runs, the page refreshes itself so `ops_runs` rows appear as the steps
 # commit them. HTML, not script: there is nothing here for a JavaScript engine to run.
@@ -199,6 +229,7 @@ class LaneRunner:
 
 BatchLane = Callable[..., BatchReport]
 SlateLane = Callable[..., SlateReport]
+ResultsLane = Callable[..., ResultsReport]
 
 
 @dataclass(frozen=True)
@@ -210,8 +241,10 @@ class DashboardDependencies:
 
     run_batch: BatchLane = run_batch
     run_slate: SlateLane = run_slate
+    run_results: ResultsLane = run_results
     batch_dependencies: BatchDependencies = DEFAULT_DEPENDENCIES
     slate_dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES
+    results_dependencies: ResultsDependencies = DEFAULT_RESULTS_DEPENDENCIES
 
 
 DEFAULT_DASHBOARD_DEPENDENCIES = DashboardDependencies()
@@ -340,7 +373,7 @@ def _loopback_host(host: str) -> str:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    """Five read pages, three POST actions, and a 404 that names the way back."""
+    """Five read pages, four POST actions, and a 404 that names the way back."""
 
     server_version = "na-ops-dashboard"
 
@@ -396,6 +429,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._redirect("/")
             elif path == "/actions/slate":
                 _start_slate(self.context, form)
+                self._redirect("/")
+            elif path == "/actions/results":
+                _start_results(self.context, form)
                 self._redirect("/")
             elif path == "/queues/resolve":
                 _resolve_identity(self.context, form)
@@ -611,6 +647,92 @@ def _start_slate(context: DashboardContext, form: Mapping[str, list[str]]) -> No
     context.runner.start("slate", action)
 
 
+def _start_results(context: DashboardContext, form: Mapping[str, list[str]]) -> None:
+    season = _required_positive(form, "season")
+    week = _required_positive(form, "week")
+    site = _one(form, "site")
+    if site not in SITES:
+        raise DashboardError(f"site must be one of {', '.join(SITES)}, not {site!r}")
+    # Every path is checked here, before the lane is started, so a refusal is a 400 the
+    # operator can read and fix rather than a failed step buried in the run history.
+    files = _standings_files(form, config=context.config)
+
+    def action() -> tuple[str, bool, str]:
+        with connect_database(context.database) as connection:
+            apply_migrations(connection)
+            report = context.dependencies.run_results(
+                connection,
+                config=context.config,
+                season=season,
+                week=week,
+                site=site,
+                standings_files=files,
+                artifact_directory=context.artifact_directory,
+                report_directory=context.report_directory,
+                dependencies=context.dependencies.results_dependencies,
+            )
+        return report.results_run_id, report.ok, _steps_detail(report.steps)
+
+    context.runner.start("results", action)
+
+
+def _standings_roots(config: OpsConfig) -> tuple[Path, ...]:
+    """The two directories a standings file may come from, resolved.
+
+    Nothing else is readable through this form. The page has no authentication, and a text
+    box that accepts any path is a read of any file on the machine dressed up as a lane
+    argument; these two roots are where the files actually are.
+    """
+
+    return (
+        config.snapshot_root.resolve(),
+        (Path.home() / DOWNLOADS_DIRECTORY_NAME).resolve(),
+    )
+
+
+def _standings_files(
+    form: Mapping[str, list[str]],
+    *,
+    config: OpsConfig,
+) -> tuple[Path, ...]:
+    """The textarea's lines as checked, existing files under an allowed root."""
+
+    entries = [line.strip() for line in _one(form, "standings_files").splitlines()]
+    named = [entry for entry in entries if entry]
+    if not named:
+        raise DashboardError(
+            "the results lane needs at least one contest standings file; give one absolute "
+            "path per line"
+        )
+    roots = _standings_roots(config)
+    return tuple(_standings_file(entry, roots) for entry in named)
+
+
+def _standings_file(entry: str, roots: tuple[Path, ...]) -> Path:
+    candidate = Path(entry)
+    if not candidate.is_absolute():
+        raise DashboardError(
+            f"refusing {entry!r}: this form takes absolute paths only, so there is no "
+            "working directory to guess at. Give the whole path, one per line"
+        )
+    resolved = candidate.resolve()
+    # Resolved on both sides, so a symlink out of an allowed root is refused for what it
+    # points at rather than accepted for where it sits.
+    if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        listed = ", ".join(str(root) for root in roots)
+        raise DashboardError(
+            f"refusing {entry!r}: this page reads standings only from {listed}. Move the "
+            "export into one of those, or run `na-ops results` from a terminal, which is "
+            "not restricted this way"
+        )
+    if not resolved.is_file():
+        raise DashboardError(
+            f"refusing {entry!r}: there is no file at {resolved}. Nothing is started until "
+            "every named file exists, so fix the path and submit again"
+        )
+    return resolved
+
+
 def _resolve_identity(context: DashboardContext, form: Mapping[str, list[str]]) -> None:
     """Decide one unresolved identity exactly as `na-crosswalk resolve` decides it."""
 
@@ -712,7 +834,8 @@ fieldset { border: 1px solid rgba(128,128,128,.55); padding: .75rem 1rem; margin
 legend { font-weight: 600; padding: 0 .35rem; }
 label { display: inline-block; margin-right: 1rem; }
 button { font: inherit; padding: .3rem .9rem; margin-right: .5rem; }
-input, select { font: inherit; }
+input, select, textarea { font: inherit; }
+textarea { width: 100%; max-width: 60rem; }
 .none { opacity: .6; }
 .running { font-weight: 600; }
 .failed { font-weight: 600; }
@@ -753,10 +876,11 @@ def _status_page(context: DashboardContext) -> str:
             database=context.database,
             now=context.clock(),
         )
+        recorded = _last_recorded_steps(connection)
     payload = status_payload(status)
     week = status.snapshot_week
     body = [
-        _lane_section(context),
+        _lane_section(context, recorded),
         _actions_section(
             context,
             season=None if week is None else week.season,
@@ -776,7 +900,31 @@ def _status_page(context: DashboardContext) -> str:
     )
 
 
-def _lane_section(context: DashboardContext) -> str:
+def _last_recorded_steps(
+    connection: sqlite3.Connection,
+) -> dict[str, RecordedRun | None]:
+    """The newest `ops_runs` row belonging to each lane, whoever started the run.
+
+    Read per step and reduced here rather than by a lane column, because `ops_runs` has no
+    such column: a lane is the set of steps it records, and that set already lives in
+    :mod:`narrative_alpha.ops.runs`.
+    """
+
+    recorded: dict[str, RecordedRun | None] = {}
+    for lane, steps in LANE_STEPS.items():
+        runs = [
+            run
+            for run in (last_run_any_status(connection, step=step) for step in steps)
+            if run is not None
+        ]
+        recorded[lane] = max(runs, key=lambda run: (run.started_at, run.ops_run_id), default=None)
+    return recorded
+
+
+def _lane_section(
+    context: DashboardContext,
+    recorded: Mapping[str, RecordedRun | None],
+) -> str:
     rows = []
     for state in context.runner.states():
         if state.running:
@@ -792,12 +940,33 @@ def _lane_section(context: DashboardContext) -> str:
                 f" — run {escape(state.run_id or 'not recorded')}"
             )
         detail = "" if not state.detail else f"<pre>{escape(state.detail)}</pre>"
-        rows.append(f"<tr><th>{escape(state.lane)}</th><td>{outcome}{detail}</td></tr>")
-    note = (
-        '<p class="note">This page reports only the lanes started from it; every lane run, '
-        "however started, is on the run history page.</p>"
+        rows.append(
+            f"<tr><th>{escape(state.lane)}</th><td>{outcome}{detail}</td>"
+            f"<td>{_recorded_cell(recorded.get(state.lane))}</td></tr>"
+        )
+    header = (
+        "<tr><th>lane</th><th>started from this page</th>"
+        "<th>last step recorded, however started</th></tr>"
     )
-    return f"<section><h2>Lanes</h2><table>{''.join(rows)}</table>{note}</section>"
+    note = (
+        '<p class="note">The middle column is only what this page started; the right-hand '
+        "column is the last step the lane wrote to <code>ops_runs</code> whoever started it, "
+        "so a run from a terminal shows there and not in the middle. Every recorded step is "
+        "on the run history page.</p>"
+    )
+    return (
+        f"<section><h2>Lanes</h2><table>{header}{''.join(rows)}</table>{note}</section>"
+    )
+
+
+def _recorded_cell(run: RecordedRun | None) -> str:
+    if run is None:
+        return '<span class="none">no step recorded</span>'
+    css = ' class="failed"' if run.status == "failed" else ""
+    return (
+        f"{escape(run.step)} <span{css}>{escape(run.status)}</span> at "
+        f"{escape(utc_timestamp(run.finished_at))} — run {escape(run.batch_run_id)}"
+    )
 
 
 def _actions_section(
@@ -828,7 +997,14 @@ def _actions_section(
       week yourself. This page will not guess one.</p>
     </fieldset>
         """
-        return f"<section><h2>Actions</h2>{batch}{slate}</section>"
+        results = """
+    <fieldset><legend>Run results now</legend>
+      <p class="note">No snapshot week is initialized, so there is no week whose results
+      this page could close. Run <code>na-ops results --season N --week N --site dk
+      &lt;standings.csv&gt;</code> from a terminal to name the week yourself.</p>
+    </fieldset>
+        """
+        return f"<section><h2>Actions</h2>{batch}{slate}{results}</section>"
     sites = "".join(f'<option value="{site}">{site}</option>' for site in SITES)
     slate = f"""
     <form method="post" action="/actions/slate">
@@ -845,7 +1021,32 @@ def _actions_section(
       </fieldset>
     </form>
     """
-    return f"<section><h2>Actions</h2>{batch}{slate}</section>"
+    roots = "".join(
+        f"<li><code>{escape(str(root))}</code></li>" for root in _standings_roots(context.config)
+    )
+    results = f"""
+    <form method="post" action="/actions/results">
+      <fieldset><legend>Run results now</legend>
+        <p class="note">Freeze the contest standings, ingest the labels, replay the frozen
+        decision, and write the evaluation — exactly what <code>na-ops results</code> runs,
+        for {season} week {week:02d}, the newest initialized snapshot week. Change the
+        season or week here if you are closing an earlier one.</p>
+        <label>season <input type="number" name="season" min="1" step="1"
+          value="{season}"></label>
+        <label>week <input type="number" name="week" min="1" step="1" value="{week}"></label>
+        <label>site <select name="site">{sites}</select></label>
+        <p class="note">One absolute standings path per line. Only these directories are
+        read from:</p>
+        <ul>{roots}</ul>
+        <label>standings files<br>
+          <textarea name="standings_files" rows="4" cols="80"
+            placeholder="/absolute/path/to/contest-standings.csv"></textarea></label>
+        <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
+        <button type="submit">Run results now</button>
+      </fieldset>
+    </form>
+    """
+    return f"<section><h2>Actions</h2>{batch}{slate}{results}</section>"
 
 
 def _queues_page(context: DashboardContext) -> str:

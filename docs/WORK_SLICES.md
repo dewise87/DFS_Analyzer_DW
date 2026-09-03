@@ -2117,6 +2117,20 @@ attempt touches the security checks.
 > `run_results` through `DashboardDependencies`); the LANES block shows a terminal-started
 > run. The existing origin, Host, and confirmation tests must pass unchanged. Gates green.
 
+**Implementation status (2026-09-03):** landed in `ops/dashboard.py`. "Run results now" is
+the third lane form: season and week prefilled from the newest snapshot week, site, a
+textarea of absolute standings paths that must exist and sit under the configured snapshot
+root or `~/Downloads` (resolved on both sides, so a symlink out of a root is refused for what
+it points at), the confirmation box, and the same `LaneRunner` busy refusal. The LANES block
+gained a third column: the last step each lane wrote to `ops_runs`, whoever started it, so a
+terminal run is visible beside what the page started. Five tests: the action records
+`results_*` steps, refuses a path outside the roots, refuses a missing file before starting,
+refuses a second concurrent start, and the block shows a terminal-started run; the origin,
+Host, and confirmation tests pass unchanged.
+
+**Review outcome (2026-09-03):** accepted; one text fix (the no-week fieldset named a
+`--standings-file` flag the CLI does not have — the files are positional).
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under

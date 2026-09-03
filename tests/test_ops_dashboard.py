@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -29,6 +30,7 @@ from narrative_alpha.ops import (
     record_ops_run,
 )
 from narrative_alpha.ops.batch import BatchReport
+from narrative_alpha.ops.results import ResultsReport
 from narrative_alpha.ops.runs import StepOutcome, recent_runs
 from narrative_alpha.ops.slate import SlateReport
 from narrative_alpha.snapshots import CaptureKind, capture_files
@@ -666,7 +668,7 @@ def test_the_favicon_is_answered_without_a_body(empty_client: _Client) -> None:
 
 
 def test_the_actions_are_post_only(empty_client: _Client) -> None:
-    for path in ("/actions/batch", "/actions/slate", "/queues/resolve"):
+    for path in ("/actions/batch", "/actions/slate", "/actions/results", "/queues/resolve"):
         status, body = empty_client.get(path)
         assert status == 404, f"{path} answered a GET"
         assert "No such page" in body
@@ -1009,3 +1011,213 @@ def test_utc_timestamps_render_on_the_pages(seeded_client: _Client) -> None:
     _, body = seeded_client.get("/runs")
 
     assert utc_timestamp(OBSERVED) in body
+
+
+# --------------------------------------------------------------------------------------
+# The results lane, and the paths it will read
+# --------------------------------------------------------------------------------------
+
+
+def _results_report(run_id: str = "results-dashboard") -> ResultsReport:
+    return ResultsReport(
+        results_run_id=run_id,
+        season=SEASON,
+        week=WEEK,
+        site="dk",
+        evaluation_as_of=NOW,
+        started_at=NOW,
+        finished_at=NOW + timedelta(seconds=1),
+        steps=(
+            StepOutcome(
+                step="results_capture",
+                status="succeeded",
+                started_at=NOW,
+                finished_at=NOW + timedelta(seconds=1),
+                summary={"files": 1},
+            ),
+            StepOutcome(
+                step="results_ingest",
+                status="succeeded",
+                started_at=NOW + timedelta(seconds=1),
+                finished_at=NOW + timedelta(seconds=2),
+                summary={"entries": 3},
+            ),
+        ),
+    )
+
+
+class _RecordingResultsLane(_RecordingLane):
+    """A results lane that writes its steps to `ops_runs`, as the real one does."""
+
+    def __call__(self, connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        for outcome in self.report.steps:
+            record_ops_run(
+                connection,
+                batch_run_id=self.report.results_run_id,
+                step=outcome.step,
+                status=outcome.status,
+                started_at=outcome.started_at,
+                finished_at=outcome.finished_at,
+                summary=outcome.summary,
+            )
+        connection.commit()
+        return super().__call__(connection, **kwargs)
+
+
+def _standings_body(*paths: Path, season: int = SEASON, week: int = WEEK) -> str:
+    files = quote("\n".join(str(path) for path in paths))
+    return f"season={season}&week={week}&site=dk&standings_files={files}&confirm=yes"
+
+
+@pytest.fixture
+def standings(seeded: Any) -> Path:
+    """A contest export sitting under the configured snapshot root, where it is allowed."""
+
+    path = Path(seeded.snapshot_root) / "contest-standings.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Rank,EntryName,Points\n1,fixture,180.5\n", encoding="utf-8")
+    return path
+
+
+def test_the_results_action_runs_the_lane_and_records_its_steps(
+    seeded: Any,
+    standings: Path,
+) -> None:
+    lane = _RecordingResultsLane(_results_report())
+
+    for client in _serve(seeded, dependencies=DashboardDependencies(run_results=lane)):
+        _, page = client.get("/")
+        # The form is prefilled with the newest snapshot week, and says where it reads from.
+        assert "Run results now" in page
+        assert f'value="{SEASON}"' in page
+        assert f'name="week" min="1" step="1" value="{WEEK}"' in page
+        assert 'name="standings_files"' in page
+        assert str(seeded.snapshot_root) in page
+
+        status, location = client.post_status("/actions/results", _standings_body(standings))
+        assert status == 303
+        assert location == "/"
+        assert lane.entered.wait(timeout=10)
+        _wait_until_idle(client)
+
+        _, body = client.get("/")
+        assert "all steps ok" in body
+        assert "results-dashboard" in body
+        break
+
+    assert len(lane.calls) == 1
+    assert lane.calls[0]["season"] == SEASON
+    assert lane.calls[0]["week"] == WEEK
+    assert lane.calls[0]["site"] == "dk"
+    assert lane.calls[0]["standings_files"] == (standings.resolve(),)
+    with connect_database(seeded.database) as connection:
+        steps = [
+            run.step
+            for run in recent_runs(connection)
+            if run.batch_run_id == "results-dashboard"
+        ]
+    assert sorted(steps) == ["results_capture", "results_ingest"]
+
+
+def test_a_standings_path_outside_the_allowed_roots_is_refused(
+    seeded: Any,
+    tmp_path: Path,
+) -> None:
+    """The textarea is not a read of any file on the machine."""
+
+    outside = tmp_path / "elsewhere" / "secrets.csv"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("Rank,EntryName,Points\n", encoding="utf-8")
+    lane = _RecordingResultsLane(_results_report())
+
+    for client in _serve(seeded, dependencies=DashboardDependencies(run_results=lane)):
+        status, body = client.post("/actions/results", _standings_body(outside))
+        assert status == 400
+        assert str(outside) in body
+        assert str(seeded.snapshot_root) in body
+        assert "Downloads" in body
+        break
+
+    assert lane.calls == []
+
+
+def test_a_standings_path_that_does_not_exist_is_refused_before_the_lane_starts(
+    seeded: Any,
+    standings: Path,
+) -> None:
+    missing = seeded.snapshot_root / "not-written-yet.csv"
+    lane = _RecordingResultsLane(_results_report())
+
+    for client in _serve(seeded, dependencies=DashboardDependencies(run_results=lane)):
+        # The first path is fine; one bad path still stops the whole run.
+        status, body = client.post("/actions/results", _standings_body(standings, missing))
+        assert status == 400
+        assert "there is no file at" in body
+        assert str(missing) in body
+        break
+
+    assert lane.calls == []
+    with connect_database(seeded.database) as connection:
+        assert not [run for run in recent_runs(connection) if run.step.startswith("results_")]
+
+
+def test_a_second_results_start_is_refused_while_the_first_is_running(
+    seeded: Any,
+    standings: Path,
+) -> None:
+    lane = _RecordingResultsLane(_results_report())
+    lane.release.clear()
+
+    for client in _serve(seeded, dependencies=DashboardDependencies(run_results=lane)):
+        first, _ = client.post_status("/actions/results", _standings_body(standings))
+        assert first == 303
+        assert lane.entered.wait(timeout=10), "the first run never started"
+
+        second, body = client.post("/actions/results", _standings_body(standings))
+        assert second == 409
+        assert "the results lane started at" in body
+        assert "has not finished" in body
+
+        lane.release.set()
+        _wait_until_idle(client)
+        break
+
+    assert len(lane.calls) == 1
+
+
+def _lanes_block(body: str) -> str:
+    start = body.index("<h2>Lanes</h2>")
+    return body[start : body.index("<h2>Actions</h2>", start)]
+
+
+def test_the_lanes_block_shows_a_run_this_page_did_not_start(seeded: Any) -> None:
+    """A lane run from a terminal is visible here, in its own column."""
+
+    with connect_database(seeded.database) as connection:
+        record_ops_run(
+            connection,
+            batch_run_id="results-from-a-terminal",
+            step="results_ingest",
+            status="failed",
+            started_at=NOW - timedelta(minutes=5),
+            finished_at=NOW - timedelta(minutes=4),
+            summary={"entries": 0},
+            error_text="the standings file had no readable header",
+        )
+
+    for client in _serve(seeded):
+        _, body = client.get("/")
+        lanes = _lanes_block(body)
+
+        # Nothing was started from this page...
+        assert lanes.count("not started from this page") == 3
+        # ...and the terminal's run is on the results row all the same.
+        assert "results-from-a-terminal" in lanes
+        assert "results_ingest" in lanes
+        assert utc_timestamp(NOW - timedelta(minutes=4)) in lanes
+        # The seeded batch and slate rows show on their own lanes, from their own steps.
+        assert "slate-fixture" in lanes
+        assert "ops-fixture" in lanes
+        # And the sentence still says which column is which.
+        assert "The middle column is only what this page started" in lanes
+        break
