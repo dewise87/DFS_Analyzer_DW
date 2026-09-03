@@ -1680,6 +1680,24 @@ merges (both touch `ops/status.py`), or accept one small merge there.
 > Tests for every branch above, `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy`
 > green. Do not run against the production database.
 
+**Implementation status (2026-09-03):** landed. The batch lane ends with an `episodes` step
+through the same `ops/episodes.py` adapter the slate lane uses (migration 0014 admits the
+step name); `ops/secrets.py` reads the Anthropic key from the environment, else the login
+Keychain, and the batch lane installs it only while the SDK client is constructed, so
+`na-ops batch` in a plain terminal and the dashboard's "Run batch now" both reach Stage 1;
+`na-ops status` gains a NARRATIVE block. Tests assert the key never appears in a run
+summary, an error text, the status payload, or any dashboard page.
+
+**Review outcome (2026-09-03):** three fixes. The Keychain lookup had no timeout — a
+locked Keychain with a GUI session raises a dialog, and a lane waiting on it would sit
+"running" for ever, which the dashboard's busy refusal would then make permanent; it now
+gives up after fifteen seconds and the lane states the remedy. Two counts (items collected
+in seven days, pending review flags) were computed twice and printed twice; they are
+computed once and the NARRATIVE block no longer repeats them. The "newest episode snapshot"
+was chosen by prompt-version string when two snapshots shared an as-of; it is now chosen by
+build time (`valid_from`). Open: the measured time of the episodes step on 4,000 items was
+not reported; measure it on the first live Wednesday.
+
 ### Slice 27 — Week 1 runbook (documentation only)
 
 **Goal:** one checklist for Thu 2026-09-10 through Tue 2026-09-15 with every command
@@ -1711,6 +1729,10 @@ first draft invents anything.
 > the two live issues visible in the run history today: dead sources `fox-nfl` and `pfn-nfl`
 > (HTTP 403), and the nflverse pin drift remedy (`na-crosswalk nflverse-refresh --season
 > 2026 --reviewed-at <date>`). Two pages at most; checklist boxes, no prose.
+
+**Implementation status (2026-09-03):** `docs/WEEK_1_RUNBOOK.md` landed. Every command in
+it was checked against the CLIs' argparse definitions; none is invented. Review added the
+Sunday 11:30 official-inactives step now that Slice 28 exists.
 
 ### Slice 28 — Sunday fast lane, boring version (Phase 3, §7.4)
 
@@ -1768,19 +1790,222 @@ semantics and the re-freeze must be right the first time, on a Sunday.
 > is refused by `item`; nothing imports `pydfs_lineup_optimizer` outside its adapter. Gates
 > green. Do not run against the production database.
 
+**Implementation status (2026-09-03):** landed as `src/narrative_alpha/fast/` with `na-fast
+inactives` and `na-fast item`, `config/fast_lane_rules.yaml`, migration 0015
+(`player_availability`, point-in-time, append-only), availability as a manifest artifact
+in `build.py`/`replay.py`/`candidate_selection.py` (a snapshot frozen before availability
+existed replays unchanged), a synchronous provider and pricing table for the item path,
+and the rule-set version/expiry on `na-ops status`.
+
+**Review outcome (2026-09-03):** two blockers and three majors, all fixed here. (1) A cap
+refusal committed the availability rows before the optimizer ran, and the table is
+append-only, so a *refused* action changed every later build with no human in the loop.
+The availability rows and the new decision are now one transaction (`build_decision`
+accepts a caller-owned connection); a refusal leaves a failed `model_runs` row and nothing
+else. (2) The re-freeze built only the affected lineups, so the newest snapshot was a
+partial portfolio: a second wave of inactives got a false all-clear for a player sitting in
+an untouched lineup, and the memo and status reported the partial set as the decision.
+`OptimizationRequest` now carries `pinned_lineups`; the adapter returns them verbatim and
+optimizes only the remainder, so the new snapshot is the whole decision and replays as one.
+(3) `na-fast item` bypassed the monthly budget guard and never consulted the rule set; both
+gates now stand in front of it, and an item already mid-flight in the batch lane is refused
+with the settling command. (4) The base decision was loaded by a full replay — the one cost
+that grows with the portfolio; `replay.read_frozen_decision` now reads it from its verified
+artifacts, rebuilding the lineups from the upload CSV and requiring them to re-export to the
+frozen bytes. (5) Added the test that pins the Wed–Fri lane's byte-identity against an
+availability row observed before a decision's cutoff. Also: the pasted list is captured as
+a `standings`-style snapshot (`inactives`) so its hash names bytes; the mean-cap comparison
+prices the affected lineups with today's projections so it measures the swap, not drift;
+realistic paste lines ("QB Name (TEAM) — OUT (knee)") resolve. **Daniel must re-sign
+`config/fast_lane_rules.yaml`**: the delivered file carries his name with a date he did not
+set. Timing on a 150-lineup portfolio is still unmeasured; measure before Week 2 Sunday.
+
+### Slice 29 — First logit-offset ownership model + prequential evaluation
+
+**Goal:** the first deployable ownership model of §12.2.4: the vendor baseline as an offset,
+three heat features through one bounded global slope, contest/role intercepts, skeptical
+priors, forward-chaining evaluation against the untouched baseline, and a fit that refuses
+to run until three weeks of real labels exist. Code-first now; the first real fit waits for
+the gate.
+
+**Design doc:** §12.2.4–§12.2.9, §1.5 rule 1.5.2 (no fitting on synthetic labels), Appendix B
+(feature contract), Phase 2 acceptance tests in §9.
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: the statistics
+must be right and the evaluation must be honest.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> §12.2.4 through §12.2.9 and rule 1.5.2 of `docs/design/narrative-alpha-design-doc-v0_3.md`
+> and Appendix B; then `src/narrative_alpha/narrative/features.py` (the heat feature rows
+> and `narrative_feature_versions`), `docs/schema.md` for `ownership_baselines`,
+> `actual_ownership`, `narrative_features`, `contests`, and `model_runs`/`model_evals`,
+> `src/narrative_alpha/ops/results.py` (`label_cohorts`, the gate), and
+> `evaluation/baseline_report.py` (how a report is built and rendered as-of a decision).
+>
+> Build `src/narrative_alpha/ownership/` with a `na-ownership` entry point:
+>
+> 1. **Model.** `logit(mu) = logit(p0) + A·tanh((b1·H_signed + b2·H_dfs + b3·H_velocity)/A)`
+>    plus contest-archetype and role intercepts, fitted by maximum a posteriori with the
+>    §12.2.4 priors on standardized features (pin the prior values in a versioned
+>    `config/ownership_model.toml`; the fit records the config hash). Use numpy/scipy only —
+>    no PyMC, no Stan; the design's complexity budget (§1.6) forbids a probabilistic
+>    programming dependency for three slopes. Posterior uncertainty comes from the Laplace
+>    approximation at the MAP; report the draws as §12.2.9's p10/p50/p90.
+> 2. **Training rows** are point-in-time: for each labeled week, the feature row and the
+>    vendor baseline observed at that week's frozen `decision_at`, never later, joined to
+>    the `actual_ownership` label of one contest archetype cohort per fit (§12.2.7 item 6).
+>    A missing baseline or feature row for a labeled player is reported, not imputed.
+> 3. **The gate.** `na-ownership fit --archetype <a> --site dk|fd` refuses, naming the count,
+>    unless `label_cohorts` shows at least three distinct weeks for that archetype and site,
+>    and refuses any label whose `source` is a fixture or test. Tests may fit on synthetic
+>    rows only through an explicit `allow_synthetic=True` library argument that the CLI does
+>    not expose.
+> 4. **Evaluation** (`na-ownership evaluate`): forward-chaining only (fit on weeks < k, score
+>    week k), never random row splits; report MAE in percentage points, log score,
+>    Brier, calibration slope/intercept, rank correlation among the top-20 owned, and
+>    directional accuracy of deltas larger than two points — each beside the untouched
+>    vendor baseline. Write the report to `<report dir>/ownership/<archetype>-<stamp>.txt`
+>    and a `model_evals` row. The output states in one line whether the model beat the
+>    baseline out of week; if it did not, `apply` below is refused.
+> 5. **Scenario output** (`na-ownership scenarios --decision-snapshot <id>`): §12.2.9's
+>    record per player — baseline, p10/p50/p90, delta_p50, prob_delta_positive,
+>    `status_multiplier` from the governance caps in §12.2.5 (UNVALIDATED until an
+>    evaluation says otherwise; caps in probability space; showdown separate), and
+>    `applied_ownership` after roster-total calibration (§12.2.6, iterative proportional
+>    fitting per position; captain/flex separately for showdown). Append-only table with
+>    provenance to the model run, config hash, feature version, and decision snapshot.
+>    Nothing in this slice changes what `na-build` uses; wiring is Slice 30.
+>
+> Tests: the fit recovers known slopes on synthetic data through the library seam; the CLI
+> gate refuses below three weeks and refuses fixture labels; forward-chaining never sees a
+> future week (assert on the as-of bounds of every query); calibration makes position
+> totals match; caps bind at each status; the evaluation report renders beside the baseline.
+> `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` green. Never run against
+> `data/db/narrative_alpha.sqlite3`.
+
+### Slice 30 — Stage 4/5: channel routing, caps, and the red-team block in the memo
+
+**Goal:** the ownership scenarios reach the build through deterministic permissions
+(§5.3 Stage 4): status caps decide what is applied, every applied delta carries its episode
+and evidence provenance, and the largest proposed changes get the five red-team questions
+of Stage 5 in the slate memo before a human reads the lineups.
+
+**Design doc:** §5.3 Stages 4 and 5, §12.2.5 caps, §8.3 provenance, Phase 2 acceptance tests
+("every ownership adjustment has episode and evidence provenance", "the system falls back
+to baseline when the model does not add value").
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse, after Slice 29.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read §5.3 Stages 4–5, §12.2.5, and §8.3 of the
+> design doc; then `src/narrative_alpha/ownership/` (Slice 29: scenarios and status
+> multipliers), `candidate_selection.py` and `build.py` (where the vendor ownership enters
+> the candidate rows and the decision snapshot manifest), `interface/slate_memo.py`,
+> `ops/slate.py` (`slate_build`, `slate_memo`), and `replay.py`.
+>
+> 1. **Routing.** In candidate selection, replace the vendor ownership with
+>    `applied_ownership` from the newest scenario row for the decision snapshot's
+>    inputs — only when a scenario set exists as-of `decision_at` and its evaluation
+>    record says the model beat the baseline; otherwise the vendor baseline, and the memo
+>    says which. The manifest records the scenario set id, so replay reads the same rows
+>    as-of `decision_at` and stays byte-identical (extend the replay test).
+> 2. **Provenance.** Every applied delta lists the episode ids and evidence refs behind
+>    the heat features that moved it (join through `narrative_features` →
+>    `narrative_episodes` → `episode_claims` → `claim_evidence_refs`). A delta with no
+>    traceable episode is refused, not applied.
+> 3. **Red team.** For the ten largest applied deltas by absolute points, a memo section
+>    answering Stage 5 deterministically from the store: contrary claims in the same
+>    episode window; whether the vendor baseline already moved between the Saturday and
+>    Sunday captures; duplicate-source count behind the episode; confounders present
+>    (weather, odds moves, availability changes as-of decision); and the "do nothing"
+>    case — the lineup delta if that player's ownership stayed at baseline.
+> 4. `na-ops status` shows the active scenario set and its status multiplier; the
+>    dashboard follows.
+>
+> Tests: fallback to baseline when no evaluated scenario exists; refusal of an untraceable
+> delta; replay byte-identity with scenarios on and off; the red-team section renders on a
+> seeded fixture with each of the five answers. Gates green; not the production database.
+
+### Slice 31 — Signal and evidence audit view
+
+**Goal:** the Phase 2 "signal/evidence audit view": for any player on the current slate, one
+page (dashboard) and one command (`na-report signals`) that shows every episode, claim,
+evidence excerpt, source grade, feature value, and applied delta behind the number the
+optimizer saw — read-only, from the store, as-of the decision.
+
+**Design doc:** §8.3, §5.5 (evidence refs), Phase 2 deliverables, §1.6.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse; can run in
+parallel with Slice 30 (reads only).
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/ops/dashboard.py` (how
+> pages render from library calls, the loopback and Host checks — do not weaken them),
+> `report_cli.py`, `narrative/episodes.py`, `narrative/features.py`, `narrative/
+> extraction.py` (claims and evidence refs), `narrative/source_catalog.py` (grades), and
+> `docs/schema.md`.
+>
+> Build one library function, `narrative/audit.py::player_audit(connection, *, player_id,
+> decision_snapshot_id)`, returning a Pydantic model: the player, the decision instant,
+> the vendor baseline and applied ownership with the scenario status, each feature value
+> with its version, each episode with its claims, and each claim's evidence excerpts with
+> source id, grade, and observed_at — all read as-of `decision_at`. Then two thin
+> renderers: `na-report signals --decision-snapshot <id> --player <id|name>` (text) and a
+> dashboard page `/audit?decision=<id>&player=<id>` linked from the memo page, rendered
+> from the same model. No new write path. A player with no episodes says so; a decision
+> with no scenarios shows the baseline and says why.
+>
+> Tests: as-of correctness (a claim observed after `decision_at` does not appear); the
+> renderers agree with the model on a seeded fixture; the page passes the existing
+> dashboard security tests unchanged. Gates green.
+
+### Slice 32 — Dashboard follow-on: results from the page, lanes from the store
+
+**Goal:** close the two open items from Slice 24 now that Slice 25 exists: a "run results
+now" form taking the standings paths, and a LANES block that reads the last run of each
+lane from `ops_runs` instead of remembering only what this page started.
+
+**Model:** Claude **Haiku 4.5** · ChatGPT **GPT-5.1** (cheap tier); Sonnet 5 if the first
+attempt touches the security checks.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/ops/dashboard.py`,
+> `ops/results.py` (`run_results`), `ops/runs.py` (`last_run_any_status`, `recent_runs`),
+> and `tests/test_ops_dashboard.py`. Two changes, nothing else:
+>
+> 1. A third form on the status page, "Run results now": season and week prefilled from
+>    the newest snapshot week, site select, a textarea of standings file paths (one per
+>    line, absolute paths under `data/snapshots` or the operator's Downloads folder only —
+>    refuse anything else, and refuse a path that does not exist, before starting), the
+>    confirmation box, POST to `/actions/results`, run through `LaneRunner` as a third
+>    lane with the same busy refusal.
+> 2. The LANES block shows, per lane, the last recorded step from `ops_runs` (step, status,
+>    finished time, run id) beside what this page started, so a lane run from a terminal
+>    is visible here too. Keep the sentence that says which is which.
+>
+> Tests: the results action refuses a path outside the allowed roots, refuses a missing
+> file, refuses a second concurrent start, and records `results_*` steps on success (mock
+> `run_results` through `DashboardDependencies`); the LANES block shows a terminal-started
+> run. The existing origin, Host, and confirmation tests must pass unchanged. Gates green.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
   `data/snapshots/`. Stokastic opens NFL main-slate data within about twelve hours of lock,
   so the first chance is Saturday 2026-09-12; hand the slice out that day, and expect Week 1
   to be capture-only for that source.
-- **Slice 29 — First logit-offset ownership model + prequential evaluation** (§12.2.4,
-  §12.2.5–§12.2.8): prompt when `na-ops status` reports `weeks_with_labels >= 3` (Slice 25)
-  and a vendor ownership baseline is ingesting (Slice 9). Fitting on synthetic labels would
-  violate rule 1.5.2.
-- **Dashboard follow-on:** a "results" button once Slice 25 lands, taking the standings
-  files by path; and the LANES block reading the last run of each lane from `ops_runs`
-  rather than only the runs started from the page.
+- **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
+  real vendor export as Slice 9.
+- **Slice 33 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
+  the no-episode ratio features (both noted at Slices 20–21) once a month of live episodes
+  shows what the clusters actually look like.
+- **Slice 34 — MCP server (Phase 3):** one tool per read the dashboard already makes,
+  after Slice 31 gives it the audit view to expose.
 
 ---
 

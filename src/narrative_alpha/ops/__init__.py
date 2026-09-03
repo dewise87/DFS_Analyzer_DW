@@ -74,8 +74,11 @@ from narrative_alpha.ops.slate import (
 )
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.ops.status import (
+    EpisodeSnapshotStatus,
+    FastLaneRulesStatus,
     LabelCohortStatus,
     LabelsStatus,
+    NarrativeStatus,
     OpsStatus,
     SlateCaptureStatus,
     SlateLaneStatus,
@@ -105,6 +108,8 @@ __all__ = [
     "DashboardDependencies",
     "DashboardError",
     "DashboardServer",
+    "EpisodeSnapshotStatus",
+    "FastLaneRulesStatus",
     "JobState",
     "LabelCohortStatus",
     "LabelsStatus",
@@ -112,6 +117,7 @@ __all__ = [
     "LaneRunner",
     "LaneState",
     "MisdirectedHostError",
+    "NarrativeStatus",
     "OpsConfig",
     "OpsConfigError",
     "OpsStatus",

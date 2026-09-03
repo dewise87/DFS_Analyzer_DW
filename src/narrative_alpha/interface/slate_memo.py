@@ -350,12 +350,18 @@ def _validate_build_result(
 
     salary_artifacts = _source_artifacts(build_result.snapshot, "salary")
     projection_artifacts = _source_artifacts(build_result.snapshot, "projection")
+    availability_artifacts = frozenset(
+        SelectedSourceArtifact(sha256=item.sha256, source=item.source or "")
+        for item in build_result.snapshot.manifest_hashes_json
+        if item.artifact_kind == "availability"
+    )
     try:
         selected = session.candidate_scenario(
             slate_id=slate.slate_id,
             site=DfsSite(slate.site),
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
+            availability_artifacts=availability_artifacts,
             as_of=build_result.snapshot.decision_at,
         )
     except (ReplayError, ValueError) as error:

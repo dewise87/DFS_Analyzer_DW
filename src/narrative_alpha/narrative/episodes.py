@@ -35,13 +35,76 @@ DEFAULT_PROMPT_VERSION_ID = "stage1-extraction-v1"
 # words and team references carry no story identity and are dropped before comparison.
 _STOP_WORDS = frozenset(
     [
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from", "has",
-        "have", "he", "her", "him", "his", "i", "if", "in", "into", "is", "it", "its", "of",
-        "on", "or", "our", "she", "that", "the", "their", "them", "then", "there", "these",
-        "they", "this", "those", "to", "was", "we", "were", "what", "when", "where", "which",
-        "who", "will", "with", "would", "you", "your", "nfl", "week", "season", "team", "teams",
-        "game", "games", "says", "said", "say", "report", "reports", "reported", "per",
-        "source", "sources",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "but",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "he",
+        "her",
+        "him",
+        "his",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "our",
+        "she",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "to",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "nfl",
+        "week",
+        "season",
+        "team",
+        "teams",
+        "game",
+        "games",
+        "says",
+        "said",
+        "say",
+        "report",
+        "reports",
+        "reported",
+        "per",
+        "source",
+        "sources",
     ]
 )
 
@@ -463,10 +526,7 @@ def load_episode_audits(
         ).fetchall()
         claims: list[EpisodeClaimAudit] = []
         for claim_db_row in claim_rows:
-            relation_values = {
-                key: claim_db_row[key]
-                for key in EpisodeClaimRow.model_fields
-            }
+            relation_values = {key: claim_db_row[key] for key in EpisodeClaimRow.model_fields}
             cleaned_text = claim_db_row["item_cleaned_text"]
             title = claim_db_row["item_title"]
             claims.append(
@@ -482,9 +542,7 @@ def load_episode_audits(
                         )
                     ),
                     outcome_direction=str(claim_db_row["outcome_direction"]),
-                    roster_behavior_direction=str(
-                        claim_db_row["roster_behavior_direction"]
-                    ),
+                    roster_behavior_direction=str(claim_db_row["roster_behavior_direction"]),
                 )
             )
         audits.append(EpisodeAudit(row=episode, claims=tuple(claims)))
@@ -640,9 +698,7 @@ def _cluster_claims(
     for claim in claims:
         subjects = _subjects_for_claim(claim)
         for subject in subjects:
-            grouped[
-                (subject.subject_type, str(subject.value), claim.claim_dimension)
-            ].append(claim)
+            grouped[(subject.subject_type, str(subject.value), claim.claim_dimension)].append(claim)
             if subject.subject_type == "team":
                 team_scoped.add(claim.claim_id)
             elif subject.subject_type == "unclustered":
@@ -754,9 +810,7 @@ def _make_candidate(
     members: list[_CandidateMember] = []
     for claim in claims:
         if not members:
-            members.append(
-                _CandidateMember(claim, "origin", 1.0, None, "deterministic-origin")
-            )
+            members.append(_CandidateMember(claim, "origin", 1.0, None, "deterministic-origin"))
             continue
         members.append(_relation_to_prior(claim, members))
 
@@ -772,8 +826,7 @@ def _make_candidate(
     source_entropy = max(
         0.0,
         -sum(
-            (count / item_count) * math.log(count / item_count)
-            for count in source_counts.values()
+            (count / item_count) * math.log(count / item_count) for count in source_counts.values()
         ),
     )
     # One family per unique source (the family of its latest item), so a source that was
@@ -783,9 +836,7 @@ def _make_candidate(
         family_by_source[item.source_id] = item.source_family
     source_families = set(family_by_source.values())
     event_relations = {"origin", "independent", "corroborating"}
-    n_events = sum(
-        bool(relations & event_relations) for relations in item_relations.values()
-    )
+    n_events = sum(bool(relations & event_relations) for relations in item_relations.values())
     non_derivative_items = [
         unique_items[item_id]
         for item_id, relations in item_relations.items()
@@ -831,35 +882,73 @@ def _relation_to_prior(
     # byte-identical copy is derivative whatever its extracted directions say (the first
     # live corpus had unknown/neutral directions on half its claims), and a near-copy from
     # the same source is a repost, not a second event.
-    links: list[tuple[float, str, _CandidateMember, str]] = []
-    all_similarities: list[float] = []
+    best_link: tuple[float, str, _CandidateMember, str] | None = None
+    best_opposing_link: tuple[float, str, _CandidateMember, str] | None = None
+    max_similarity = 0.0
+    claim_hash = claim.content_sha256
+    claim_tokens = claim.tokens
+    claim_outcome_direction = claim.outcome_direction
+    claim_roster_behavior_direction = claim.roster_behavior_direction
     for prior in prior_members:
-        similarity, similarity_method = _similarity(claim, prior.claim)
-        all_similarities.append(similarity)
-        if similarity >= LINK_SIMILARITY_THRESHOLD:
-            links.append((similarity, prior.claim.claim_id, prior, similarity_method))
-    if not links:
+        prior_claim = prior.claim
+        if claim_hash == prior_claim.content_sha256:
+            similarity, similarity_method = 1.0, "exact-canonical-content-sha256"
+        elif not claim_tokens or not prior_claim.tokens:
+            similarity, similarity_method = 0.0, "token-set-jaccard-unavailable-text"
+        else:
+            similarity = len(claim_tokens & prior_claim.tokens) / len(
+                claim_tokens | prior_claim.tokens
+            )
+            similarity_method = "token-set-jaccard"
+        if similarity > max_similarity:
+            max_similarity = similarity
+        if similarity < LINK_SIMILARITY_THRESHOLD:
+            continue
+        prior_claim_id = prior_claim.claim_id
+        if (
+            best_link is None
+            or similarity > best_link[0]
+            or (similarity == best_link[0] and prior_claim_id < best_link[1])
+        ):
+            best_link = (similarity, prior_claim_id, prior, similarity_method)
+        directions_oppose = (
+            (claim_outcome_direction == "increase" and prior_claim.outcome_direction == "decrease")
+            or (
+                claim_outcome_direction == "decrease"
+                and prior_claim.outcome_direction == "increase"
+            )
+            or (
+                claim_roster_behavior_direction == "increase"
+                and prior_claim.roster_behavior_direction == "decrease"
+            )
+            or (
+                claim_roster_behavior_direction == "decrease"
+                and prior_claim.roster_behavior_direction == "increase"
+            )
+        )
+        if directions_oppose and (
+            best_opposing_link is None
+            or similarity > best_opposing_link[0]
+            or (similarity == best_opposing_link[0] and prior_claim_id < best_opposing_link[1])
+        ):
+            best_opposing_link = (similarity, prior_claim_id, prior, similarity_method)
+    if best_link is None:
         return _CandidateMember(
             claim=claim,
             relation="independent",
-            similarity_score=max(all_similarities, default=0.0),
+            similarity_score=max_similarity,
             linked_claim_id=None,
             method="rolling-window-no-text-link",
         )
 
-    ordered_links = sorted(links, key=lambda value: (-value[0], value[1]))
     # A contradiction outranks everything: "will start" against "will not start" is a
     # near-copy by tokens and the opposite claim by direction, and the direction is the
     # point. Otherwise a near-copy is derivative and any other link corroborates.
-    opposing = next(
-        (link for link in ordered_links if _directions_oppose(claim, link[2].claim)),
-        None,
-    )
-    if opposing is not None:
-        similarity, _, linked, similarity_method = opposing
+    if best_opposing_link is not None:
+        similarity, _, linked, similarity_method = best_opposing_link
         relation: Relation = "contradicting"
     else:
-        similarity, _, linked, similarity_method = ordered_links[0]
+        similarity, _, linked, similarity_method = best_link
         relation = (
             "derivative" if similarity >= DERIVATIVE_SIMILARITY_THRESHOLD else "corroborating"
         )
@@ -869,27 +958,6 @@ def _relation_to_prior(
         similarity_score=similarity,
         linked_claim_id=linked.claim.claim_id,
         method=similarity_method,
-    )
-
-
-def _directions_oppose(left: _LoadedClaim, right: _LoadedClaim) -> bool:
-    return any(
-        {left_value, right_value} == {"increase", "decrease"}
-        for left_value, right_value in (
-            (left.outcome_direction, right.outcome_direction),
-            (left.roster_behavior_direction, right.roster_behavior_direction),
-        )
-    )
-
-
-def _similarity(left: _LoadedClaim, right: _LoadedClaim) -> tuple[float, str]:
-    if left.content_sha256 == right.content_sha256:
-        return 1.0, "exact-canonical-content-sha256"
-    if not left.tokens or not right.tokens:
-        return 0.0, "token-set-jaccard-unavailable-text"
-    return (
-        len(left.tokens & right.tokens) / len(left.tokens | right.tokens),
-        "token-set-jaccard",
     )
 
 
@@ -952,14 +1020,10 @@ def _episode_row(
         episode_id=candidate.episode_id,
         subject_type=candidate.subject.subject_type,
         subject_player_id=(
-            int(candidate.subject.value)
-            if candidate.subject.subject_type == "player"
-            else None
+            int(candidate.subject.value) if candidate.subject.subject_type == "player" else None
         ),
         subject_team_code=(
-            str(candidate.subject.value)
-            if candidate.subject.subject_type == "team"
-            else None
+            str(candidate.subject.value) if candidate.subject.subject_type == "team" else None
         ),
         unclustered_key=(
             str(candidate.subject.value)
@@ -1054,9 +1118,7 @@ def _build_report(
     dropped_team_references: tuple[str, ...] = (),
 ) -> EpisodeBuildReport:
     memberships = sum(len(candidate.members) for candidate in candidates)
-    unresolved_claim_ids = {
-        claim.claim_id for claim in claims if claim.unresolved_ref_count
-    }
+    unresolved_claim_ids = {claim.claim_id for claim in claims if claim.unresolved_ref_count}
     return EpisodeBuildReport(
         as_of=cutoff,
         method_version=method_version,
@@ -1097,20 +1159,14 @@ def _candidate_payload(candidate: _CandidateEpisode) -> dict[str, object]:
             "recency_hours": candidate.recency_hours,
             "source_entropy": candidate.source_entropy,
             "subject_player_id": (
-                candidate.subject.value
-                if candidate.subject.subject_type == "player"
-                else None
+                candidate.subject.value if candidate.subject.subject_type == "player" else None
             ),
             "subject_team_code": (
-                candidate.subject.value
-                if candidate.subject.subject_type == "team"
-                else None
+                candidate.subject.value if candidate.subject.subject_type == "team" else None
             ),
             "subject_type": candidate.subject.subject_type,
             "unclustered_key": (
-                candidate.subject.value
-                if candidate.subject.subject_type == "unclustered"
-                else None
+                candidate.subject.value if candidate.subject.subject_type == "unclustered" else None
             ),
             "unique_source_count": candidate.unique_source_count,
             "unique_source_family_count": candidate.unique_source_family_count,

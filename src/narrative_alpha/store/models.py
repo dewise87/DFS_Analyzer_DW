@@ -165,6 +165,29 @@ class PlayerRow(PointInTimeRow):
     birth_date: date | None
 
 
+class PlayerAvailabilityRow(PointInTimeRow):
+    """One append-only player availability fact for an exact slate and cutoff."""
+
+    availability_id: str
+    slate_id: int = Field(gt=0)
+    player_id: int = Field(gt=0)
+    season: int = Field(ge=1)
+    week: int = Field(ge=1, le=99)
+    site: Literal["draftkings", "fanduel"]
+    availability_status: Literal["available", "unavailable"]
+    rule_id: str
+    rules_version: str
+    source_file_sha256: Sha256
+
+    @field_validator("availability_id", "rule_id", "rules_version")
+    @classmethod
+    def nonempty_availability_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("availability identity fields must not be empty")
+        return normalized
+
+
 class PlayerAliasRow(PointInTimeRow):
     alias_id: int
     player_id: int
@@ -512,9 +535,7 @@ class PlayerDistributionRow(PointInTimeRow):
         if self.source_set_sha256 != expected_hash:
             raise ValueError("source_set_sha256 does not match distribution source-set")
         if len(self.source_set_json) != 1:
-            raise ValueError(
-                "distribution fitter v1 requires exactly one projection snapshot"
-            )
+            raise ValueError("distribution fitter v1 requires exactly one projection snapshot")
         canonical_source = self.source.strip().casefold()
         if self.source != canonical_source:
             raise ValueError("distribution source must be canonical")
@@ -692,9 +713,7 @@ class SourcePolicyRow(PointInTimeRow):
 
     @model_validator(mode="after")
     def unique_personal_data_fields(self) -> Self:
-        if len(set(self.personal_data_fields_allowed)) != len(
-            self.personal_data_fields_allowed
-        ):
+        if len(set(self.personal_data_fields_allowed)) != len(self.personal_data_fields_allowed):
             raise ValueError("personal_data_fields_allowed contains duplicates")
         return self
 
@@ -838,9 +857,7 @@ class SourceItemExtractionRow(PointInTimeRow):
     provider_batch_id: str | None
     provider_custom_id: str | None
     provider_message_id: str | None
-    status: Literal[
-        "creating", "submitted", "settling", "succeeded", "flagged", "failed"
-    ]
+    status: Literal["creating", "submitted", "settling", "succeeded", "flagged", "failed"]
     output_json: dict[str, object] | None
     output_sha256: Sha256 | None
     output_redacted_at: datetime | None
@@ -1092,9 +1109,7 @@ class ClaimRow(PointInTimeRow):
                 raise ValueError("disconfirming_context_sha256 does not match context")
             if self.context_redacted_at is not None:
                 raise ValueError("retained disconfirming context cannot be marked redacted")
-        elif (self.disconfirming_context_sha256 is None) != (
-            self.context_redacted_at is None
-        ):
+        elif (self.disconfirming_context_sha256 is None) != (self.context_redacted_at is None):
             raise ValueError("redacted context must retain its hash and redaction time")
         return self
 
@@ -1196,10 +1211,38 @@ EpisodeRelationValue = Literal[
 ]
 _NFL_TEAM_CODES = frozenset(
     {
-        "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE",
-        "DAL", "DEN", "DET", "GB", "HOU", "IND", "JAX", "KC",
-        "LAC", "LAR", "LV", "MIA", "MIN", "NE", "NO", "NYG",
-        "NYJ", "PHI", "PIT", "SEA", "SF", "TB", "TEN", "WAS",
+        "ARI",
+        "ATL",
+        "BAL",
+        "BUF",
+        "CAR",
+        "CHI",
+        "CIN",
+        "CLE",
+        "DAL",
+        "DEN",
+        "DET",
+        "GB",
+        "HOU",
+        "IND",
+        "JAX",
+        "KC",
+        "LAC",
+        "LAR",
+        "LV",
+        "MIA",
+        "MIN",
+        "NE",
+        "NO",
+        "NYG",
+        "NYJ",
+        "PHI",
+        "PIT",
+        "SEA",
+        "SF",
+        "TB",
+        "TEN",
+        "WAS",
     }
 )
 
@@ -1246,10 +1289,7 @@ class NarrativeEpisodeRow(PointInTimeRow):
             raise ValueError("source-family count cannot exceed source count")
         if self.reach_proxy != self.unique_source_count:
             raise ValueError("reach_proxy must equal unique_source_count")
-        if (
-            self.n_events > self.item_count
-            or self.unique_source_count > self.item_count
-        ):
+        if self.n_events > self.item_count or self.unique_source_count > self.item_count:
             raise ValueError("episode counts cannot exceed item_count")
         subject_values = (
             self.subject_player_id is not None,
@@ -1339,9 +1379,7 @@ class NarrativeFeatureVersionRow(StoreRow):
         for value in (self.feature_version, self.formula_version, self.source):
             if not value.strip():
                 raise ValueError("feature-version identifiers must not be blank")
-        canonical = json.dumps(
-            _json_value(self.config_json), sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(_json_value(self.config_json), sort_keys=True, separators=(",", ":"))
         if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != self.config_sha256:
             raise ValueError("config_sha256 does not match config_json")
         return self
@@ -1359,9 +1397,7 @@ class NarrativeFeatureRow(PointInTimeRow):
     as_of: datetime
 
     baseline_ownership: float | None = Field(default=None, ge=0, le=1)
-    baseline_ownership_change_6h: float | None = Field(
-        default=None, allow_inf_nan=False
-    )
+    baseline_ownership_change_6h: float | None = Field(default=None, allow_inf_nan=False)
     projection_change_6h: float | None = Field(default=None, allow_inf_nan=False)
     salary: int = Field(ge=0)
     value_rank: float | None = Field(default=None, allow_inf_nan=False)
@@ -1396,9 +1432,7 @@ class NarrativeFeatureRow(PointInTimeRow):
     source_overlap_index: float = Field(ge=0, le=1, allow_inf_nan=False)
     unique_episode_count_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
     unique_source_count_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
-    unique_author_count_z: float | None = Field(
-        default=None, ge=-4, le=4, allow_inf_nan=False
-    )
+    unique_author_count_z: float | None = Field(default=None, ge=-4, le=4, allow_inf_nan=False)
     source_overlap_index_z: float = Field(ge=-4, le=4, allow_inf_nan=False)
 
     model_version: str | None
@@ -1439,13 +1473,9 @@ class NarrativeFeatureRow(PointInTimeRow):
             raise ValueError("episode_ids_json must be sorted and unique")
         if len(self.episode_ids_json) != self.unique_episode_count:
             raise ValueError("episode count must match episode_ids_json")
-        if self.ownership_baseline_ids_json != tuple(
-            sorted(set(self.ownership_baseline_ids_json))
-        ):
+        if self.ownership_baseline_ids_json != tuple(sorted(set(self.ownership_baseline_ids_json))):
             raise ValueError("ownership baseline ids must be sorted and unique")
-        if (self.baseline_ownership is None) != (
-            self.baseline_ownership_snapshot_id is None
-        ):
+        if (self.baseline_ownership is None) != (self.baseline_ownership_snapshot_id is None):
             raise ValueError("baseline ownership and its snapshot id must be present together")
         if (self.baseline_ownership_change_6h is None) != (
             self.baseline_previous_snapshot_id is None
@@ -1469,9 +1499,7 @@ class NarrativeFeatureRow(PointInTimeRow):
             raise ValueError("features-only rows cannot claim an ownership model version")
         if self.h_absolute + 1e-12 < abs(self.h_signed):
             raise ValueError("absolute heat cannot be below absolute signed heat")
-        expected_consensus = (
-            abs(self.h_signed) / self.h_absolute if self.h_absolute > 0 else 0.0
-        )
+        expected_consensus = abs(self.h_signed) / self.h_absolute if self.h_absolute > 0 else 0.0
         if not math.isclose(self.h_consensus, expected_consensus, abs_tol=1e-12):
             raise ValueError("consensus must equal abs(signed heat) / absolute heat")
         if self.effective_at != self.as_of:
@@ -1570,6 +1598,7 @@ ManifestArtifactKind = Literal[
     "ownership",
     "market",
     "weather",
+    "availability",
     "signal_features",
     "model_parameters",
     "optimizer_request",
@@ -1658,6 +1687,7 @@ class OpsRunRow(StoreRow):
         "purge",
         "extract",
         "nflverse_refresh",
+        "episodes",
         # Slate lane (`na-ops slate`), Saturday and Sunday.
         "slate_salaries",
         "slate_projections",

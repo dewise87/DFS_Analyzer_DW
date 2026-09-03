@@ -127,9 +127,11 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
         11,
         12,
         13,
+        14,
+        15,
     ]
     assert second == ()
-    assert len(records) == 13
+    assert len(records) == 15
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -160,6 +162,12 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[10][0] == 11
     assert records[10][1] == "0011_narrative_features.sql"
     assert len(records[10][2]) == 64
+    assert records[13][0] == 14
+    assert records[13][1] == "0014_ops_runs_episodes_step.sql"
+    assert len(records[13][2]) == 64
+    assert records[14][0] == 15
+    assert records[14][1] == "0015_fast_lane_availability.sql"
+    assert len(records[14][2]) == 64
 
 
 def test_source_versioning_migration_preserves_existing_narrative_rows(
@@ -178,9 +186,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         "source, published_at, observed_at, ingested_at, effective_at, "
         "valid_from, valid_to, source_version, run_id"
     )
-    point_in_time_values = (
-        "'fixture', NULL, :at, :at, NULL, :at, NULL, 'v1', NULL"
-    )
+    point_in_time_values = "'fixture', NULL, :at, :at, NULL, :at, NULL, 'v1', NULL"
     with connect_database(database_path) as connection:
         apply_migrations(connection, legacy_migrations)
         connection.execute(
@@ -251,7 +257,18 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
         ).fetchone()
         foreign_key_problems = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert [migration.version for migration in applied] == [6, 7, 8, 9, 10, 11, 12, 13]
+        assert [migration.version for migration in applied] == [
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+        ]
     assert counts == {
         "source_keys": 1,
         "sources": 1,
@@ -304,7 +321,7 @@ def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
                 ("2026-09-02T12:00:01.000000Z",),
             )
 
-    assert [migration.version for migration in applied] == [9, 10, 11, 12, 13]
+        assert [migration.version for migration in applied] == [9, 10, 11, 12, 13, 14, 15]
     assert parent["observed_at"] == timestamp
     assert parent["ingested_at"] == timestamp
 
@@ -369,8 +386,7 @@ def test_stage1_migration_rejects_irreparable_legacy_tombstones(
         with pytest.raises(MigrationError, match=message):
             apply_migrations(connection)
         applied_versions = {
-            int(row[0])
-            for row in connection.execute("SELECT version FROM applied_migrations")
+            int(row[0]) for row in connection.execute("SELECT version FROM applied_migrations")
         }
 
     assert applied_versions == {1, 2, 3, 4, 5, 6}
@@ -498,9 +514,12 @@ def test_migration_runner_disables_legacy_alter_table_and_keeps_tombstone_keys(
             "source_keys",
         }
         assert all(str(row[2]) != "source_items_stage1" for row in tombstone_foreign_keys)
-        assert connection.execute(
-            "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%na_timestamp_after%'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%na_timestamp_after%'"
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         connection.close()
 
@@ -872,9 +891,7 @@ def test_typed_rows_round_trip_for_identity_projection_and_decision_snapshot(
                 }
             )
         with pytest.raises(ValueError):
-            PlayerDistributionRow.model_validate(
-                {**distribution_values, "conditional_scale": 0.0}
-            )
+            PlayerDistributionRow.model_validate({**distribution_values, "conditional_scale": 0.0})
         with pytest.raises(ValueError):
             PlayerDistributionRow.model_validate(
                 {**distribution_values, "conditional_shape": math.inf}
@@ -911,10 +928,7 @@ def test_typed_rows_round_trip_for_identity_projection_and_decision_snapshot(
                 distribution_create,
                 fit_result=forged_fit_result,
             )
-        assert (
-            connection.execute("SELECT count(*) FROM player_distributions").fetchone()[0]
-            == 1
-        )
+        assert connection.execute("SELECT count(*) FROM player_distributions").fetchone()[0] == 1
         forged_create = distribution_create.model_copy(
             update={"as_of_at": observed_at + timedelta(minutes=1)}
         )
@@ -927,10 +941,7 @@ def test_typed_rows_round_trip_for_identity_projection_and_decision_snapshot(
                 forged_create,
                 fit_result=fit_result,
             )
-        assert (
-            connection.execute("SELECT count(*) FROM player_distributions").fetchone()[0]
-            == 1
-        )
+        assert connection.execute("SELECT count(*) FROM player_distributions").fetchone()[0] == 1
 
         nonexistent_reference = (
             PlayerDistributionSourceRef(

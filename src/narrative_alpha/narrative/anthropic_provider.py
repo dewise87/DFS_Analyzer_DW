@@ -77,19 +77,14 @@ class AnthropicBatchProvider:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if model_id != DEFAULT_MODEL_ID:
-            raise ValueError(
-                f"Stage 1 requires exact model {DEFAULT_MODEL_ID!r}; got {model_id!r}"
-            )
+            raise ValueError(f"Stage 1 requires exact model {DEFAULT_MODEL_ID!r}; got {model_id!r}")
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be finite and positive")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
-        if (
-            not math.isfinite(submission_timeout_seconds)
-            or submission_timeout_seconds <= 0
-        ):
+        if not math.isfinite(submission_timeout_seconds) or submission_timeout_seconds <= 0:
             raise ValueError("submission_timeout_seconds must be finite and positive")
         if not math.isfinite(io_timeout_seconds) or io_timeout_seconds <= 0:
             raise ValueError("io_timeout_seconds must be finite and positive")
@@ -181,8 +176,7 @@ class AnthropicBatchProvider:
 
         if batch.id != submission.provider_batch_id:
             raise AnthropicBatchError(
-                f"Anthropic retrieved batch {batch.id!r}; expected "
-                f"{submission.provider_batch_id!r}"
+                f"Anthropic retrieved batch {batch.id!r}; expected {submission.provider_batch_id!r}"
             )
 
         latency_ms = max(0, round((self.monotonic() - started) * 1000))
@@ -277,6 +271,113 @@ class AnthropicBatchProvider:
         )
 
 
+class AnthropicSynchronousProvider:
+    """One-item, tool-free Stage 1 request through the synchronous Messages API.
+
+    The extraction orchestrator still supplies its durable reservation and settlement
+    machinery.  This adapter deliberately never calls ``messages.batches``: the response
+    is buffered only long enough for the existing strict validator/writer to consume it.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: anthropic.Anthropic | None = None,
+        api_key: str | None = None,
+        model_id: str = DEFAULT_MODEL_ID,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        timeout_seconds: float = DEFAULT_PROVIDER_IO_TIMEOUT_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if model_id != DEFAULT_MODEL_ID:
+            raise ValueError(f"Stage 1 requires exact model {DEFAULT_MODEL_ID!r}; got {model_id!r}")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
+        if client is None:
+            client = anthropic.Anthropic(api_key=api_key)
+            if not (client.api_key or client.auth_token):
+                raise ValueError("ANTHROPIC_API_KEY is not set")
+        self.client = client
+        self.model_id = model_id
+        self.max_output_tokens = max_output_tokens
+        self.timeout_seconds = timeout_seconds
+        self.monotonic = monotonic
+        schema = stage1_output_schema()
+        output_format: JSONOutputFormatParam = {"type": "json_schema", "schema": schema}
+        self.output_config: OutputConfigParam = {"format": output_format}
+        self._buffered: dict[str, ProviderResult] = {}
+
+    def submit_batch(
+        self,
+        requests: tuple[PreparedExtraction, ...],
+    ) -> ProviderBatchSubmission:
+        if len(requests) != 1:
+            raise AnthropicBatchPreflightError(
+                "the synchronous fast lane accepts exactly one source item"
+            )
+        item = requests[0]
+        if item.max_output_tokens != self.max_output_tokens:
+            raise AnthropicBatchPreflightError(
+                "planned max_output_tokens does not match the synchronous provider"
+            )
+        started = self.monotonic()
+        message = self.client.with_options(
+            max_retries=0,
+            timeout=self.timeout_seconds,
+        ).messages.create(
+            model=self.model_id,
+            max_tokens=self.max_output_tokens,
+            system=item.system_prompt,
+            messages=[{"role": "user", "content": item.user_prompt}],
+            output_config=self.output_config,
+            # Deliberately no tools, tool_choice, MCP servers, or web search.
+        )
+        request_id = message._request_id
+        if request_id is not None and not request_id.strip():
+            request_id = None
+        ledger_id = f"fast-sync-{message.id}"
+        content = tuple(message.content)
+        output_json: str | None = None
+        if len(content) == 1 and content[0].type == "text":
+            output_json = content[0].text
+        self._buffered[ledger_id] = ProviderResult(
+            custom_id=item.custom_id,
+            # The storage contract reserves provider_request_id for terminal item errors.
+            provider_request_id=None,
+            batch_submission_request_id=request_id,
+            provider_batch_id=ledger_id,
+            provider_message_id=message.id,
+            actual_model_id=message.model,
+            output_json=output_json,
+            content_types=tuple(block.type for block in content),
+            stop_reason=message.stop_reason,
+            input_tokens=message.usage.input_tokens,
+            output_tokens=message.usage.output_tokens,
+            latency_ms=max(0, round((self.monotonic() - started) * 1000)),
+        )
+        return ProviderBatchSubmission(
+            provider_batch_id=ledger_id,
+            batch_submission_request_id=request_id,
+        )
+
+    def retrieve_batch(
+        self,
+        requests: tuple[PreparedExtraction, ...],
+        submission: ProviderBatchSubmission,
+    ) -> tuple[ProviderResult, ...]:
+        if len(requests) != 1:
+            raise ValueError("the synchronous fast lane retrieves exactly one item")
+        try:
+            result = self._buffered.pop(submission.provider_batch_id)
+        except KeyError as error:
+            raise AnthropicBatchError(
+                "the synchronous response is unavailable; automatic resubmission is refused"
+            ) from error
+        return (result,)
+
+
 __all__ = [
     "DEFAULT_BATCH_TIMEOUT_SECONDS",
     "DEFAULT_MAX_OUTPUT_TOKENS",
@@ -287,5 +388,6 @@ __all__ = [
     "AnthropicBatchError",
     "AnthropicBatchPreflightError",
     "AnthropicBatchProvider",
+    "AnthropicSynchronousProvider",
     "stage1_output_schema",
 ]

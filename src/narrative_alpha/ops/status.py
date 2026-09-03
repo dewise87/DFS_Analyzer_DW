@@ -12,6 +12,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from narrative_alpha.fast.rules import (
+    DEFAULT_FAST_LANE_RULES_PATH,
+    FastLaneRuleError,
+    load_fast_lane_rules,
+)
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
 from narrative_alpha.ingest.slates import SlateSummary, list_slates
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
@@ -125,6 +130,39 @@ class LabelsStatus:
 
 
 @dataclass(frozen=True)
+class EpisodeSnapshotStatus:
+    """The latest complete Stage 2 snapshot, scoped by its Stage 1 prompt version."""
+
+    as_of: datetime
+    prompt_version_id: str
+    method_version: str
+    episode_count: int
+
+
+@dataclass(frozen=True)
+class NarrativeStatus:
+    """Counts that trace collected items through Stage 1 and Stage 2."""
+
+    items_collected_last_7_days: int
+    items_extracted: int
+    items_awaiting_extraction: int
+    claims_recorded: int
+    newest_episode_snapshot: EpisodeSnapshotStatus | None
+    pending_review_flags: int
+
+
+@dataclass(frozen=True)
+class FastLaneRulesStatus:
+    """The signed rule artifact operators must refresh before it expires."""
+
+    rules_version: str
+    approved_at: datetime
+    expires_at: datetime
+    approved_by: str
+    active: bool
+
+
+@dataclass(frozen=True)
 class OpsStatus:
     """The whole screen as data, so `--json` and the text render never diverge."""
 
@@ -150,6 +188,8 @@ class OpsStatus:
     snapshot_problems: tuple[str, ...]
     slate: SlateLaneStatus | None
     labels: LabelsStatus
+    narrative: NarrativeStatus
+    fast_lane_rules: FastLaneRulesStatus | None
     month_to_date_spend_usd: str
     monthly_budget_usd: str
     budget_remaining_usd: str
@@ -179,6 +219,17 @@ class OpsStatus:
                 f"{self.inflight_attempts} extraction attempt(s) are in flight: rerun the "
                 "batch to resume, or `na-extract abandon` a stuck one"
             )
+        if self.fast_lane_rules is None:
+            actions.append(
+                "repair and re-sign `config/fast_lane_rules.yaml` — no trusted fast-lane "
+                "rule set is visible"
+            )
+        elif not self.fast_lane_rules.active:
+            actions.append(
+                f"review and re-sign `config/fast_lane_rules.yaml` — rule set "
+                f"{self.fast_lane_rules.rules_version} expired at "
+                f"{utc_timestamp(self.fast_lane_rules.expires_at)}"
+            )
         for step in (*self.steps, *self.slate_steps, *self.results_steps):
             if step.last_failure_at is not None and (
                 step.last_success_at is None or step.last_failure_at > step.last_success_at
@@ -200,6 +251,7 @@ def collect_ops_status(
     database: Path,
     now: datetime | None = None,
     pricing_path: Path = DEFAULT_PRICING_PATH,
+    fast_lane_rules_path: Path = DEFAULT_FAST_LANE_RULES_PATH,
 ) -> OpsStatus:
     """Gather the whole screen. Every section degrades to a stated gap, never a crash."""
 
@@ -254,6 +306,35 @@ def collect_ops_status(
         connection, snapshot_root=config.snapshot_root, week=snapshot_week
     )
     warnings.extend(slate_problems)
+    # Counted once: the COLLECTION and STAGE 1 blocks and the NARRATIVE block share them.
+    items_collected = _count(
+        connection,
+        "SELECT count(*) FROM source_items WHERE rtrim(observed_at, 'Z') >= rtrim(?, 'Z')",
+        (utc_timestamp(as_of - COLLECTION_WINDOW),),
+    )
+    review_flags = len(list_pending_review_flags(connection))
+    narrative = _narrative_status(
+        connection,
+        items_collected_last_7_days=items_collected,
+        pending_review_flags=review_flags,
+    )
+    fast_lane_rules: FastLaneRulesStatus | None = None
+    try:
+        rule_set = load_fast_lane_rules(
+            fast_lane_rules_path,
+            at=as_of,
+            require_active=False,
+        )
+    except FastLaneRuleError as error:
+        warnings.append(f"fast-lane rules are unavailable: {error}")
+    else:
+        fast_lane_rules = FastLaneRulesStatus(
+            rules_version=rule_set.rules_version,
+            approved_at=rule_set.approved_at,
+            expires_at=rule_set.expires_at,
+            approved_by=rule_set.approved_by,
+            active=rule_set.approved_at <= as_of < rule_set.expires_at,
+        )
 
     month_start = month_start_utc(as_of, timezone=config.timezone)
     spent = month_to_date_spend_nanos(connection, since=month_start)
@@ -274,15 +355,11 @@ def collect_ops_status(
         dead_feed_count=dead_count,
         dead_feed_source_ids=dead_ids,
         last_collection_at=None if latest_collect is None else latest_collect.started_at,
-        items_collected_last_7_days=_count(
-            connection,
-            "SELECT count(*) FROM source_items WHERE rtrim(observed_at, 'Z') >= rtrim(?, 'Z')",
-            (utc_timestamp(as_of - COLLECTION_WINDOW),),
-        ),
+        items_collected_last_7_days=items_collected,
         extraction_backlog=backlog,
         extraction_backlog_cost_usd=backlog_cost,
         extraction_backlog_note=backlog_note,
-        pending_review_flags=len(list_pending_review_flags(connection)),
+        pending_review_flags=review_flags,
         inflight_attempts=len(list_inflight_extractions(connection)),
         pending_accepted_receipts=receipts,
         unresolved_identities=len(PlayerCrosswalk(connection).list_unresolved()),
@@ -291,6 +368,8 @@ def collect_ops_status(
         snapshot_problems=snapshot_problems,
         slate=slate,
         labels=_label_status(connection),
+        narrative=narrative,
+        fast_lane_rules=fast_lane_rules,
         month_to_date_spend_usd=_usd(spent),
         monthly_budget_usd=_usd(budget),
         budget_remaining_usd=_usd(max(budget - spent, 0)),
@@ -311,6 +390,67 @@ def _step_history(connection: sqlite3.Connection, *, step: OpsStep) -> StepHisto
         last_success_at=None if success is None else success.started_at,
         last_failure_at=None if failure is None else failure.started_at,
         last_failure_text=None if failure is None else failure.error_text,
+    )
+
+
+def _narrative_status(
+    connection: sqlite3.Connection,
+    *,
+    items_collected_last_7_days: int,
+    pending_review_flags: int,
+) -> NarrativeStatus:
+    """Count the retained Stage 1 queue and the newest Stage 2 snapshot by build time."""
+
+    extracted = _count(
+        connection,
+        """
+        SELECT count(*) FROM source_items AS item
+        WHERE EXISTS (
+            SELECT 1 FROM source_item_extractions AS extraction
+            WHERE extraction.source_item_id = item.source_item_id
+              AND extraction.status IN ('succeeded', 'flagged')
+        )
+        """,
+    )
+    awaiting = _count(
+        connection,
+        """
+        SELECT count(*) FROM source_items AS item
+        WHERE item.raw_content IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM source_item_extractions AS extraction
+              WHERE extraction.source_item_id = item.source_item_id
+                AND extraction.status IN ('succeeded', 'flagged')
+          )
+        """,
+    )
+    row = connection.execute(
+        """
+        SELECT as_of, prompt_version_id, method_version, count(*) AS episode_count,
+               max(valid_from) AS built_at
+        FROM narrative_episodes
+        GROUP BY as_of, prompt_version_id, method_version
+        ORDER BY built_at DESC, as_of DESC, prompt_version_id DESC, method_version DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    newest = (
+        None
+        if row is None
+        else EpisodeSnapshotStatus(
+            as_of=_parse_stamp(str(row["as_of"])),
+            prompt_version_id=str(row["prompt_version_id"]),
+            method_version=str(row["method_version"]),
+            episode_count=int(row["episode_count"]),
+        )
+    )
+    return NarrativeStatus(
+        items_collected_last_7_days=items_collected_last_7_days,
+        items_extracted=extracted,
+        items_awaiting_extraction=awaiting,
+        claims_recorded=_count(connection, "SELECT count(*) FROM claims"),
+        newest_episode_snapshot=newest,
+        pending_review_flags=pending_review_flags,
     )
 
 
@@ -405,9 +545,7 @@ def _slate_status(
     try:
         captures = _capture_ingest_status(connection, snapshot_root, week.season, week.week)
     except (OSError, ValueError) as error:
-        return None, (
-            f"cannot read this week's captures under {snapshot_root}: {error}",
-        )
+        return None, (f"cannot read this week's captures under {snapshot_root}: {error}",)
 
     decision_at = _latest_decision_instant(connection, season=week.season, week=week.week)
     episode_rows = (
@@ -456,16 +594,11 @@ def _slate_row(
         if decision_at is None
         else _count(
             connection,
-            "SELECT count(*) FROM narrative_features "
-            "WHERE slate_id = ? AND site = ? AND as_of = ?",
+            "SELECT count(*) FROM narrative_features WHERE slate_id = ? AND site = ? AND as_of = ?",
             (summary.slate_id, summary.site, utc_timestamp(decision_at)),
         )
     )
-    decided_at = (
-        None
-        if decision is None
-        else _parse_stamp(str(decision["decision_at"]))
-    )
+    decided_at = None if decision is None else _parse_stamp(str(decision["decision_at"]))
     return SlateStatus(
         slate_id=summary.slate_id,
         external_slate_id=summary.external_slate_id,
@@ -606,22 +739,23 @@ def render_status(status: OpsStatus) -> str:
         "BATCH LANE (`na-ops batch`)",
     ]
     for step in status.steps:
-        lines.append(
-            f"  {step.step:<16} last success {_stamp(step.last_success_at, status.as_of)}"
-        )
+        lines.append(f"  {step.step:<16} last success {_stamp(step.last_success_at, status.as_of)}")
         if step.last_failure_at is not None:
-            lines.append(
-                f"  {'':<16} last failure {_stamp(step.last_failure_at, status.as_of)}"
-            )
+            lines.append(f"  {'':<16} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<16}   {step.last_failure_text}")
 
-    dead = "unknown (no collection recorded)" if status.dead_feed_count is None else (
-        f"{status.dead_feed_count}"
-        + (
-            ""
-            if not status.dead_feed_source_ids
-            else " — " + ", ".join(status.dead_feed_source_ids[:8])
-            + ("" if len(status.dead_feed_source_ids) <= 8 else ", …")
+    dead = (
+        "unknown (no collection recorded)"
+        if status.dead_feed_count is None
+        else (
+            f"{status.dead_feed_count}"
+            + (
+                ""
+                if not status.dead_feed_source_ids
+                else " — "
+                + ", ".join(status.dead_feed_source_ids[:8])
+                + ("" if len(status.dead_feed_source_ids) <= 8 else ", …")
+            )
         )
     )
     lines.extend(
@@ -630,6 +764,14 @@ def render_status(status: OpsStatus) -> str:
             "COLLECTION",
             f"  dead feeds in last run   {dead}",
             f"  items collected (7 days) {status.items_collected_last_7_days}",
+            "",
+            "NARRATIVE",
+            f"  items extracted/awaiting {status.narrative.items_extracted} / "
+            f"{status.narrative.items_awaiting_extraction}",
+            f"  claims recorded          {status.narrative.claims_recorded}",
+            "",
+            "SUNDAY FAST LANE (`na-fast`)",
+            *_render_fast_lane_rules(status.fast_lane_rules),
             "",
             "STAGE 1 EXTRACTION",
             f"  backlog (eligible now)   {status.extraction_backlog}"
@@ -656,6 +798,15 @@ def render_status(status: OpsStatus) -> str:
             "SNAPSHOTS",
         )
     )
+    snapshot = status.narrative.newest_episode_snapshot
+    if snapshot is None:
+        lines.append("  newest episode snapshot  none")
+    else:
+        lines.append(
+            f"  newest episode snapshot  {snapshot.episode_count} episode(s) at "
+            f"{utc_timestamp(snapshot.as_of)} ({snapshot.prompt_version_id}; "
+            f"{snapshot.method_version})"
+        )
     if status.snapshot_week is None:
         lines.append("  no snapshot week is initialized")
     else:
@@ -665,25 +816,17 @@ def render_status(status: OpsStatus) -> str:
 
     lines.extend(("", "SLATE LANE (`na-ops slate`)"))
     for step in status.slate_steps:
-        lines.append(
-            f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}"
-        )
+        lines.append(f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}")
         if step.last_failure_at is not None:
-            lines.append(
-                f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}"
-            )
+            lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
     lines.extend(_render_slate_week(status))
 
     lines.extend(("", "RESULTS LANE (`na-ops results`)"))
     for step in status.results_steps:
-        lines.append(
-            f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}"
-        )
+        lines.append(f"  {step.step:<18} last success {_stamp(step.last_success_at, status.as_of)}")
         if step.last_failure_at is not None:
-            lines.append(
-                f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}"
-            )
+            lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
 
     lines.extend(("", "RESULT LABELS"))
@@ -745,9 +888,7 @@ def _render_slate_week(status: OpsStatus) -> list[str]:
             f"projections {_slot(row.latest_projection_at)}  "
             f"ownership {_slot(row.latest_ownership_at)}"
         )
-        lines.append(
-            f"      features  {row.feature_rows_at_decision} at the decision instant"
-        )
+        lines.append(f"      features  {row.feature_rows_at_decision} at the decision instant")
         # The id and its cutoff come from one row, so either both are present or neither.
         decision = (
             "none frozen"
@@ -756,6 +897,18 @@ def _render_slate_week(status: OpsStatus) -> list[str]:
         )
         lines.append(f"      decision  {decision}")
     return lines
+
+
+def _render_fast_lane_rules(status: FastLaneRulesStatus | None) -> tuple[str, ...]:
+    if status is None:
+        return ("  rule set                  INVALID OR MISSING",)
+    state = "active" if status.active else "EXPIRED OR NOT YET ACTIVE"
+    return (
+        f"  rule set                  {status.rules_version} ({state})",
+        f"  approved by               {status.approved_by}",
+        f"  approved/expires          {utc_timestamp(status.approved_at)} / "
+        f"{utc_timestamp(status.expires_at)}",
+    )
 
 
 def _slot(value: datetime | None) -> str:
@@ -849,6 +1002,30 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                 }
                 for row in status.labels.by_week_and_archetype
             ],
+        },
+        "narrative": {
+            "items_collected_last_7_days": status.narrative.items_collected_last_7_days,
+            "items_extracted": status.narrative.items_extracted,
+            "items_awaiting_extraction": status.narrative.items_awaiting_extraction,
+            "claims_recorded": status.narrative.claims_recorded,
+            "newest_episode_snapshot": None
+            if status.narrative.newest_episode_snapshot is None
+            else {
+                "as_of": utc_timestamp(status.narrative.newest_episode_snapshot.as_of),
+                "prompt_version_id": status.narrative.newest_episode_snapshot.prompt_version_id,
+                "method_version": status.narrative.newest_episode_snapshot.method_version,
+                "episode_count": status.narrative.newest_episode_snapshot.episode_count,
+            },
+            "pending_review_flags": status.narrative.pending_review_flags,
+        },
+        "fast_lane_rules": None
+        if status.fast_lane_rules is None
+        else {
+            "rules_version": status.fast_lane_rules.rules_version,
+            "approved_at": utc_timestamp(status.fast_lane_rules.approved_at),
+            "expires_at": utc_timestamp(status.fast_lane_rules.expires_at),
+            "approved_by": status.fast_lane_rules.approved_by,
+            "active": status.fast_lane_rules.active,
         },
         "collection": {
             "dead_feed_count": status.dead_feed_count,

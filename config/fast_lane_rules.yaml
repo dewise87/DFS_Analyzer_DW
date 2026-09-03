@@ -1,0 +1,15 @@
+rules_version: "2026-week-2-v1"
+approved_at: "2026-09-01T00:00:00Z"
+expires_at: "2026-09-30T23:59:59Z"
+approved_by: "Daniel Wise"
+rules:
+  - rule_id: "official-inactives-v1"
+    trigger_source_class: "official_inactive_list"
+    claim_type: "availability"
+    max_automatic_adjustment:
+      availability: 1.0
+      mean: 5.0
+      shape: 0.0
+      dependence: 0.0
+      ownership: 0.0
+    expires_at: "2026-09-30T23:59:59Z"

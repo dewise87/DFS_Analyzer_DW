@@ -52,6 +52,14 @@ Mappings are versioned and retain the match method, confidence, and manual-overr
 Stores a player's temporal team, position, roster status, season, and week membership.  
 The §3.2 validity interval makes trades and roster changes resolvable as of an input observation.
 
+## `player_availability`
+
+Stores append-only official availability facts for an exact slate, player, site, season, and week.
+Every row carries the authorizing fast-lane rule/version, pasted-input hash, producing run, and the
+complete §3.2 point-in-time block. Candidate selection uses only the newest eligible row at the
+decision cutoff; an unavailable row marks the optimizer candidate injured without changing any
+projection value. Updates and deletes are forbidden.
+
 ## `unresolved_player_matches`
 
 Queues ambiguous or below-threshold source identities with candidate scores and input-file hash.  

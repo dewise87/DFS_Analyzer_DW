@@ -251,6 +251,13 @@ class OptimizationRequest(BaseModel):
     late_game_optionality_value: float = Field(default=0, ge=0)
     portfolio_covariance_penalty: float = Field(default=0, ge=0)
     number_of_lineups: int = Field(default=1, ge=1, le=150)
+    excluded_lineup_player_ids: tuple[tuple[int, ...], ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    # Lineups the optimizer must return verbatim, first and in this order, generating
+    # only the remainder. A re-freeze that touches some of a portfolio keeps the rest
+    # this way, so the new snapshot is the whole decision and replays as one.
+    pinned_lineups: tuple[Lineup, ...] = Field(default=(), exclude_if=lambda value: not value)
     time_limit_seconds: float | None = Field(default=None, gt=0)
     max_players_per_team: int | None = Field(default=None, ge=1, le=9)
     min_teams: int | None = Field(default=None, ge=1, le=9)
@@ -268,6 +275,40 @@ class OptimizationRequest(BaseModel):
             raise ValueError(f"player exposure ranges reference unknown IDs: {sorted(unknown_ids)}")
         if self.upload_entries and len(self.upload_entries) != self.number_of_lineups:
             raise ValueError("upload_entries must have exactly one row per requested lineup")
+        roster_size = len(CLASSIC_SITE_RULES[self.site].slots)
+        excluded = self.excluded_lineup_player_ids
+        if len(excluded) != len({tuple(sorted(lineup)) for lineup in excluded}):
+            raise ValueError("excluded lineups contain duplicates")
+        for lineup in excluded:
+            if len(lineup) != roster_size or len(set(lineup)) != roster_size:
+                raise ValueError(
+                    f"each excluded lineup must contain {roster_size} unique player IDs"
+                )
+            unknown_lineup_ids = set(lineup) - scenario_ids
+            if unknown_lineup_ids:
+                raise ValueError(
+                    f"excluded lineup references unknown IDs: {sorted(unknown_lineup_ids)}"
+                )
+        pinned = self.pinned_lineups
+        if len(pinned) > self.number_of_lineups:
+            raise ValueError("pinned_lineups cannot exceed number_of_lineups")
+        pinned_keys = [
+            tuple(sorted(player.player_id for player in lineup.players)) for lineup in pinned
+        ]
+        if len(pinned_keys) != len(set(pinned_keys)):
+            raise ValueError("pinned lineups contain duplicates")
+        if set(pinned_keys) & {tuple(sorted(lineup)) for lineup in excluded}:
+            raise ValueError("a lineup cannot be both pinned and excluded")
+        for pinned_lineup in pinned:
+            if pinned_lineup.site is not self.site or pinned_lineup.slate_id != self.slate_id:
+                raise ValueError("each pinned lineup must belong to this request's site and slate")
+            unknown_pinned_ids = {
+                player.player_id for player in pinned_lineup.players
+            } - scenario_ids
+            if unknown_pinned_ids:
+                raise ValueError(
+                    f"pinned lineup references unknown IDs: {sorted(unknown_pinned_ids)}"
+                )
         return self
 
 

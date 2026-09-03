@@ -1,4 +1,4 @@
-"""The Wed-Fri batch lane: collect, purge, extract, and check the roster refresh.
+"""The Wed-Fri batch lane: collect, purge, extract, refresh, and build episodes.
 
 Every step is isolated. A step that fails is recorded and the next safe step still runs,
 so one dead feed or one expired credential never costs the week its purge or its history.
@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -29,10 +30,12 @@ from narrative_alpha.narrative import (
     BatchPricing,
     CollectionError,
     CollectionRunReport,
+    EpisodeError,
     ExtractionError,
     ExtractionPlan,
     ExtractionReport,
     PurgeReport,
+    build_episodes,
     collect_enabled_sources,
     load_batch_pricing,
     plan_extraction,
@@ -45,6 +48,7 @@ from narrative_alpha.narrative.anthropic_provider import (
     AnthropicBatchProvider,
 )
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
+from narrative_alpha.ops.episodes import EpisodeStep, build_episode_snapshot
 from narrative_alpha.ops.runs import (
     OpsStep,
     OpsStepStatus,
@@ -53,6 +57,8 @@ from narrative_alpha.ops.runs import (
     StepRecorder,
     last_run,
 )
+from narrative_alpha.ops.schedule import KEYCHAIN_ACCOUNT_HINT
+from narrative_alpha.ops.secrets import anthropic_api_key
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.store import MigrationError, StoreConfigurationError
 
@@ -79,6 +85,7 @@ class BatchDependencies:
     plan_extraction: PlanStep = plan_extraction
     run_extraction: ExtractStep = run_extraction_batch
     refresh_roster: RefreshStep = refresh_roster_release
+    build_episodes: EpisodeStep = build_episodes
     load_pricing: Callable[..., BatchPricing] = load_batch_pricing
     provider_factory: Callable[[], object] | None = None
 
@@ -90,6 +97,7 @@ BATCH_STEP_ERRORS: tuple[type[BaseException], ...] = (
     anthropic.AnthropicError,
     CollectionError,
     ExtractionError,
+    EpisodeError,
     MigrationError,
     NflverseRosterError,
     OSError,
@@ -176,6 +184,23 @@ def run_batch(
         "nflverse_refresh",
         lambda: _nflverse_refresh(dependencies, config=config, now=started_at),
     )
+
+    if last_run(connection, step="extract", status="succeeded") is None:
+        recorder.skip(
+            "episodes",
+            "no extraction has ever succeeded, so there are no Stage 1 claims from which "
+            "to build an episode snapshot",
+        )
+    else:
+        recorder.run(
+            "episodes",
+            lambda: build_episode_snapshot(
+                dependencies.build_episodes,
+                connection,
+                as_of=started_at,
+                built_at=started_at,
+            ),
+        )
 
     return BatchReport(
         batch_run_id=batch_run_id,
@@ -306,25 +331,12 @@ def _extract(
     if not (plan.ready or plan.resumable or plan.submission_unknown or plan.injection_blocked):
         return "succeeded", summary | {"submitted_items": 0, "claims_stored": 0}, None
 
-    if dependencies.provider_factory is None and not (
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    ):
-        # Same refusal as `na-extract`, before any item is reserved: a missing credential
-        # must never leave reservations behind.
-        raise StepFailure(
-            "ANTHROPIC_API_KEY is not set for this process; a scheduled run reads it from "
-            "the macOS Keychain through the wrapper `na-ops schedule install` writes",
-            summary,
-        )
-
-    factory = dependencies.provider_factory or (
-        lambda: AnthropicBatchProvider(timeout_seconds=DEFAULT_BATCH_TIMEOUT_SECONDS)
-    )
+    provider = _extraction_provider(dependencies, config=config, summary=summary)
     report = dependencies.run_extraction(
         connection,
         window_start=start,
         window_end=now,
-        provider=factory(),
+        provider=provider,
         pricing=pricing,
         run_at=started_at,
         max_items=max_items,
@@ -349,6 +361,58 @@ def _extract(
         detail = "; ".join(f"item {error.source_item_id}: {error.code}" for error in report.errors)
         raise StepFailure(f"extraction reported item failures — {detail}", summary)
     return "succeeded", summary, None
+
+
+def _extraction_provider(
+    dependencies: BatchDependencies,
+    *,
+    config: OpsConfig,
+    summary: dict[str, object],
+) -> object:
+    """Construct the provider with an environment or one ephemeral Keychain value."""
+
+    if dependencies.provider_factory is not None:
+        return dependencies.provider_factory()
+
+    key = anthropic_api_key(config)
+    if key is None:
+        # Refuse before any item is reserved: a credential failure must never leave an
+        # ambiguous submission.  The first sentence is retained for operators and scripts
+        # that already key off the original refusal text.
+        hint = KEYCHAIN_ACCOUNT_HINT.format(service=config.keychain_service)
+        raise StepFailure(
+            "ANTHROPIC_API_KEY is not set for this process; a scheduled run reads it from "
+            "the macOS Keychain through the wrapper `na-ops schedule install` writes. "
+            f"Add the Keychain item with `{hint}`",
+            summary,
+        )
+
+    # Existing environment credentials are already visible to the SDK.  A Keychain value
+    # is only installed while Anthropic constructs its client, which retains the value on
+    # the client; neither configuration nor a recorded run ever receives it.
+    if _environment_has_anthropic_credential():
+        return AnthropicBatchProvider(timeout_seconds=DEFAULT_BATCH_TIMEOUT_SECONDS)
+    with _temporary_anthropic_api_key(key):
+        return AnthropicBatchProvider(timeout_seconds=DEFAULT_BATCH_TIMEOUT_SECONDS)
+
+
+def _environment_has_anthropic_credential() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+@contextmanager
+def _temporary_anthropic_api_key(key: str) -> Iterator[None]:
+    """Expose a Keychain key only while the default SDK client is constructed."""
+
+    prior = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["ANTHROPIC_API_KEY"] = key
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prior
 
 
 @dataclass(frozen=True)

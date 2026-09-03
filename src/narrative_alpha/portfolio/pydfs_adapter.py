@@ -65,23 +65,24 @@ class PydfsAdapter:
 
             games = _build_game_infos(request.candidate_player_scenario.players)
             pydfs_players = []
+            pydfs_by_canonical_id: dict[int, Player] = {}
             for candidate in request.candidate_player_scenario.players:
                 game = games[candidate.game_id]
                 first_name, last_name = _split_name(candidate.name)
-                pydfs_players.append(
-                    Player(
-                        player_id=candidate.site_player_id,
-                        first_name=first_name,
-                        last_name=last_name,
-                        positions=[_pydfs_position(candidate, request.site)],
-                        team=candidate.team,
-                        salary=candidate.salary,
-                        fppg=candidate.projection,
-                        is_injured=candidate.is_injured,
-                        projected_ownership=candidate.projected_ownership,
-                        game_info=game,
-                    )
+                pydfs_player = Player(
+                    player_id=candidate.site_player_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    positions=[_pydfs_position(candidate, request.site)],
+                    team=candidate.team,
+                    salary=candidate.salary,
+                    fppg=candidate.projection,
+                    is_injured=candidate.is_injured,
+                    projected_ownership=candidate.projected_ownership,
+                    game_info=game,
                 )
+                pydfs_players.append(pydfs_player)
+                pydfs_by_canonical_id[candidate.player_id] = pydfs_player
             optimizer.player_pool.load_players(pydfs_players)
 
             # pydfs validates min_teams against the loaded pool, so this must
@@ -93,9 +94,31 @@ class PydfsAdapter:
             if ownership_bounds is not None:
                 optimizer.set_projected_ownership(*ownership_bounds)
 
-            solved = tuple(optimizer.optimize(request.number_of_lineups))
-            lineups = tuple(
-                _convert_lineup(pydfs_lineup, request, candidates) for pydfs_lineup in solved
+            # pydfs' public exclude_lineups contract iterates each supplied lineup as a
+            # collection of its own Player objects.  Keeping canonical IDs in our request
+            # makes that exclusion deterministic and replayable without leaking the
+            # dependency outside this adapter.
+            excluded_lineups: list[Any] = [
+                tuple(pydfs_by_canonical_id[player_id] for player_id in lineup)
+                for lineup in request.excluded_lineup_player_ids
+            ]
+            # A pinned lineup is returned verbatim and never regenerated: the optimizer
+            # is asked only for the remainder, with the pinned rows excluded as well so a
+            # duplicate of one cannot come back as "new".
+            pinned = request.pinned_lineups
+            excluded_lineups.extend(
+                tuple(pydfs_by_canonical_id[player.player_id] for player in lineup.players)
+                for lineup in pinned
+            )
+            remaining = request.number_of_lineups - len(pinned)
+            solved: tuple[Any, ...] = (
+                ()
+                if remaining == 0
+                else tuple(optimizer.optimize(remaining, exclude_lineups=excluded_lineups))
+            )
+            lineups = (
+                *pinned,
+                *(_convert_lineup(pydfs_lineup, request, candidates) for pydfs_lineup in solved),
             )
         except LineupOptimizerException as error:
             raise OptimizerError(f"pydfs could not generate requested lineups: {error}") from error
@@ -215,8 +238,7 @@ def _ownership_average_bounds(
     if sum_range is None:
         return None
     if any(
-        player.projected_ownership is None
-        for player in request.candidate_player_scenario.players
+        player.projected_ownership is None for player in request.candidate_player_scenario.players
     ):
         raise OptimizerError("ownership_sum_range requires ownership for every player")
     if sum_range.minimum == sum_range.maximum:

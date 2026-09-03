@@ -47,7 +47,6 @@ from narrative_alpha.ingest.slates import (
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.interface import SlateMemo, SlateMemoError, build_slate_memo
 from narrative_alpha.narrative.episodes import (
-    EpisodeBuildReport,
     EpisodeError,
     build_episodes,
 )
@@ -58,6 +57,7 @@ from narrative_alpha.narrative.features import (
     build_features,
 )
 from narrative_alpha.ops.config import OpsConfig
+from narrative_alpha.ops.episodes import EpisodeStep, build_episode_snapshot
 from narrative_alpha.ops.runs import (
     OpsStep,
     OpsStepStatus,
@@ -89,7 +89,6 @@ MAX_LISTED_ACTIONS = 10
 NewestCapture = Callable[..., Path]
 SalaryStep = Callable[..., SlateLoadReport]
 VendorStep = Callable[..., ProjectionLoadReport]
-EpisodeStep = Callable[..., EpisodeBuildReport]
 FeatureStep = Callable[..., FeatureBuildReport]
 DecisionStep = Callable[..., BuildResult]
 MemoStep = Callable[..., SlateMemo]
@@ -436,9 +435,7 @@ def _ingest_salaries(
     # No ``run_id``: it is a foreign key into ``model_runs`` and the lane opens no model
     # run of its own. One invocation is traced through its ``ops_runs`` rows, and each
     # ingested row through its own ``source_file_sha256`` — the same as `na-slate ingest`.
-    capture_path = capture or dependencies.newest_salary_capture(
-        config.snapshot_root, season, week
-    )
+    capture_path = capture or dependencies.newest_salary_capture(config.snapshot_root, season, week)
     report = dependencies.load_salary_capture(
         connection,
         capture_path,
@@ -665,22 +662,11 @@ def _build_episodes(
     as_of: datetime,
     built_at: datetime,
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
-    report = dependencies.build_episodes(connection, as_of=as_of, built_at=built_at)
-    connection.commit()
-    return (
-        "succeeded",
-        {
-            "method_version": report.method_version,
-            "claims_considered": report.claims_considered,
-            "episode_count": report.episode_count,
-            "episodes_inserted": report.episodes_inserted,
-            "membership_count": report.membership_count,
-            "memberships_inserted": report.memberships_inserted,
-            "unclustered_claims": report.unclustered_claims,
-            "unresolved_player_claims": report.unresolved_player_claims,
-            "reused_existing": report.reused_existing,
-        },
-        None,
+    return build_episode_snapshot(
+        dependencies.build_episodes,
+        connection,
+        as_of=as_of,
+        built_at=built_at,
     )
 
 
@@ -904,7 +890,9 @@ def _write_memo(
 
 def _listed(commands: list[str]) -> str:
     shown = commands[:MAX_LISTED_ACTIONS]
-    more = "" if len(commands) <= MAX_LISTED_ACTIONS else (
-        f"\n  (+{len(commands) - MAX_LISTED_ACTIONS} more)"
+    more = (
+        ""
+        if len(commands) <= MAX_LISTED_ACTIONS
+        else (f"\n  (+{len(commands) - MAX_LISTED_ACTIONS} more)")
     )
     return "\n  " + "\n  ".join(shown) + more

@@ -46,6 +46,7 @@ class CandidateSelection:
     projection_source_versions: tuple[str, ...]
     salary_artifacts: tuple[SelectedSourceArtifact, ...]
     projection_artifacts: tuple[SelectedSourceArtifact, ...]
+    availability_artifacts: tuple[SelectedSourceArtifact, ...]
 
     @property
     def salary_hashes(self) -> frozenset[str]:
@@ -54,6 +55,10 @@ class CandidateSelection:
     @property
     def projection_hashes(self) -> frozenset[str]:
         return frozenset(artifact.sha256 for artifact in self.projection_artifacts)
+
+    @property
+    def availability_hashes(self) -> frozenset[str]:
+        return frozenset(artifact.sha256 for artifact in self.availability_artifacts)
 
 
 def select_candidate_scenario(
@@ -64,6 +69,7 @@ def select_candidate_scenario(
     as_of: datetime,
     salary_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     projection_artifacts: frozenset[SelectedSourceArtifact] | None = None,
+    availability_artifacts: frozenset[SelectedSourceArtifact] | None = None,
 ) -> CandidateSelection:
     """Select and blend the exact point-in-time candidates used by build and replay.
 
@@ -76,9 +82,7 @@ def select_candidate_scenario(
         raise CandidateSelectionError(
             "salary and projection artifact filters must either both be set or both be omitted"
         )
-    if salary_artifacts is not None and (
-        not salary_artifacts or not projection_artifacts
-    ):
+    if salary_artifacts is not None and (not salary_artifacts or not projection_artifacts):
         raise CandidateSelectionError(
             "candidate selection requires non-empty salary and projection artifact filters"
         )
@@ -95,11 +99,19 @@ def select_candidate_scenario(
         "projection_artifact",
         projection_artifacts,
     )
+    availability_filter, availability_parameters = _artifact_filter(
+        "pa.source_file_sha256",
+        "pa.source",
+        "availability_artifact",
+        availability_artifacts,
+        empty_means_none=True,
+    )
     parameters: dict[str, object] = {
         "slate_id": slate_id,
         "site": site.value,
         **salary_parameters,
         **projection_parameters,
+        **availability_parameters,
     }
     rows = session.query(
         f"""
@@ -136,6 +148,23 @@ def select_candidate_scenario(
                   ps.valid_to IS NULL
                   OR rtrim(ps.valid_to, 'Z') > rtrim(:as_of, 'Z')
               )
+        ),
+        ranked_availability AS (
+            SELECT pa.*,
+                   row_number() OVER (
+                       PARTITION BY pa.slate_id, pa.site, pa.player_id
+                       ORDER BY rtrim(pa.observed_at, 'Z') DESC, pa.availability_id DESC
+                   ) AS version_rank
+            FROM player_availability AS pa
+            WHERE pa.slate_id = :slate_id
+              AND pa.site = :site
+              {availability_filter}
+              AND rtrim(pa.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(pa.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (
+                  pa.valid_to IS NULL
+                  OR rtrim(pa.valid_to, 'Z') > rtrim(:as_of, 'Z')
+              )
         )
         SELECT s.player_id, s.site_player_id, s.roster_positions_json, s.salary,
                s.source_file_sha256 AS salary_hash, s.source AS salary_source,
@@ -146,7 +175,9 @@ def select_candidate_scenario(
                ps.projection_mean, ps.ownership_projection,
                ps.source AS projection_source,
                ps.source_version AS projection_source_version,
-               ps.source_file_sha256 AS projection_hash
+               ps.source_file_sha256 AS projection_hash,
+               pa.availability_status, pa.source AS availability_source,
+               pa.source_file_sha256 AS availability_hash
         FROM ranked_salaries AS s
         JOIN players AS p ON p.player_id = s.player_id
         JOIN teams AS team ON team.team_id = s.team_id
@@ -154,6 +185,8 @@ def select_candidate_scenario(
         JOIN games AS g ON g.game_id = s.game_id
         JOIN ranked_projections AS ps
           ON ps.player_id = s.player_id AND ps.version_rank = 1
+        LEFT JOIN ranked_availability AS pa
+          ON pa.player_id = s.player_id AND pa.version_rank = 1
         WHERE s.version_rank = 1
           AND rtrim(p.observed_at, 'Z') <= rtrim(:as_of, 'Z')
           AND rtrim(p.valid_from, 'Z') <= rtrim(:as_of, 'Z')
@@ -214,6 +247,18 @@ def select_candidate_scenario(
             }
         )
     )
+    selected_availability_artifacts = tuple(
+        sorted(
+            {
+                SelectedSourceArtifact(
+                    sha256=str(row["availability_hash"]),
+                    source=str(row["availability_source"]),
+                )
+                for row in rows
+                if row["availability_hash"] is not None and row["availability_source"] is not None
+            }
+        )
+    )
     source_versions = tuple(
         sorted(
             {
@@ -229,6 +274,7 @@ def select_candidate_scenario(
         projection_source_versions=source_versions,
         salary_artifacts=selected_salary_artifacts,
         projection_artifacts=selected_projection_artifacts,
+        availability_artifacts=selected_availability_artifacts,
     )
 
 
@@ -239,9 +285,7 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
     except (TypeError, json.JSONDecodeError) as error:
         raise CandidateSelectionError("stored salary roster positions are invalid JSON") from error
     if not isinstance(slots, list) or not all(isinstance(slot, str) for slot in slots):
-        raise CandidateSelectionError(
-            "stored salary roster positions must be a JSON string array"
-        )
+        raise CandidateSelectionError("stored salary roster positions must be a JSON string array")
 
     projection = math.fsum(float(row["projection_mean"]) for row in rows) / len(rows)
     ownership_values = [
@@ -250,9 +294,7 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
         if row["ownership_projection"] is not None
     ]
     projected_ownership = (
-        None
-        if not ownership_values
-        else math.fsum(ownership_values) / len(ownership_values)
+        None if not ownership_values else math.fsum(ownership_values) / len(ownership_values)
     )
     position = str(first["position"] or slots[0]).upper()
     return CandidatePlayer(
@@ -268,6 +310,7 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
         projected_ownership=projected_ownership,
         game_id=str(first["external_game_id"]),
         game_start=first["kickoff_at"],
+        is_injured=str(first["availability_status"] or "") == "unavailable",
     )
 
 
@@ -276,9 +319,13 @@ def _artifact_filter(
     source_column: str,
     prefix: str,
     artifacts: frozenset[SelectedSourceArtifact] | None,
+    *,
+    empty_means_none: bool = False,
 ) -> tuple[str, dict[str, object]]:
     if artifacts is None:
         return "", {}
+    if not artifacts and empty_means_none:
+        return "AND 0", {}
     parameters: dict[str, object] = {}
     predicates: list[str] = []
     for index, artifact in enumerate(sorted(artifacts)):
@@ -286,7 +333,5 @@ def _artifact_filter(
         hash_key = f"{prefix}_hash_{index}"
         parameters[source_key] = artifact.source
         parameters[hash_key] = artifact.sha256
-        predicates.append(
-            f"({source_column} = :{source_key} AND {hash_column} = :{hash_key})"
-        )
+        predicates.append(f"({source_column} = :{source_key} AND {hash_column} = :{hash_key})")
     return "AND (" + " OR ".join(predicates) + ")", parameters

@@ -28,6 +28,15 @@ from narrative_alpha.snapshots.fetch import (
 from narrative_alpha.store import SourcePolicyRow, SourceRow
 
 CATALOG_PROVENANCE_SOURCE = "narrative-source-catalog"
+SourceGrade = Literal["A", "B", "C"]
+
+# Conservative defaults for the current catalog.  An exact source may override this in
+# TOML; absent an explicit grade, only first-party official feeds enter the fast lane.
+_DEFAULT_SOURCE_FAMILY_GRADES: dict[str, SourceGrade] = {
+    "official_team": "A",
+    "national_media": "B",
+    "team_community": "C",
+}
 
 
 class CatalogError(ValueError):
@@ -72,6 +81,7 @@ class CatalogSource(_CatalogModel):
     feed_url: str
     policy_tier: str
     team: str | None = None
+    grade: SourceGrade | None = None
 
     @field_validator(
         "source_id", "display_name", "source_family", "feed_url", "policy_tier", "team"
@@ -91,6 +101,10 @@ class CatalogSource(_CatalogModel):
         if not value.startswith(("https://", "http://")):
             raise ValueError("feed_url must be an HTTP(S) URL")
         return value
+
+    @property
+    def effective_grade(self) -> SourceGrade:
+        return self.grade or source_family_grade(self.source_family)
 
 
 class NarrativeSourceCatalog(_CatalogModel):
@@ -177,6 +191,21 @@ def load_source_catalog(path: Path) -> NarrativeSourceCatalog:
 
     catalog, _ = _load_source_catalog_bytes(path)
     return catalog
+
+
+def source_family_grade(source_family: str) -> SourceGrade:
+    """Return the fail-closed default grade for a source family."""
+
+    return _DEFAULT_SOURCE_FAMILY_GRADES.get(source_family, "C")
+
+
+def catalog_source_grade(catalog: NarrativeSourceCatalog, source_id: str) -> SourceGrade:
+    """Resolve one exact configured source grade; unknown sources are not implicitly trusted."""
+
+    matches = tuple(source for source in catalog.sources if source.source_id == source_id)
+    if len(matches) != 1:
+        raise CatalogError(f"source {source_id!r} is not uniquely configured in the catalog")
+    return matches[0].effective_grade
 
 
 def _load_source_catalog_bytes(path: Path) -> tuple[NarrativeSourceCatalog, bytes]:
@@ -527,13 +556,16 @@ __all__ = [
     "NarrativeSourceCatalog",
     "PolicyTier",
     "SeedResult",
+    "SourceGrade",
     "SourceSeedChange",
     "SourceSeedPlan",
     "TierAttestation",
     "apply_source_seed",
+    "catalog_source_grade",
     "check_catalog_feeds",
     "feed_check_payload",
     "load_source_catalog",
     "plan_source_seed",
     "seed_plan_payload",
+    "source_family_grade",
 ]

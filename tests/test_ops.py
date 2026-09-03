@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shlex
 import sqlite3
 from dataclasses import replace
@@ -15,12 +16,21 @@ from narrative_alpha.narrative import (
     CollectionError,
     CollectionReport,
     CollectionRunReport,
+    EpisodeError,
+    PreparedExtraction,
+    ProviderBatchSubmission,
+    ProviderResult,
     PurgeReport,
     SourceCollectionError,
+    build_episodes,
+    load_batch_pricing,
     normalize_item_text,
+    run_extraction_batch,
 )
 from narrative_alpha.ops import (
     BatchDependencies,
+    DashboardContext,
+    LaneRunner,
     ScheduleError,
     build_jobs,
     collect_ops_status,
@@ -39,11 +49,13 @@ from narrative_alpha.ops import (
 )
 from narrative_alpha.ops.cli import main as ops_main
 from narrative_alpha.ops.config import OpsConfigError
+from narrative_alpha.ops.dashboard import _memo_page, _queues_page, _runs_page, _status_page
 from narrative_alpha.ops.schedule import (
     LABEL_PREFIX,
     WRAPPER_MARKER,
     default_na_ops_executable,
 )
+from narrative_alpha.ops.secrets import anthropic_api_key
 from narrative_alpha.store import apply_migrations, connect_database
 
 NOW = datetime(2026, 9, 2, 13, 30, tzinfo=UTC)
@@ -53,6 +65,80 @@ FIXTURE_HOME = Path("/Users/fixture")
 FIXTURE_REPOSITORY = Path("/opt/narrative-alpha")
 FIXTURE_NA_OPS = FIXTURE_REPOSITORY / ".venv" / "bin" / "na-ops"
 SECRET = "sk-ant-fixture-never-written-anywhere"
+
+
+class _ClaimProvider:
+    """One deterministic terminal Stage 1 claim for batch/status integration tests."""
+
+    def submit_batch(
+        self,
+        requests: tuple[PreparedExtraction, ...],
+    ) -> ProviderBatchSubmission:
+        assert len(requests) == 1
+        return ProviderBatchSubmission(
+            provider_batch_id=f"batch-{requests[0].source_item_id}",
+            batch_submission_request_id=f"request-{requests[0].source_item_id}",
+        )
+
+    def retrieve_batch(
+        self,
+        requests: tuple[PreparedExtraction, ...],
+        submission: ProviderBatchSubmission,
+    ) -> tuple[ProviderResult, ...]:
+        request = requests[0]
+        text = normalize_item_text(
+            "WAS role update", "Jordan Reed will start and see expanded routes for WAS."
+        )
+        evidence_start = text.index("Jordan Reed")
+        payload = {
+            "schema_version": "stage1-extraction-v1",
+            "prompt_injection_detected": False,
+            "claims": [
+                {
+                    "player_refs": [{"name_raw": "Jordan Reed"}],
+                    "team_refs": ["WAS"],
+                    "claim_type": "usage",
+                    "claim_dimension": "role",
+                    "outcome_direction": "increase",
+                    "roster_behavior_direction": "increase",
+                    "evidence_class": "B",
+                    "evidence_basis": "beat_report",
+                    "falsifiable": True,
+                    "specificity": 0.8,
+                    "actionability": 0.8,
+                    "novelty": "new",
+                    "model_confidence": "high",
+                    "uncertainty_flags": ["none"],
+                    "ambiguity_flags": ["none"],
+                    "suggested_channels": ["mean", "ownership"],
+                    "disconfirming_context": None,
+                    "evidence_refs": [
+                        {
+                            "source_item_id": request.source_item_id,
+                            "extract_start": evidence_start,
+                            "extract_end": len(text),
+                            "verbatim_extract": text[evidence_start:],
+                        }
+                    ],
+                }
+            ],
+        }
+        return (
+            ProviderResult(
+                custom_id=request.custom_id,
+                provider_request_id=None,
+                batch_submission_request_id=submission.batch_submission_request_id,
+                provider_batch_id=submission.provider_batch_id,
+                provider_message_id=f"message-{request.source_item_id}",
+                actual_model_id="claude-haiku-4-5-20251001",
+                output_json=json.dumps(payload),
+                content_types=("text",),
+                stop_reason="end_turn",
+                input_tokens=20,
+                output_tokens=10,
+                latency_ms=1,
+            ),
+        )
 
 
 def _write_config(tmp_path: Path, **overrides: object) -> Path:
@@ -473,6 +559,10 @@ def test_missing_credential_fails_the_step_without_reserving_anything(
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "narrative_alpha.ops.secrets.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=44, stdout=""),
+    )
     config = _config(tmp_path)
     with connect_database(config.database) as connection:
         apply_migrations(connection)
@@ -490,7 +580,230 @@ def test_missing_credential_fails_the_step_without_reserving_anything(
     step = report.step("extract")
     assert step is not None and step.status == "failed"
     assert "ANTHROPIC_API_KEY is not set" in str(step.error_text)
+    assert "security add-generic-password" in str(step.error_text)
     assert attempts == 0
+
+
+def test_batch_builds_the_shared_episode_snapshot_at_its_start_timestamp(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    seen: dict[str, datetime] = {}
+
+    def episodes(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        seen["as_of"] = kwargs["as_of"]
+        seen["built_at"] = kwargs["built_at"]
+        return build_episodes(connection, **kwargs)
+
+    def extract(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        return run_extraction_batch(connection, clock=lambda: NOW, **kwargs)
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        _seed_source_item(connection)
+        connection.commit()
+        report = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(
+                provider_factory=_ClaimProvider,
+                run_extraction=extract,
+                load_pricing=load_batch_pricing,
+                build_episodes=episodes,
+            ),
+        )
+        steps = [
+            str(row["step"])
+            for row in connection.execute("SELECT step FROM ops_runs ORDER BY ops_run_id")
+        ]
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
+
+    episode_step = report.step("episodes")
+    assert episode_step is not None and episode_step.status == "succeeded"
+    assert seen == {"as_of": NOW, "built_at": NOW}
+    assert episode_step.summary["episodes_inserted"] == 1
+    assert steps[-2:] == ["nflverse_refresh", "episodes"]
+    assert status.narrative.items_collected_last_7_days == 1
+    assert status.narrative.items_extracted == 1
+    assert status.narrative.items_awaiting_extraction == 0
+    assert status.narrative.claims_recorded == 1
+    snapshot = status.narrative.newest_episode_snapshot
+    assert snapshot is not None
+    assert snapshot.as_of == NOW
+    assert snapshot.prompt_version_id == "stage1-extraction-v1"
+    assert snapshot.episode_count == 1
+    payload = status_payload(status)
+    assert payload["narrative"] == {
+        "items_collected_last_7_days": 1,
+        "items_extracted": 1,
+        "items_awaiting_extraction": 0,
+        "claims_recorded": 1,
+        "newest_episode_snapshot": {
+            "as_of": _timestamp(NOW),
+            "prompt_version_id": "stage1-extraction-v1",
+            "method_version": "deterministic-token-set-jaccard-v1",
+            "episode_count": 1,
+        },
+        "pending_review_flags": 0,
+    }
+    rendered = render_status(status)
+    assert "NARRATIVE" in rendered
+    assert "items extracted/awaiting 1 / 0" in rendered
+    assert "stage1-extraction-v1" in rendered
+
+
+def test_episode_step_skips_without_a_successful_extraction_and_records_builder_failure(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    def refusing_episodes(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        raise EpisodeError("Stage 2 fixture refusal")
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        skipped = run_batch(connection, config=config, now=NOW, dependencies=_dependencies())
+        record_ops_run(
+            connection,
+            batch_run_id="prior-stage1",
+            step="extract",
+            status="succeeded",
+            started_at=NOW - timedelta(hours=2),
+            finished_at=NOW - timedelta(hours=1),
+            summary={"window_end": _timestamp(NOW - timedelta(hours=1))},
+        )
+        connection.commit()
+        failed = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(build_episodes=refusing_episodes),
+        )
+
+    skipped_step = skipped.step("episodes")
+    assert skipped_step is not None and skipped_step.status == "skipped"
+    assert "no extraction has ever succeeded" in str(skipped_step.error_text)
+    failed_step = failed.step("episodes")
+    assert failed_step is not None and failed_step.status == "failed"
+    assert "Stage 2 fixture refusal" in str(failed_step.error_text)
+
+
+def test_keychain_credential_is_ephemeral_and_never_reaches_operator_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    config = _config(tmp_path)
+    security_calls: list[tuple[object, ...]] = []
+    seen: dict[str, str | None] = {}
+
+    def security(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        security_calls.append(command)
+        assert kwargs["check"] is False
+        return SimpleNamespace(returncode=0, stdout=f"{SECRET}\n")
+
+    def provider(*, timeout_seconds: float) -> object:
+        assert timeout_seconds > 0
+        seen["during_provider_construction"] = os.environ.get("ANTHROPIC_API_KEY")
+        return SimpleNamespace()
+
+    def extract(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        seen["during_extraction"] = os.environ.get("ANTHROPIC_API_KEY")
+        return SimpleNamespace(
+            run_id="stage1-keychain-fixture",
+            selected_items=1,
+            submitted_items=1,
+            succeeded_items=1,
+            claims_stored=0,
+            flagged_item_ids=(),
+            errors=(),
+            ineligible=(),
+            ok=True,
+            pending=False,
+        )
+
+    monkeypatch.setattr("narrative_alpha.ops.secrets.subprocess.run", security)
+    monkeypatch.setattr("narrative_alpha.ops.batch.AnthropicBatchProvider", provider)
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        _seed_source_item(connection)
+        connection.commit()
+        report = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(run_extraction=extract),
+        )
+        rows = connection.execute("SELECT summary_json, error_text FROM ops_runs").fetchall()
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
+
+    context = DashboardContext(
+        config=config,
+        database=config.database,
+        runner=LaneRunner(),
+        clock=lambda: NOW,
+    )
+    pages = (_status_page(context), _queues_page(context), _runs_page(context), _memo_page(context))
+    extract_step = report.step("extract")
+    assert extract_step is not None and extract_step.status == "succeeded"
+    assert security_calls == [
+        (
+            "/usr/bin/security",
+            "find-generic-password",
+            "-s",
+            config.keychain_service,
+            "-w",
+        )
+    ]
+    assert seen == {"during_provider_construction": SECRET, "during_extraction": None}
+    assert os.environ.get("ANTHROPIC_API_KEY") is None
+    assert all(SECRET not in str(row["summary_json"]) for row in rows)
+    assert all(SECRET not in str(row["error_text"] or "") for row in rows)
+    assert SECRET not in json.dumps(status_payload(status))
+    assert all(SECRET not in page for page in pages)
+
+
+def test_anthropic_api_key_prefers_the_process_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "environment-api-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "environment-auth-token")
+
+    def unexpected_security(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the Keychain must not be read while an environment key exists")
+
+    monkeypatch.setattr("narrative_alpha.ops.secrets.subprocess.run", unexpected_security)
+    assert anthropic_api_key(config) == "environment-api-key"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert anthropic_api_key(config) == "environment-auth-token"
+
+
+def test_anthropic_api_key_gives_up_when_the_keychain_prompt_is_never_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked Keychain can raise a dialog; the lookup must time out, not hang the lane."""
+
+    import subprocess
+
+    config = _config(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    seen: dict[str, object] = {}
+
+    def hanging_security(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd="security", timeout=float(kwargs["timeout"]))
+
+    monkeypatch.setattr("narrative_alpha.ops.secrets.subprocess.run", hanging_security)
+    assert anthropic_api_key(config) is None
+    assert isinstance(seen["timeout"], float) and seen["timeout"] > 0
 
 
 def test_cli_batch_exits_nonzero_when_a_step_failed(tmp_path: Path) -> None:
@@ -524,9 +837,7 @@ def test_status_renders_on_an_empty_database(tmp_path: Path) -> None:
     config = _config(tmp_path)
     with connect_database(config.database) as connection:
         apply_migrations(connection)
-        status = collect_ops_status(
-            connection, config=config, database=config.database, now=NOW
-        )
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
 
     screen = render_status(status)
     assert "last success never" in screen
@@ -568,9 +879,7 @@ def test_status_reports_a_seeded_store_with_a_pending_receipt(tmp_path: Path) ->
             error_text="1 of 3 sources failed — espn-was: 404 Not Found",
         )
         connection.commit()
-        status = collect_ops_status(
-            connection, config=config, database=config.database, now=NOW
-        )
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
 
     screen = render_status(status)
     assert status.pending_accepted_receipts == 1
@@ -592,9 +901,7 @@ def test_status_counts_month_to_date_spend_in_the_configured_zone(tmp_path: Path
     assert month_start_utc(
         datetime(2026, 9, 1, 2, 0, tzinfo=UTC), timezone=config.timezone
     ) == datetime(2026, 8, 1, 4, 0, tzinfo=UTC)
-    assert month_start_utc(NOW, timezone=config.timezone) == datetime(
-        2026, 9, 1, 4, 0, tzinfo=UTC
-    )
+    assert month_start_utc(NOW, timezone=config.timezone) == datetime(2026, 9, 1, 4, 0, tzinfo=UTC)
 
 
 def _fake_na_ops(tmp_path: Path) -> Path:
@@ -682,9 +989,7 @@ def test_no_agent_carries_key_material(
 def test_reminder_jobs_do_no_data_work_and_carry_the_manual_commands(
     tmp_path: Path,
 ) -> None:
-    reminders = [
-        job for job in _golden_jobs(tmp_path) if ".reminder-" in job.label
-    ]
+    reminders = [job for job in _golden_jobs(tmp_path) if ".reminder-" in job.label]
     assert len(reminders) == 3
     for job in reminders:
         assert "osascript" in job.script
@@ -900,9 +1205,7 @@ def test_manual_action_list_stays_one_line_per_item(tmp_path: Path) -> None:
             error_text="budget guard refused the batch: " + "x" * 500,
         )
         connection.commit()
-        status = collect_ops_status(
-            connection, config=config, database=config.database, now=NOW
-        )
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
 
     action = next(item for item in status.manual_actions if item.startswith("the extract"))
     assert len(action) < 200
@@ -937,9 +1240,7 @@ def test_extraction_is_skipped_until_a_roster_is_seeded(tmp_path: Path) -> None:
             connection,
             config=config,
             now=NOW,
-            dependencies=_dependencies(
-                plan_extraction=_never_called, run_extraction=_never_called
-            ),
+            dependencies=_dependencies(plan_extraction=_never_called, run_extraction=_never_called),
         )
         watermark = extraction_window_start(connection, now=NOW)
         _seed_player(connection)
@@ -1039,7 +1340,7 @@ def test_reminder_notification_is_one_shell_word_even_with_quotes(tmp_path: Path
         weekday="sun",
         eastern_time=time(9, 0),
         title='Don\'t "miss" this',
-        notification="It's 9 a.m.; capture \"now\"",
+        notification='It\'s 9 a.m.; capture "now"',
         instructions=("one line",),
     )
     script = _reminder_script(
@@ -1154,8 +1455,11 @@ def test_batch_max_items_per_run_comes_from_config(tmp_path: Path) -> None:
         dependencies=_dependencies(plan_extraction=plan),
     )
     assert default_code == 0
-    assert ops_main(
-        ["--config", str(config_path), "batch", "--max-items", "3"],
-        dependencies=_dependencies(plan_extraction=plan),
-    ) == 0
+    assert (
+        ops_main(
+            ["--config", str(config_path), "batch", "--max-items", "3"],
+            dependencies=_dependencies(plan_extraction=plan),
+        )
+        == 0
+    )
     assert seen == [7, 3]

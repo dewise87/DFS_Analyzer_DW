@@ -260,9 +260,7 @@ _NUMBER_WORD = (
     r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
     r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|half|quarter)"
 )
-_NUMBER_WORD_PHRASE = (
-    rf"{_NUMBER_WORD}(?:[\s-]+(?:and[\s-]+)?(?:a[\s-]+)?{_NUMBER_WORD}){{0,4}}"
-)
+_NUMBER_WORD_PHRASE = rf"{_NUMBER_WORD}(?:[\s-]+(?:and[\s-]+)?(?:a[\s-]+)?{_NUMBER_WORD}){{0,4}}"
 _WORD_NUMERIC_ADJUSTMENT_PATTERN = re.compile(
     rf"(?:"
     rf"\b(?:set|target|project|dock|move|adjust|increase|decrease|raise|lower|"
@@ -288,45 +286,170 @@ _WORD_NUMERIC_ADJUSTMENT_PATTERN = re.compile(
 _NFL_TEAM_REFERENCES = frozenset(
     reference.casefold()
     for reference in (
-        "ARI", "Arizona", "Cardinals", "Arizona Cardinals",
-        "ATL", "Atlanta", "Falcons", "Atlanta Falcons",
-        "BAL", "Baltimore", "Ravens", "Baltimore Ravens",
-        "BUF", "Buffalo", "Bills", "Buffalo Bills",
-        "CAR", "Carolina", "Panthers", "Carolina Panthers",
-        "CHI", "Chicago", "Bears", "Chicago Bears",
-        "CIN", "Cincinnati", "Bengals", "Cincinnati Bengals",
-        "CLE", "Cleveland", "Browns", "Cleveland Browns",
-        "DAL", "Dallas", "Cowboys", "Dallas Cowboys",
-        "DEN", "Denver", "Broncos", "Denver Broncos",
-        "DET", "Detroit", "Lions", "Detroit Lions",
-        "GB", "Green Bay", "Packers", "Green Bay Packers",
-        "HOU", "Houston", "Texans", "Houston Texans",
-        "IND", "Indianapolis", "Colts", "Indianapolis Colts",
-        "JAX", "Jacksonville", "Jaguars", "Jacksonville Jaguars",
-        "KC", "Kansas City", "Chiefs", "Kansas City Chiefs",
-        "LV", "Las Vegas", "Raiders", "Las Vegas Raiders",
-        "LAC", "Chargers", "Los Angeles Chargers",
-        "LAR", "Rams", "Los Angeles Rams",
-        "MIA", "Miami", "Dolphins", "Miami Dolphins",
-        "MIN", "Minnesota", "Vikings", "Minnesota Vikings",
-        "NE", "New England", "Patriots", "New England Patriots",
-        "NO", "New Orleans", "Saints", "New Orleans Saints",
-        "NYG", "Giants", "New York Giants",
-        "NYJ", "Jets", "New York Jets",
-        "PHI", "Philadelphia", "Eagles", "Philadelphia Eagles",
-        "PIT", "Pittsburgh", "Steelers", "Pittsburgh Steelers",
-        "SEA", "Seattle", "Seahawks", "Seattle Seahawks",
-        "SF", "San Francisco", "49ers", "San Francisco 49ers",
-        "TB", "Tampa Bay", "Buccaneers", "Tampa Bay Buccaneers",
-        "TEN", "Tennessee", "Titans", "Tennessee Titans",
-        "WAS", "Washington", "Commanders", "Washington Commanders",
+        "ARI",
+        "Arizona",
+        "Cardinals",
+        "Arizona Cardinals",
+        "ATL",
+        "Atlanta",
+        "Falcons",
+        "Atlanta Falcons",
+        "BAL",
+        "Baltimore",
+        "Ravens",
+        "Baltimore Ravens",
+        "BUF",
+        "Buffalo",
+        "Bills",
+        "Buffalo Bills",
+        "CAR",
+        "Carolina",
+        "Panthers",
+        "Carolina Panthers",
+        "CHI",
+        "Chicago",
+        "Bears",
+        "Chicago Bears",
+        "CIN",
+        "Cincinnati",
+        "Bengals",
+        "Cincinnati Bengals",
+        "CLE",
+        "Cleveland",
+        "Browns",
+        "Cleveland Browns",
+        "DAL",
+        "Dallas",
+        "Cowboys",
+        "Dallas Cowboys",
+        "DEN",
+        "Denver",
+        "Broncos",
+        "Denver Broncos",
+        "DET",
+        "Detroit",
+        "Lions",
+        "Detroit Lions",
+        "GB",
+        "Green Bay",
+        "Packers",
+        "Green Bay Packers",
+        "HOU",
+        "Houston",
+        "Texans",
+        "Houston Texans",
+        "IND",
+        "Indianapolis",
+        "Colts",
+        "Indianapolis Colts",
+        "JAX",
+        "Jacksonville",
+        "Jaguars",
+        "Jacksonville Jaguars",
+        "KC",
+        "Kansas City",
+        "Chiefs",
+        "Kansas City Chiefs",
+        "LV",
+        "Las Vegas",
+        "Raiders",
+        "Las Vegas Raiders",
+        "LAC",
+        "Chargers",
+        "Los Angeles Chargers",
+        "LAR",
+        "Rams",
+        "Los Angeles Rams",
+        "MIA",
+        "Miami",
+        "Dolphins",
+        "Miami Dolphins",
+        "MIN",
+        "Minnesota",
+        "Vikings",
+        "Minnesota Vikings",
+        "NE",
+        "New England",
+        "Patriots",
+        "New England Patriots",
+        "NO",
+        "New Orleans",
+        "Saints",
+        "New Orleans Saints",
+        "NYG",
+        "Giants",
+        "New York Giants",
+        "NYJ",
+        "Jets",
+        "New York Jets",
+        "PHI",
+        "Philadelphia",
+        "Eagles",
+        "Philadelphia Eagles",
+        "PIT",
+        "Pittsburgh",
+        "Steelers",
+        "Pittsburgh Steelers",
+        "SEA",
+        "Seattle",
+        "Seahawks",
+        "Seattle Seahawks",
+        "SF",
+        "San Francisco",
+        "49ers",
+        "San Francisco 49ers",
+        "TB",
+        "Tampa Bay",
+        "Buccaneers",
+        "Tampa Bay Buccaneers",
+        "TEN",
+        "Tennessee",
+        "Titans",
+        "Tennessee Titans",
+        "WAS",
+        "Washington",
+        "Commanders",
+        "Washington Commanders",
         # Alternate codes and nicknames that appear verbatim in feed headlines.
-        "WSH", "JAC", "LA", "L.A.", "LA Rams", "L.A. Rams", "LA Chargers", "L.A. Chargers",
-        "Los Angeles", "New York", "NY", "N.Y.", "NY Giants", "N.Y. Giants", "NY Jets",
-        "N.Y. Jets", "Niners", "Bucs", "Pats", "Fins", "Jags", "Cards", "Bolts", "Vikes",
-        "Pack", "Hawks", "Skol", "Birds", "Cats", "Cowgirls", "Redbirds", "The Bills",
-        "Washington Football Team", "Oakland", "Oakland Raiders", "San Diego",
-        "San Diego Chargers", "St. Louis", "St. Louis Rams",
+        "WSH",
+        "JAC",
+        "LA",
+        "L.A.",
+        "LA Rams",
+        "L.A. Rams",
+        "LA Chargers",
+        "L.A. Chargers",
+        "Los Angeles",
+        "New York",
+        "NY",
+        "N.Y.",
+        "NY Giants",
+        "N.Y. Giants",
+        "NY Jets",
+        "N.Y. Jets",
+        "Niners",
+        "Bucs",
+        "Pats",
+        "Fins",
+        "Jags",
+        "Cards",
+        "Bolts",
+        "Vikes",
+        "Pack",
+        "Hawks",
+        "Skol",
+        "Birds",
+        "Cats",
+        "Cowgirls",
+        "Redbirds",
+        "The Bills",
+        "Washington Football Team",
+        "Oakland",
+        "Oakland Raiders",
+        "San Diego",
+        "San Diego Chargers",
+        "St. Louis",
+        "St. Louis Rams",
     )
 )
 
@@ -383,8 +506,7 @@ class BatchPricing:
         ):
             raise ValueError("token counts must be nonnegative SQLite integers")
         cost = (
-            input_tokens * self.input_nanos_per_token
-            + output_tokens * self.output_nanos_per_token
+            input_tokens * self.input_nanos_per_token + output_tokens * self.output_nanos_per_token
         )
         if cost > SQLITE_INT_MAX:
             raise ValueError("provider cost exceeds SQLite integer range")
@@ -402,6 +524,7 @@ class _ModelPricingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     batch: _BatchRateConfig
+    synchronous: _BatchRateConfig | None = None
 
 
 class _PricingConfig(BaseModel):
@@ -464,12 +587,38 @@ def load_batch_pricing(
         effective_at=config.effective_at,
         source_url=config.source_url,
         model_id=model_id,
-        input_nanos_per_token=_rate_nanos_per_token(
-            rates.input_usd_per_million_tokens, "input"
-        ),
-        output_nanos_per_token=_rate_nanos_per_token(
-            rates.output_usd_per_million_tokens, "output"
-        ),
+        input_nanos_per_token=_rate_nanos_per_token(rates.input_usd_per_million_tokens, "input"),
+        output_nanos_per_token=_rate_nanos_per_token(rates.output_usd_per_million_tokens, "output"),
+    )
+
+
+def load_synchronous_pricing(
+    path: Path = DEFAULT_PRICING_PATH,
+    *,
+    model_id: str = DEFAULT_MODEL_ID,
+) -> BatchPricing:
+    """Load standard Messages API rates into the shared immutable cost contract."""
+
+    try:
+        with path.open("rb") as handle:
+            config = _PricingConfig.model_validate(tomllib.load(handle))
+    except (OSError, tomllib.TOMLDecodeError, ValidationError) as error:
+        raise ExtractionInputError(f"cannot load model pricing from {path}: {error}") from error
+    try:
+        rates = config.models[model_id].synchronous
+    except KeyError as error:
+        raise ExtractionInputError(f"pricing config {path} has no model {model_id!r}") from error
+    if rates is None:
+        raise ExtractionInputError(
+            f"pricing config {path} has no synchronous rates for model {model_id!r}"
+        )
+    return BatchPricing(
+        version=f"{config.version}:synchronous",
+        effective_at=config.effective_at,
+        source_url=config.source_url,
+        model_id=model_id,
+        input_nanos_per_token=_rate_nanos_per_token(rates.input_usd_per_million_tokens, "input"),
+        output_nanos_per_token=_rate_nanos_per_token(rates.output_usd_per_million_tokens, "output"),
     )
 
 
@@ -540,6 +689,7 @@ def plan_extraction(
     planned_at: datetime | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     max_items: int | None = None,
+    source_item_id: int | None = None,
 ) -> ExtractionPlan:
     """Build exact requests without writing data or constructing an API client."""
 
@@ -559,26 +709,29 @@ def plan_extraction(
         ("input_nanos_per_token", pricing.input_nanos_per_token),
         ("output_nanos_per_token", pricing.output_nanos_per_token),
     ):
-        if (
-            isinstance(rate, bool)
-            or not isinstance(rate, int)
-            or not 0 <= rate <= SQLITE_INT_MAX
-        ):
+        if isinstance(rate, bool) or not isinstance(rate, int) or not 0 <= rate <= SQLITE_INT_MAX:
             raise ExtractionInputError(f"{label} must fit a nonnegative SQLite integer")
     if max_output_tokens <= 0:
         raise ExtractionInputError("max_output_tokens must be positive")
+    if source_item_id is not None and source_item_id < 1:
+        raise ExtractionInputError("source_item_id must be positive")
     policy_at = ensure_utc(planned_at or datetime.now(UTC))
     prompt = default_prompt_version()
     # Migration 0007 validates every legacy timestamp and enforces fixed-width UTC-Z on new
     # rows. That invariant makes lexical bounds exact and lets SQLite use the Stage 1 window
     # index instead of materializing the entire source-item table in Python.
+    item_filter = "" if source_item_id is None else "AND source_item_id = ? "
+    parameters: tuple[object, ...] = (utc_timestamp(start), utc_timestamp(end))
+    if source_item_id is not None:
+        parameters = (*parameters, source_item_id)
     rows = tuple(
         SourceItemRow.from_db(row)
         for row in connection.execute(
             "SELECT * FROM source_items "
             "WHERE observed_at >= ? AND observed_at < ? "
+            f"{item_filter}"
             "ORDER BY observed_at, source_item_id",
-            (utc_timestamp(start), utc_timestamp(end)),
+            parameters,
         )
     )
 
@@ -662,20 +815,15 @@ def plan_extraction(
                     if _request_sha256(prepared, model_id=model_id) != str(
                         inflight["request_sha256"]
                     ):
-                        quarantine_reason = (
-                            "reserved provider request is no longer reproducible"
-                        )
+                        quarantine_reason = "reserved provider request is no longer reproducible"
                         prepared = _pending_item_stub(item, inflight, prompt)
             reserved_policy_failure = (
-                "authorizing policy raw-text retention expired while its provider batch "
-                "was pending"
+                "authorizing policy raw-text retention expired while its provider batch was pending"
                 if item.observed_at
                 <= policy_at - timedelta(days=reserved_policy.raw_retention_days)
                 else None
             )
-            authorization_failure = _authorization_failure_reason(
-                connection, item, policy_at
-            )
+            authorization_failure = _authorization_failure_reason(connection, item, policy_at)
             if quarantine_reason is None:
                 quarantine_reason = reserved_policy_failure or authorization_failure
             prepared = replace(prepared, quarantine_reason=quarantine_reason)
@@ -857,6 +1005,8 @@ def run_extraction_batch(
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     clock: Callable[[], datetime] | None = None,
     max_items: int | None = None,
+    source_item_id: int | None = None,
+    run_tag: Literal["batch", "fast"] = "batch",
 ) -> ExtractionReport:
     """Extract eligible items with durable reservations and atomic per-item results."""
 
@@ -886,6 +1036,7 @@ def run_extraction_batch(
         planned_at=authorization_at,
         max_output_tokens=max_output_tokens,
         max_items=max_items,
+        source_item_id=source_item_id,
     )
     if plan.ready:
         _preflight_submission_receipt_storage(connection)
@@ -912,10 +1063,10 @@ def run_extraction_batch(
         )
 
     prompt = ensure_prompt_version(connection)
-    run_id = f"stage1-{uuid4().hex}"
+    run_id = f"stage1{'-fast' if run_tag == 'fast' else ''}-{uuid4().hex}"
     run = ModelRunRow(
         run_id=run_id,
-        run_type="stage_1_extraction",
+        run_type=("stage_1_extraction_fast" if run_tag == "fast" else "stage_1_extraction"),
         started_at=started_at,
         completed_at=None,
         status="running",
@@ -1159,8 +1310,7 @@ def run_extraction_batch(
         # The reservation is visible before the single-shot HTTP request. A crash after
         # acceptance leaves `creating`, which is deliberately not automatically retryable.
         lease_keys = tuple(
-            _submission_lease_key(extraction_id)
-            for extraction_id in submitting_ids.values()
+            _submission_lease_key(extraction_id) for extraction_id in submitting_ids.values()
         )
         release_submission_leases = True
         try:
@@ -1188,10 +1338,7 @@ def run_extraction_batch(
                 retained_unknown_submission_lease_keys.extend(lease_keys)
                 _mark_inflight_error(
                     connection,
-                    (
-                        extraction_ids[item.source_item_id]
-                        for item in submitting_requests
-                    ),
+                    (extraction_ids[item.source_item_id] for item in submitting_requests),
                     code=code,
                     message=_transport_error_message(prefix, error),
                 )
@@ -1271,9 +1418,7 @@ def run_extraction_batch(
                     connection,
                     run_id=run_id,
                     failed_at=max(started_at, ensure_utc(now())),
-                    reason=(
-                        "accepted provider batch is awaiting durable receipt reconciliation"
-                    ),
+                    reason=("accepted provider batch is awaiting durable receipt reconciliation"),
                 )
                 raise
             submitted_items += len(submitting_requests)
@@ -1427,11 +1572,7 @@ def _security_scan_text(text: str) -> str:
     """Normalize compatibility forms and remove invisible format controls before scanning."""
 
     normalized = unicodedata.normalize("NFKC", text)
-    return "".join(
-        character
-        for character in normalized
-        if unicodedata.category(character) != "Cf"
-    )
+    return "".join(character for character in normalized if unicodedata.category(character) != "Cf")
 
 
 def _prepare_item(
@@ -1451,9 +1592,7 @@ def _prepare_item(
     source_payload = {
         "content_sha256": item.content_sha256,
         "observed_at": utc_timestamp(item.observed_at),
-        "published_at": (
-            None if item.published_at is None else utc_timestamp(item.published_at)
-        ),
+        "published_at": (None if item.published_at is None else utc_timestamp(item.published_at)),
         "source_family": source_family,
         "source_id": item.source_id,
         "source_item_id": item.source_item_id,
@@ -1555,9 +1694,7 @@ def _authorization_failure_reason(
         return "current source policy forbids third-party model processing"
     if item.observed_at > checked_at:
         return "source item observation time is after the authorization check"
-    capture_policy_failure = _capture_policy_retention_failure_reason(
-        connection, item, checked_at
-    )
+    capture_policy_failure = _capture_policy_retention_failure_reason(connection, item, checked_at)
     if capture_policy_failure is not None:
         return capture_policy_failure
     if item.observed_at <= checked_at - timedelta(days=policy.raw_retention_days):
@@ -1593,9 +1730,7 @@ def _capture_policy_retention_failure_reason(
         applicable,
         key=lambda policy: (policy.observed_at, policy.source_policy_id),
     )
-    if item.observed_at <= ensure_utc(as_of) - timedelta(
-        days=capture_policy.raw_retention_days
-    ):
+    if item.observed_at <= ensure_utc(as_of) - timedelta(days=capture_policy.raw_retention_days):
         return "is outside its capture-time source policy retention window"
     return None
 
@@ -1624,9 +1759,7 @@ def _completion_authorization_failure_reason(
         or not reserved_policy.third_party_processing_allowed
     ):
         return "authorizing source policy no longer validates the submitted item"
-    if item.observed_at <= ensure_utc(as_of) - timedelta(
-        days=reserved_policy.raw_retention_days
-    ):
+    if item.observed_at <= ensure_utc(as_of) - timedelta(days=reserved_policy.raw_retention_days):
         return "authorizing policy raw-text retention expired before result settlement"
     policy_failure = _authorization_failure_reason(connection, item, as_of)
     if policy_failure is not None:
@@ -1639,9 +1772,7 @@ def _completion_authorization_failure_reason(
     return None
 
 
-def _current_source(
-    connection: sqlite3.Connection, source_id: str, as_of: datetime
-) -> SourceRow:
+def _current_source(connection: sqlite3.Connection, source_id: str, as_of: datetime) -> SourceRow:
     cutoff = ensure_utc(as_of)
     rows = (
         SourceRow.from_db(row)
@@ -1721,10 +1852,7 @@ def _provider_result_metadata_error(
             or not 0 <= numeric_value <= SQLITE_INT_MAX
         ):
             return f"provider result contained invalid {field_name}"
-    if (
-        result.output_tokens is not None
-        and result.output_tokens > item.max_output_tokens
-    ):
+    if result.output_tokens is not None and result.output_tokens > item.max_output_tokens:
         return "provider result output_tokens exceeded the requested maximum"
     if result.input_tokens is not None and result.output_tokens is not None:
         try:
@@ -1792,9 +1920,7 @@ def _estimated_batch_request_bytes(
         },
     }
     # One byte covers the JSONL newline; compact UTF-8 JSON is a conservative wire estimate.
-    return len(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    ) + 1
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
 
 
 def _reserve_batch_requests(
@@ -1953,9 +2079,7 @@ def release_dead_run(
 
     if not reason.strip():
         raise ExtractionInputError("a release reason is required")
-    row = connection.execute(
-        "SELECT status FROM model_runs WHERE run_id = ?", (run_id,)
-    ).fetchone()
+    row = connection.execute("SELECT status FROM model_runs WHERE run_id = ?", (run_id,)).fetchone()
     if row is None:
         raise ExtractionInputError(f"run {run_id!r} does not exist")
     if row["status"] != "running":
@@ -2050,10 +2174,7 @@ def _run_has_active_execution_lease(
     checked_at: datetime,
     excluding_lease_key: str | None = None,
 ) -> bool:
-    query = (
-        "SELECT 1 FROM stage1_execution_leases "
-        "WHERE owner_run_id = ? AND expires_at > ?"
-    )
+    query = "SELECT 1 FROM stage1_execution_leases WHERE owner_run_id = ? AND expires_at > ?"
     parameters: list[object] = [owner_run_id, utc_timestamp(ensure_utc(checked_at))]
     if excluding_lease_key is not None:
         query += " AND lease_key <> ?"
@@ -2076,8 +2197,7 @@ def _acquire_execution_lease(
     try:
         connection.execute("BEGIN IMMEDIATE")
         prior = connection.execute(
-            "SELECT owner_run_id, expires_at FROM stage1_execution_leases "
-            "WHERE lease_key = ?",
+            "SELECT owner_run_id, expires_at FROM stage1_execution_leases WHERE lease_key = ?",
             (lease_key,),
         ).fetchone()
         displaced_owner: str | None = None
@@ -2089,11 +2209,7 @@ def _acquire_execution_lease(
                 (prior_owner,),
             ).fetchone()
             prior_is_running = prior_run is not None and prior_run["status"] == "running"
-            if (
-                prior_owner != owner_run_id
-                and prior_expiry > acquired
-                and prior_is_running
-            ):
+            if prior_owner != owner_run_id and prior_expiry > acquired and prior_is_running:
                 connection.commit()
                 return _ExecutionLeaseAcquisition(acquired=False)
             if prior_owner != owner_run_id:
@@ -2154,8 +2270,7 @@ def _release_execution_leases(
 ) -> None:
     for lease_key in lease_keys:
         connection.execute(
-            "DELETE FROM stage1_execution_leases "
-            "WHERE lease_key = ? AND owner_run_id = ?",
+            "DELETE FROM stage1_execution_leases WHERE lease_key = ? AND owner_run_id = ?",
             (lease_key, owner_run_id),
         )
 
@@ -2209,10 +2324,7 @@ def _batch_lease_duration(provider: ExtractionProvider) -> timedelta:
         or io_timeout < 0
     ):
         io_timeout = 0.0
-    return (
-        timedelta(seconds=float(timeout) + (2 * float(io_timeout)))
-        + BATCH_LEASE_GRACE
-    )
+    return timedelta(seconds=float(timeout) + (2 * float(io_timeout))) + BATCH_LEASE_GRACE
 
 
 def _submission_lease_duration(provider: ExtractionProvider) -> timedelta:
@@ -2232,10 +2344,7 @@ def _submission_lease_duration(provider: ExtractionProvider) -> timedelta:
         or io_timeout < 0
     ):
         io_timeout = 0.0
-    return (
-        timedelta(seconds=float(timeout) + float(io_timeout))
-        + SUBMISSION_LEASE_GRACE
-    )
+    return timedelta(seconds=float(timeout) + float(io_timeout)) + SUBMISSION_LEASE_GRACE
 
 
 def _record_run_parent(
@@ -2301,8 +2410,7 @@ def _reconcile_expired_execution_leases(
 ) -> None:
     checked_at = ensure_utc(reconciled_at)
     rows = connection.execute(
-        "SELECT lease_key, operation_kind, owner_run_id, expires_at "
-        "FROM stage1_execution_leases"
+        "SELECT lease_key, operation_kind, owner_run_id, expires_at FROM stage1_execution_leases"
     ).fetchall()
     for row in rows:
         expires_at = ensure_utc(datetime.fromisoformat(str(row["expires_at"])))
@@ -2311,9 +2419,7 @@ def _reconcile_expired_execution_leases(
         owner_run_id = str(row["owner_run_id"])
         lease_key = str(row["lease_key"])
         keep_for_takeover = False
-        if str(row["operation_kind"]) == "batch_recovery" and lease_key.startswith(
-            "batch:"
-        ):
+        if str(row["operation_kind"]) == "batch_recovery" and lease_key.startswith("batch:"):
             provider_batch_id = lease_key.removeprefix("batch:")
             keep_for_takeover = (
                 connection.execute(
@@ -2339,8 +2445,7 @@ def _reconcile_expired_execution_leases(
                 reason="interrupted Stage 1 run expired its execution lease",
             )
         connection.execute(
-            "DELETE FROM stage1_execution_leases "
-            "WHERE lease_key = ? AND expires_at = ?",
+            "DELETE FROM stage1_execution_leases WHERE lease_key = ? AND expires_at = ?",
             (lease_key, str(row["expires_at"])),
         )
 
@@ -2384,9 +2489,7 @@ def _submission_receipt_directory(connection: sqlite3.Connection) -> Path:
             "accepted-batch recovery receipts require a file-backed main database"
         )
     database_path = Path(database_file).resolve()
-    return database_path.with_name(
-        database_path.name + SUBMISSION_RECEIPT_DIRECTORY_SUFFIX
-    )
+    return database_path.with_name(database_path.name + SUBMISSION_RECEIPT_DIRECTORY_SUFFIX)
 
 
 def _receipt_body_json(body: _SubmissionReceiptBody) -> str:
@@ -2591,8 +2694,7 @@ def _apply_submission_receipt(
                     f"could not reconcile accepted reservation {item.extraction_id!r}"
                 )
         elif (
-            row["batch_submission_request_id"]
-            != receipt.batch_submission_request_id
+            row["batch_submission_request_id"] != receipt.batch_submission_request_id
             or row["provider_batch_id"] != receipt.provider_batch_id
             or row["provider_custom_id"] != item.custom_id
         ):
@@ -2631,9 +2733,7 @@ def _reconcile_submission_receipts(connection: sqlite3.Connection) -> None:
     if not directory.exists():
         return
     if not directory.is_dir():
-        raise ExtractionInputError(
-            f"accepted-batch receipt path is not a directory: {directory}"
-        )
+        raise ExtractionInputError(f"accepted-batch receipt path is not a directory: {directory}")
     for temporary_path in sorted(directory.glob(".*.tmp")):
         receipt = _read_submission_receipt(
             temporary_path,
@@ -2644,8 +2744,7 @@ def _reconcile_submission_receipts(connection: sqlite3.Connection) -> None:
             canonical_receipt = _read_submission_receipt(receipt_path)
             if canonical_receipt != receipt:
                 raise ExtractionInputError(
-                    f"temporary recovery receipt {temporary_path} conflicts with "
-                    f"{receipt_path}"
+                    f"temporary recovery receipt {temporary_path} conflicts with {receipt_path}"
                 )
             temporary_path.unlink()
         else:
@@ -2892,9 +2991,7 @@ def _fail_creating_attempt(
         ),
     )
     if cursor.rowcount != 1:
-        raise ExtractionInputError(
-            f"creating extraction reservation {extraction_id!r} disappeared"
-        )
+        raise ExtractionInputError(f"creating extraction reservation {extraction_id!r} disappeared")
 
 
 def _process_submitted_batch(
@@ -3023,8 +3120,7 @@ def _process_submitted_batch(
         result = result_map[item.custom_id]
         if (
             result.provider_batch_id != submission.provider_batch_id
-            or result.batch_submission_request_id
-            != submission.batch_submission_request_id
+            or result.batch_submission_request_id != submission.batch_submission_request_id
         ):
             message = "provider result batch trace differs from durable submission"
             _mark_inflight_error(
@@ -3233,8 +3329,7 @@ def _process_submitted_batch(
             connection.execute("ROLLBACK TO SAVEPOINT stage1_item")
             connection.execute("RELEASE SAVEPOINT stage1_item")
             current = connection.execute(
-                "SELECT status, error_code FROM source_item_extractions "
-                "WHERE extraction_id = ?",
+                "SELECT status, error_code FROM source_item_extractions WHERE extraction_id = ?",
                 (extraction_id,),
             ).fetchone()
             if current is not None and current["status"] == "succeeded":
@@ -3375,9 +3470,7 @@ def _find_instruction_text(value: object) -> str | None:
     if isinstance(value, str):
         reason = detect_prompt_injection(value)
         return (
-            None
-            if reason is None
-            else f"provider output contained instruction-like text: {reason}"
+            None if reason is None else f"provider output contained instruction-like text: {reason}"
         )
     if isinstance(value, Mapping):
         for child in value.values():
@@ -3734,9 +3827,7 @@ def _store_success(
                 "disconfirming_context_sha256": (
                     None
                     if claim.disconfirming_context is None
-                    else hashlib.sha256(
-                        claim.disconfirming_context.encode("utf-8")
-                    ).hexdigest()
+                    else hashlib.sha256(claim.disconfirming_context.encode("utf-8")).hexdigest()
                 ),
                 "context_redacted_at": None,
                 **_point_in_time(item, recorded_at, run_id, prompt, model_id),
@@ -3778,9 +3869,7 @@ def _store_success(
                     "name_raw": player.name_raw,
                     "player_id": match.player_id,
                     "unresolved_id": match.unresolved_id,
-                    "resolution_method": (
-                        None if match.method is None else match.method.value
-                    ),
+                    "resolution_method": (None if match.method is None else match.method.value),
                     "resolution_confidence": match.confidence,
                     "manual_override": match.manual_override,
                     **_point_in_time(item, recorded_at, run_id, prompt, model_id),
@@ -3813,9 +3902,7 @@ def _store_success(
         (extraction_id,),
     )
     if cursor.rowcount != 1:
-        raise ExtractionInputError(
-            f"extraction settlement {extraction_id!r} did not finalize"
-        )
+        raise ExtractionInputError(f"extraction settlement {extraction_id!r} did not finalize")
     return len(envelope.claims)
 
 
@@ -3964,33 +4051,33 @@ def _store_flagged(
             )
         attempt = SourceItemExtractionRow.model_validate(
             {
-            "extraction_id": stored_extraction_id,
-            "source_item_id": item.source_item_id,
-            "source_policy_id": item.source_policy_id,
-            "source_family": item.source_family,
-            "source_content_sha256": item.content_sha256,
-            "prompt_version_id": prompt.prompt_version_id,
-            "model_id": model_id,
-            "max_output_tokens": item.max_output_tokens,
-            "request_sha256": _request_sha256(item, model_id=model_id),
-            "provider_message_id": None,
-            "status": "creating",
-            "output_json": None,
-            "output_sha256": None,
-            "output_redacted_at": None,
-            "input_tokens": None,
-            "output_tokens": None,
-            "cost_nanos_usd": None,
-            "pricing_version": pricing.version,
-            "pricing_effective_at": pricing.effective_at,
-            "pricing_source_url": pricing.source_url,
-            "input_nanos_per_token": pricing.input_nanos_per_token,
-            "output_nanos_per_token": pricing.output_nanos_per_token,
-            "latency_ms": None,
-            "error_code": None,
-            "error_message": None,
-            **trace,
-            **_point_in_time(item, recorded_at, run_id, prompt, model_id),
+                "extraction_id": stored_extraction_id,
+                "source_item_id": item.source_item_id,
+                "source_policy_id": item.source_policy_id,
+                "source_family": item.source_family,
+                "source_content_sha256": item.content_sha256,
+                "prompt_version_id": prompt.prompt_version_id,
+                "model_id": model_id,
+                "max_output_tokens": item.max_output_tokens,
+                "request_sha256": _request_sha256(item, model_id=model_id),
+                "provider_message_id": None,
+                "status": "creating",
+                "output_json": None,
+                "output_sha256": None,
+                "output_redacted_at": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "cost_nanos_usd": None,
+                "pricing_version": pricing.version,
+                "pricing_effective_at": pricing.effective_at,
+                "pricing_source_url": pricing.source_url,
+                "input_nanos_per_token": pricing.input_nanos_per_token,
+                "output_nanos_per_token": pricing.output_nanos_per_token,
+                "latency_ms": None,
+                "error_code": None,
+                "error_message": None,
+                **trace,
+                **_point_in_time(item, recorded_at, run_id, prompt, model_id),
             }
         )
         _insert_store_row(connection, "source_item_extractions", attempt)
@@ -4042,9 +4129,7 @@ def _store_flagged(
     flag = SourceItemReviewFlagRow.model_validate(
         {
             "source_item_review_flag_id": "review-flag-"
-            + _sha256_parts(
-                str(item.source_item_id), prompt.prompt_sha256, model_id, flag_type
-            ),
+            + _sha256_parts(str(item.source_item_id), prompt.prompt_sha256, model_id, flag_type),
             "source_item_id": item.source_item_id,
             "source_id": item.source_id,
             "source_policy_id": item.source_policy_id,
@@ -4076,9 +4161,7 @@ def _store_failed_attempt(
     pricing: BatchPricing,
 ) -> None:
     trace = _trace_values(result)
-    cost_nanos = (
-        None if result is None else _provider_cost(result, pricing, required=False)
-    )
+    cost_nanos = None if result is None else _provider_cost(result, pricing, required=False)
     assignments: dict[str, object] = {
         "status": "failed",
         "output_json": None,

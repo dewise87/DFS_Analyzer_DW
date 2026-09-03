@@ -481,6 +481,20 @@ unresolved players, and conflicting contest cohort metadata remain explicit rath
 The Tuesday `na-ops results` lane matches each export to the append-only `contests` record by the
 external contest ID in its filename and refuses with the `na-contest add` remedy when it cannot.
 
+## Sunday fast lane (`na-fast`)
+
+Two pre-approved actions, governed by the signed rule file `config/fast_lane_rules.yaml`
+(`rules_version`, `approved_at`, `expires_at`, `approved_by`; `na-ops status` shows when
+it needs re-signing). `na-fast inactives --season N --week N --site dk --paste` takes the
+official inactive list from standard input, records each player unavailable as of that
+instant, and re-freezes the whole portfolio: lineups without an inactive are pinned
+verbatim, the rest are rebuilt, and the new decision snapshot plus upload CSV replay
+byte-for-byte like any other. The availability rows and the snapshot are one transaction —
+a refusal (cap exceeded, unresolved name, optimizer failure) leaves nothing behind but a
+failed run naming why. `na-fast item --url <url>` runs one synchronous Stage 1 extraction
+for an A-graded source behind the same rule set and monthly budget as the batch lane, and
+changes no lineup.
+
 ## Point-in-time replay
 
 Replay a decision snapshot from its captured optimizer request, salary hashes, and projection

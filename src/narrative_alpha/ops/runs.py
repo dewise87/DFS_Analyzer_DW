@@ -19,7 +19,7 @@ from narrative_alpha import __version__
 from narrative_alpha.ingest.timestamps import ensure_utc
 from narrative_alpha.store import OpsRunRow
 
-OpsBatchStep = Literal["collect", "purge", "extract", "nflverse_refresh"]
+OpsBatchStep = Literal["collect", "purge", "extract", "nflverse_refresh", "episodes"]
 OpsSlateStep = Literal[
     "slate_salaries",
     "slate_projections",
@@ -210,9 +210,7 @@ def record_ops_run(
     values.pop("ops_run_id")
     columns = ", ".join(values)
     placeholders = ", ".join(f":{column}" for column in values)
-    cursor = connection.execute(
-        f"INSERT INTO ops_runs ({columns}) VALUES ({placeholders})", values
-    )
+    cursor = connection.execute(f"INSERT INTO ops_runs ({columns}) VALUES ({placeholders})", values)
     if cursor.lastrowid is None:  # pragma: no cover - SQLite always assigns a rowid here
         raise sqlite3.DatabaseError("ops_runs insert did not return a row id")
     return int(cursor.lastrowid)

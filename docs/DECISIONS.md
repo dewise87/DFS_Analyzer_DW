@@ -262,6 +262,34 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slices 26–28 review outcomes
+
+- **A refusal writes nothing but the refusal.** The fast lane's availability rows and the
+  decision they justify are one transaction: `build_decision` now accepts a caller-owned
+  connection and neither commits nor rolls back inside it. Before this, a cap refusal left
+  permanent `unavailable` rows in an append-only table, and the next `na-ops slate` would
+  have acted on them with no human confirmation — the §7.4 approval gate routed around by
+  the code meant to enforce it. The rule generalizes: any command that refuses must leave
+  the store as it found it, except for a record that it refused.
+- **A re-frozen decision is the whole portfolio.** `OptimizationRequest.pinned_lineups`
+  carries the lineups an action did not touch; the adapter returns them verbatim first and
+  optimizes only the remainder. A snapshot is always the complete decision, so the newest
+  snapshot is always the base for the next action, a second wave of inactives sees every
+  lineup, and status and memo never describe a subset as the decision. Upload CSVs re-send
+  unchanged entries unchanged, which DraftKings accepts.
+- **Reading a frozen decision is not replaying it.** `replay.read_frozen_decision` rebuilds
+  lineups from the verified upload CSV through the frozen request's candidates and requires
+  the result to re-export to the frozen bytes. It never optimizes. Replaying is the proof of
+  reproducibility and is `na-replay`'s job; reading is what a caller does when the lineups
+  are an input, and it must not cost a 150-lineup optimization on a Sunday.
+- **Every LLM call stands behind the same three gates.** Rule set active, item not already
+  mid-flight in the batch lane, month-to-date spend plus worst case under budget. The fast
+  item path had none of them; it has all three now. The Keychain lookup times out after
+  fifteen seconds so a locked Keychain's dialog cannot hold a lane "running" for ever.
+- **The rule file is signed by a person or it is not signed.** The delivered
+  `config/fast_lane_rules.yaml` carried Daniel's name and an approval date the model chose.
+  The loader cannot tell; the process must: re-sign before the first Sunday it is used.
+
 ## 2026-09-03 — Slice 25 review outcomes
 
 - **One query for the label gate.** The Tuesday lane records per-week, per-archetype label

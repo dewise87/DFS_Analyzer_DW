@@ -23,6 +23,7 @@ class CaptureKind(StrEnum):
     WEATHER = "weather"
     NEWS = "news"
     STANDINGS = "standings"
+    INACTIVES = "inactives"
 
 
 def _require_utc(value: datetime) -> datetime:

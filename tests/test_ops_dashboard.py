@@ -323,8 +323,10 @@ def test_status_page_shows_every_section_of_the_status_payload(seeded_client: _C
         "config path",
         "database",
         "extraction",
+        "fast lane rules",
         "identity",
         "manual actions",
+        "narrative",
         "labels",
         "results steps",
         "slate",
@@ -979,9 +981,7 @@ def test_the_rule_is_loopback_not_one_literal_address(empty: Any) -> None:
 def test_the_cli_rejects_a_non_loopback_host(empty: Any, capsys: Any) -> None:
     from narrative_alpha.ops.cli import main as ops_main
 
-    code = ops_main(
-        ["--config", str(empty.path), "dashboard", "--host", "0.0.0.0", "--port", "0"]
-    )
+    code = ops_main(["--config", str(empty.path), "dashboard", "--host", "0.0.0.0", "--port", "0"])
 
     assert code == 2
     assert "loopback" in capsys.readouterr().err

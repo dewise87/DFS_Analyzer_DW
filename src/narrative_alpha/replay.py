@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,11 +21,15 @@ from narrative_alpha.candidate_selection import (
     select_candidate_scenario,
 )
 from narrative_alpha.portfolio import (
+    CLASSIC_SITE_RULES,
     CandidatePlayerScenario,
     DfsSite,
     Lineup,
+    LineupPlayer,
     OptimizationRequest,
     OptimizerAdapter,
+    export_upload_csv,
+    lineup_sha256,
 )
 from narrative_alpha.store import DecisionManifestHash, DecisionSnapshotRow, SlateRow
 
@@ -146,13 +153,17 @@ class PointInTimeSession:
         salary_artifacts: frozenset[SelectedSourceArtifact],
         projection_artifacts: frozenset[SelectedSourceArtifact],
         as_of: datetime | None,
+        availability_artifacts: frozenset[SelectedSourceArtifact] = frozenset(),
     ) -> CandidateSelection:
-        """Compatibility wrapper around the shared build/replay selection seam."""
+        """Compatibility wrapper around the shared build/replay selection seam.
+
+        The availability set defaults to empty, which selects exactly what a decision
+        frozen before availability existed selected; a caller reading a manifest must
+        pass what the manifest carries, or the selection will not match.
+        """
 
         if not salary_artifacts or not projection_artifacts:
-            raise ReplayArtifactError(
-                "decision manifest requires salary and projection artifacts"
-            )
+            raise ReplayArtifactError("decision manifest requires salary and projection artifacts")
         try:
             return select_candidate_scenario(
                 self,
@@ -160,6 +171,7 @@ class PointInTimeSession:
                 site=site,
                 salary_artifacts=salary_artifacts,
                 projection_artifacts=projection_artifacts,
+                availability_artifacts=availability_artifacts,
                 as_of=_require_as_of(as_of),
             )
         except CandidateSelectionError as error:
@@ -183,6 +195,7 @@ def replay_decision(
     expected_output = _single_artifact(snapshot, "generated_lineups")
     salary_artifacts = _source_artifacts(snapshot, "salary")
     projection_artifacts = _source_artifacts(snapshot, "projection")
+    availability_artifacts = _source_artifacts(snapshot, "availability", required=False)
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
     expected_output_bytes = _read_verified_artifact(artifact_root, expected_output)
@@ -206,6 +219,7 @@ def replay_decision(
             site=original_request.site,
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
+            availability_artifacts=availability_artifacts,
             as_of=cutoff,
         )
     except CandidateSelectionError as error:
@@ -217,6 +231,10 @@ def replay_decision(
     if frozenset(rebuilt.projection_artifacts) != projection_artifacts:
         raise ReplayArtifactError(
             "not every projection manifest source/hash pair contributed replay rows"
+        )
+    if frozenset(rebuilt.availability_artifacts) != availability_artifacts:
+        raise ReplayArtifactError(
+            "not every availability manifest source/hash pair contributed replay rows"
         )
     original_scenario = original_request.candidate_player_scenario
     if rebuilt.players != original_scenario.players:
@@ -242,9 +260,7 @@ def replay_decision(
         decision_at=cutoff,
         expected_output_sha256=expected_output.sha256,
         actual_output_sha256=actual_hash,
-        output_matches=(
-            actual_hash == expected_output.sha256 and output == expected_output_bytes
-        ),
+        output_matches=(actual_hash == expected_output.sha256 and output == expected_output_bytes),
         lineup_count=len(lineups),
     )
     return ReplayResult(
@@ -258,9 +274,141 @@ def replay_decision(
     )
 
 
-def _single_artifact(
-    snapshot: DecisionSnapshotRow, artifact_kind: str
-) -> DecisionManifestHash:
+@dataclass(frozen=True)
+class FrozenDecision:
+    """A frozen decision read back from its own verified artifacts."""
+
+    snapshot: DecisionSnapshotRow
+    request: OptimizationRequest
+    lineups: tuple[Lineup, ...]
+    upload_bytes: bytes
+
+
+def read_frozen_decision(
+    connection: sqlite3.Connection,
+    *,
+    decision_snapshot_id: str,
+    decision_at: datetime,
+    artifact_root: Path,
+) -> FrozenDecision:
+    """Read a frozen decision's lineups from its artifacts, verifying bytes, not rebuilding.
+
+    Every artifact is checked against the manifest hash, the lineups are rebuilt from the
+    upload CSV through the frozen request's own candidates, and that rebuild must re-export
+    to exactly the frozen bytes. Nothing is optimized: this is for a caller that needs the
+    lineups as an *input* (the fast lane pins the ones it leaves alone) and must not pay
+    for a full replay to get them. Proving the decision reproduces is `na-replay`'s job.
+    """
+
+    cutoff = _require_as_of(decision_at)
+    session = PointInTimeSession(connection)
+    snapshot = session.decision_snapshot(decision_snapshot_id, as_of=cutoff)
+    request_artifact = _single_artifact(snapshot, "optimizer_request")
+    output_artifact = _single_artifact(snapshot, "generated_lineups")
+    request_bytes = _read_verified_artifact(artifact_root, request_artifact)
+    upload_bytes = _read_verified_artifact(artifact_root, output_artifact)
+    try:
+        request = OptimizationRequest.model_validate_json(request_bytes)
+    except ValidationError as error:
+        raise ReplayArtifactError(f"frozen optimizer request is not valid: {error}") from error
+    lineups = _lineups_from_upload(request, upload_bytes)
+    try:
+        rendered = export_upload_csv(lineups, request.site, request.upload_entries)
+    except Exception as error:  # the export raises its own adapter error type
+        raise ReplayArtifactError(f"frozen lineups do not re-export: {error}") from error
+    if rendered != upload_bytes:
+        raise ReplayArtifactError(
+            "generated_lineups.csv does not round-trip through the frozen request's candidates"
+        )
+    return FrozenDecision(
+        snapshot=snapshot, request=request, lineups=lineups, upload_bytes=upload_bytes
+    )
+
+
+def _lineups_from_upload(request: OptimizationRequest, upload_bytes: bytes) -> tuple[Lineup, ...]:
+    slots = CLASSIC_SITE_RULES[request.site].slots
+    by_site_id = {
+        player.site_player_id: player for player in request.candidate_player_scenario.players
+    }
+    rows = list(csv.reader(io.StringIO(upload_bytes.decode("utf-8"), newline="")))
+    if not rows:
+        raise ReplayArtifactError("generated_lineups.csv is empty")
+    header = tuple(rows[0])
+    prefix = len(header) - len(slots)
+    if prefix < 0 or header[prefix:] != tuple(slots):
+        raise ReplayArtifactError(
+            f"generated_lineups.csv header {header!r} does not end with the {request.site.value} "
+            f"roster slots {slots!r}"
+        )
+    pinned = request.pinned_lineups
+    lineups: list[Lineup] = []
+    for index, row in enumerate(rows[1:]):
+        cells = tuple(row[prefix:])
+        if len(cells) != len(slots):
+            raise ReplayArtifactError(
+                f"generated_lineups.csv row {index + 1} has {len(cells)} cells"
+            )
+        players: list[LineupPlayer] = []
+        for slot, cell in zip(slots, cells, strict=True):
+            site_player_id = _site_player_id(cell, request.site)
+            candidate = by_site_id.get(site_player_id)
+            if candidate is None:
+                raise ReplayArtifactError(
+                    f"generated_lineups.csv names site player {site_player_id!r}, which the "
+                    "frozen request's candidates do not contain"
+                )
+            players.append(
+                LineupPlayer(
+                    slot=slot,
+                    player_id=candidate.player_id,
+                    site_player_id=site_player_id,
+                    name=candidate.name,
+                    team=candidate.team,
+                    opponent=candidate.opponent,
+                    position=candidate.position,
+                    salary=candidate.salary,
+                    projection=candidate.projection,
+                    projected_ownership=candidate.projected_ownership,
+                    game_id=candidate.game_id,
+                )
+            )
+        player_tuple = tuple(players)
+        if index < len(pinned):
+            # A pinned lineup was frozen verbatim, with the projections it carried when it
+            # was first built; the CSV row must name exactly its players.
+            frozen = pinned[index]
+            if {player.player_id for player in frozen.players} != {
+                player.player_id for player in player_tuple
+            }:
+                raise ReplayArtifactError(
+                    f"generated_lineups.csv row {index + 1} does not match pinned lineup "
+                    f"{frozen.lineup_id}"
+                )
+            lineups.append(frozen)
+            continue
+        lineups.append(
+            Lineup(
+                lineup_id=lineup_sha256(request.site, request.slate_id, player_tuple),
+                site=request.site,
+                slate_id=request.slate_id,
+                players=player_tuple,
+                total_salary=sum(player.salary for player in player_tuple),
+                total_projection=round(sum(player.projection for player in player_tuple), 6),
+            )
+        )
+    return tuple(lineups)
+
+
+def _site_player_id(cell: str, site: DfsSite) -> str:
+    if site is DfsSite.DRAFTKINGS:
+        match = re.search(r"\(([^()]+)\)\s*$", cell)
+        if match is None:
+            raise ReplayArtifactError(f"upload cell {cell!r} carries no DraftKings player id")
+        return match.group(1)
+    return cell.strip()
+
+
+def _single_artifact(snapshot: DecisionSnapshotRow, artifact_kind: str) -> DecisionManifestHash:
     artifacts = tuple(
         item for item in snapshot.manifest_hashes_json if item.artifact_kind == artifact_kind
     )
@@ -272,13 +420,15 @@ def _single_artifact(
 
 
 def _source_artifacts(
-    snapshot: DecisionSnapshotRow, artifact_kind: str
+    snapshot: DecisionSnapshotRow,
+    artifact_kind: str,
+    *,
+    required: bool = True,
 ) -> frozenset[SelectedSourceArtifact]:
     missing_sources = tuple(
         item.sha256
         for item in snapshot.manifest_hashes_json
-        if item.artifact_kind == artifact_kind
-        and (item.source is None or not item.source.strip())
+        if item.artifact_kind == artifact_kind and (item.source is None or not item.source.strip())
     )
     if missing_sources:
         raise ReplayArtifactError(
@@ -290,7 +440,7 @@ def _source_artifacts(
         for item in snapshot.manifest_hashes_json
         if item.artifact_kind == artifact_kind
     )
-    if not artifacts:
+    if required and not artifacts:
         raise ReplayArtifactError(f"decision manifest has no {artifact_kind} artifacts")
     return artifacts
 

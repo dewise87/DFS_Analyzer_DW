@@ -34,6 +34,7 @@ from narrative_alpha.portfolio import (
     OptimizerAdapter,
     PydfsAdapter,
     SlateType,
+    UploadEntry,
 )
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -134,13 +135,26 @@ def build_decision(
     artifact_directory: Path,
     number_of_lineups: int = 1,
     contest_archetype: ContestArchetype | str = ContestArchetype.CASH,
+    excluded_lineup_player_ids: tuple[tuple[int, ...], ...] = (),
+    pinned_lineups: tuple[Lineup, ...] = (),
+    upload_entries: tuple[UploadEntry, ...] = (),
+    lineup_uniqueness: int = 1,
+    run_type: str = "decision_build",
+    note: str = "na-build immediate replay verified",
     adapter: OptimizerAdapter | None = None,
+    connection: sqlite3.Connection | None = None,
 ) -> BuildResult:
     """Build, freeze, replay, and atomically commit one DFS decision.
 
     ``decision_at`` is deliberately required here. The CLI may resolve its optional
     argument to the current time before entering this deterministic path, but no code in
     this function reads the wall clock.
+
+    With ``connection`` the caller owns the transaction: the build runs inside whatever
+    the caller has begun and nothing here commits or rolls back, so a caller can make
+    its own rows and this decision one atomic fact (the fast lane's availability rows
+    live or die with the snapshot they justify). On-disk artifacts are still removed
+    when the build raises.
     """
 
     try:
@@ -158,25 +172,50 @@ def build_decision(
         raise BuildInputError("number_of_lineups must be between 1 and 150")
 
     selected_adapter = adapter or PydfsAdapter()
-    with connect_database(database_path) as connection:
-        apply_migrations(connection)
+    if connection is not None:
+        if not connection.in_transaction:
+            raise BuildInputError("a caller-owned build must run inside an open transaction")
+        return _build_in_transaction(
+            connection,
+            slate_id=slate_id,
+            site=requested_site,
+            decision_at=cutoff,
+            artifact_root=artifact_directory.resolve(),
+            number_of_lineups=number_of_lineups,
+            contest_archetype=requested_archetype,
+            excluded_lineup_player_ids=excluded_lineup_player_ids,
+            pinned_lineups=pinned_lineups,
+            upload_entries=upload_entries,
+            lineup_uniqueness=lineup_uniqueness,
+            run_type=run_type,
+            note=note,
+            adapter=selected_adapter,
+        )
+    with connect_database(database_path) as owned:
+        apply_migrations(owned)
         try:
-            connection.execute("BEGIN IMMEDIATE")
+            owned.execute("BEGIN IMMEDIATE")
             result = _build_in_transaction(
-                connection,
+                owned,
                 slate_id=slate_id,
                 site=requested_site,
                 decision_at=cutoff,
                 artifact_root=artifact_directory.resolve(),
                 number_of_lineups=number_of_lineups,
                 contest_archetype=requested_archetype,
+                excluded_lineup_player_ids=excluded_lineup_player_ids,
+                pinned_lineups=pinned_lineups,
+                upload_entries=upload_entries,
+                lineup_uniqueness=lineup_uniqueness,
+                run_type=run_type,
+                note=note,
                 adapter=selected_adapter,
             )
         except Exception:
-            connection.rollback()
+            owned.rollback()
             raise
         else:
-            connection.commit()
+            owned.commit()
             return result
 
 
@@ -203,6 +242,12 @@ def _build_in_transaction(
     artifact_root: Path,
     number_of_lineups: int,
     contest_archetype: ContestArchetype,
+    excluded_lineup_player_ids: tuple[tuple[int, ...], ...],
+    pinned_lineups: tuple[Lineup, ...],
+    upload_entries: tuple[UploadEntry, ...],
+    lineup_uniqueness: int,
+    run_type: str,
+    note: str,
     adapter: OptimizerAdapter,
 ) -> BuildResult:
     session = PointInTimeSession(connection)
@@ -242,12 +287,14 @@ def _build_in_transaction(
         salary_cap=CLASSIC_SITE_RULES[site].default_salary_cap,
         candidate_player_scenario=scenario,
         number_of_lineups=number_of_lineups,
+        excluded_lineup_player_ids=excluded_lineup_player_ids,
+        pinned_lineups=pinned_lineups,
+        upload_entries=upload_entries,
+        lineup_uniqueness=lineup_uniqueness,
     )
     request_bytes = canonical_json_bytes(request)
     request_sha256 = _sha256(request_bytes)
-    decision_digest = _sha256(
-        request_bytes + b"\x00" + utc_timestamp(decision_at).encode("ascii")
-    )
+    decision_digest = _sha256(request_bytes + b"\x00" + utc_timestamp(decision_at).encode("ascii"))
     decision_snapshot_id = f"decision-{decision_digest}"
     run_id = f"na-build-{decision_digest}"
     if (
@@ -298,6 +345,8 @@ def _build_in_transaction(
             manifest=manifest,
             lineups=lineups,
             upload_bytes=upload_bytes,
+            run_type=run_type,
+            note=note,
             adapter=adapter,
         )
     except Exception:
@@ -321,11 +370,13 @@ def _commit_and_verify(
     manifest: tuple[DecisionManifestHash, ...],
     lineups: tuple[Lineup, ...],
     upload_bytes: bytes,
+    run_type: str,
+    note: str,
     adapter: OptimizerAdapter,
 ) -> BuildResult:
     run = ModelRunRow(
         run_id=run_id,
-        run_type="decision_build",
+        run_type=run_type,
         started_at=decision_at,
         completed_at=None,
         status="running",
@@ -344,7 +395,7 @@ def _commit_and_verify(
         manifest_hashes_json=manifest,
         manifest_hash_set_sha256=manifest_hash_set_sha256(manifest),
         run_id=run_id,
-        note="na-build immediate replay verified",
+        note=note,
     )
     _insert_row(connection, "model_runs", run)
     _insert_row(connection, "decision_snapshots", snapshot)
@@ -408,6 +459,11 @@ def _scenario_id(
         "site": site.value,
         "slate_id": slate_id,
     }
+    if selected.availability_artifacts:
+        payload["availability_artifacts"] = [
+            {"sha256": artifact.sha256, "source": artifact.source}
+            for artifact in selected.availability_artifacts
+        ]
     return f"scenario-{_sha256(canonical_json_bytes(payload))}"
 
 
@@ -423,8 +479,11 @@ def _decision_manifest(
         _source_manifest_item("salary", artifact) for artifact in selected.salary_artifacts
     )
     projections = tuple(
-        _source_manifest_item("projection", artifact)
-        for artifact in selected.projection_artifacts
+        _source_manifest_item("projection", artifact) for artifact in selected.projection_artifacts
+    )
+    availability = tuple(
+        _source_manifest_item("availability", artifact)
+        for artifact in selected.availability_artifacts
     )
     generated = (
         DecisionManifestHash(
@@ -440,7 +499,7 @@ def _decision_manifest(
             source="narrative-alpha",
         ),
     )
-    return (*salary, *projections, *generated)
+    return (*salary, *projections, *availability, *generated)
 
 
 def _source_manifest_item(
