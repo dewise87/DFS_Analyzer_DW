@@ -1912,7 +1912,7 @@ would have proceeded on fewer weeks than the gate counted. The join now ranks on
 decisions that froze features at their own instant. Noted, not changed: one contest per
 archetype per week is enforced (a second probe contest of the same archetype refuses with
 both ids); the pooled beat rule includes the prior-only first fold, which makes "beat"
-harder, not easier. Suite 617 → 635.
+harder, not easier. Suite 617 → 629.
 
 ### Slice 30 — Stage 4/5: channel routing, caps, and the red-team block in the memo
 
