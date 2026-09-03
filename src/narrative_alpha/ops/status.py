@@ -153,6 +153,17 @@ class LabelsStatus:
 
 
 @dataclass(frozen=True)
+class ClaimGradingStatus:
+    """Latest grade per claim target for the week on the operator screen."""
+
+    season: int
+    week: int
+    graded: int
+    ungradable: int
+    indeterminate: int
+
+
+@dataclass(frozen=True)
 class EpisodeSnapshotStatus:
     """The latest complete Stage 2 snapshot, scoped by its Stage 1 prompt version."""
 
@@ -212,6 +223,7 @@ class OpsStatus:
     slate: SlateLaneStatus | None
     ownership_scenarios: tuple[OwnershipScenarioStatus, ...]
     labels: LabelsStatus
+    grading: ClaimGradingStatus | None
     narrative: NarrativeStatus
     fast_lane_rules: FastLaneRulesStatus | None
     month_to_date_spend_usd: str
@@ -393,6 +405,7 @@ def collect_ops_status(
         slate=slate,
         ownership_scenarios=_ownership_scenario_status(connection, slate=slate),
         labels=_label_status(connection),
+        grading=_claim_grading_status(connection, slate=slate),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
         month_to_date_spend_usd=_usd(spent),
@@ -839,6 +852,53 @@ def _label_status(connection: sqlite3.Connection) -> LabelsStatus:
     )
 
 
+def _claim_grading_status(
+    connection: sqlite3.Connection,
+    *,
+    slate: SlateLaneStatus | None,
+) -> ClaimGradingStatus | None:
+    """Count current verdicts without double-counting append-only reruns."""
+
+    if slate is None:
+        latest = connection.execute(
+            """
+            SELECT season, week FROM claim_grades
+            ORDER BY season DESC, week DESC, graded_at DESC, claim_grade_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest is None:
+            return None
+        season, week = int(latest["season"]), int(latest["week"])
+    else:
+        season, week = slate.season, slate.week
+    rows = connection.execute(
+        """
+        WITH ranked AS (
+            SELECT verdict,
+                   row_number() OVER (
+                       PARTITION BY claim_id, grade_target_key
+                       ORDER BY rtrim(graded_at, 'Z') DESC, rowid DESC
+                   ) AS grade_rank
+            FROM claim_grades
+            WHERE season = ? AND week = ?
+        )
+        SELECT verdict, count(*) AS row_count
+        FROM ranked WHERE grade_rank = 1
+        GROUP BY verdict
+        """,
+        (season, week),
+    ).fetchall()
+    counts = {str(row["verdict"]): int(row["row_count"]) for row in rows}
+    return ClaimGradingStatus(
+        season=season,
+        week=week,
+        graded=counts.get("correct", 0) + counts.get("incorrect", 0),
+        ungradable=counts.get("ungradable", 0),
+        indeterminate=counts.get("indeterminate", 0),
+    )
+
+
 def _usd(nanos: int) -> str:
     return f"{Decimal(nanos) / Decimal(NANOS_PER_USD):.2f}"
 
@@ -944,6 +1004,16 @@ def render_status(status: OpsStatus) -> str:
         if step.last_failure_at is not None:
             lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
+
+    lines.extend(("", "CLAIM GRADING"))
+    if status.grading is None:
+        lines.append("  no grading week is available")
+    else:
+        lines.append(
+            f"  {status.grading.season} week {status.grading.week:02d}  "
+            f"graded {status.grading.graded}  ungradable {status.grading.ungradable}  "
+            f"indeterminate {status.grading.indeterminate}"
+        )
 
     lines.extend(("", "OWNERSHIP ROUTING (Stage 4)"))
     if not status.ownership_scenarios:
@@ -1169,6 +1239,15 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                 }
                 for row in status.labels.by_week_and_archetype
             ],
+        },
+        "grading": None
+        if status.grading is None
+        else {
+            "season": status.grading.season,
+            "week": status.grading.week,
+            "graded": status.grading.graded,
+            "ungradable": status.grading.ungradable,
+            "indeterminate": status.grading.indeterminate,
         },
         "narrative": {
             "items_collected_last_7_days": status.narrative.items_collected_last_7_days,

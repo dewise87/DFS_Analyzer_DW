@@ -24,6 +24,10 @@ from narrative_alpha.evaluation import (
     build_baseline_report,
     render_baseline_report,
 )
+from narrative_alpha.grading import (
+    build_source_credibility_report,
+    render_source_credibility_report,
+)
 from narrative_alpha.interface import (
     SlateMemo,
     SlateMemoError,
@@ -99,6 +103,23 @@ def build_signals_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_sources_parser() -> argparse.ArgumentParser:
+    """`na-report sources`: the latest immutable ledger snapshot for a week."""
+
+    parser = argparse.ArgumentParser(
+        prog="na-report sources",
+        description=(
+            "Render source credibility by source, team, claim type, and dimension; "
+            "every accuracy estimate includes n and its posterior interval."
+        ),
+    )
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--season", type=_positive_int, required=True)
+    parser.add_argument("--week", type=_positive_int, required=True)
+    parser.add_argument("--output", type=Path)
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="na-report",
@@ -146,6 +167,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     if values and values[0] == "signals":
         return _signals(build_signals_parser().parse_args(values[1:]))
+    if values and values[0] == "sources":
+        return _sources(build_sources_parser().parse_args(values[1:]))
     arguments = build_parser().parse_args(values)
     output_path = arguments.output or default_report_path(arguments.decision_snapshot_id)
     try:
@@ -236,6 +259,39 @@ def _signals(arguments: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {"error": {"code": "signals_failed", "message": str(error)}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(rendered)
+    return 0
+
+
+def _sources(arguments: argparse.Namespace) -> int:
+    """Render the report-only ledger; no source grade or decision input is changed."""
+
+    try:
+        with connect_database(arguments.database) as connection:
+            apply_migrations(connection)
+            report = build_source_credibility_report(
+                connection,
+                season=arguments.season,
+                week=arguments.week,
+            )
+        rendered = render_source_credibility_report(report)
+        if arguments.output is not None:
+            write_report_atomic(Path(arguments.output), rendered)
+    except (
+        MigrationError,
+        OSError,
+        StoreConfigurationError,
+        ValueError,
+        sqlite3.Error,
+    ) as error:
+        print(
+            json.dumps(
+                {"error": {"code": "sources_failed", "message": str(error)}},
                 sort_keys=True,
             ),
             file=sys.stderr,
@@ -437,6 +493,16 @@ def _timestamp(value: str) -> datetime:
         raise argparse.ArgumentTypeError("must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
     return parsed
 
 

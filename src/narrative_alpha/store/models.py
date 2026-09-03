@@ -1592,6 +1592,117 @@ class ResultRow(PointInTimeRow):
         return _decode_json(value)
 
 
+class ClaimGradeRow(StoreRow):
+    """One immutable claim/outcome/rule comparison from a Tuesday grading run."""
+
+    claim_grade_id: str
+    grading_run_id: str
+    season: int = Field(ge=1)
+    week: int = Field(ge=1, le=99)
+    site: Literal["draftkings", "fanduel"]
+    slate_id: int = Field(gt=0)
+    player_id: int = Field(gt=0)
+    team: str
+    claim_id: str
+    source_id: str
+    claim_type: ClaimTypeValue
+    claim_dimension: ClaimDimensionValue
+    claim_falsifiable: bool
+    grade_target_key: str
+    rule_id: str | None
+    rule_sha256: Sha256 | None
+    grading_config_version: str
+    grading_config_sha256: Sha256
+    result_id: int | None
+    availability_id: str | None
+    actual_ownership_id: int | None
+    ownership_baseline_id: int | None
+    outcome_json: dict[str, Any]
+    verdict: Literal["correct", "incorrect", "ungradable", "indeterminate"]
+    reason: str
+    claim_observed_at: datetime
+    slate_lock_at: datetime
+    lead_time_minutes: float = Field(ge=0, allow_inf_nan=False)
+    graded_at: datetime
+
+    @field_validator("outcome_json", mode="before")
+    @classmethod
+    def decode_outcome(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @field_validator("claim_observed_at", "slate_lock_at", "graded_at")
+    @classmethod
+    def normalize_grade_timestamps(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_rule_and_lead(self) -> Self:
+        if self.slate_lock_at < self.claim_observed_at:
+            raise ValueError("slate lock cannot precede claim observation")
+        if self.graded_at < self.slate_lock_at:
+            raise ValueError("claim cannot be graded before slate lock")
+        expected_lead = (self.slate_lock_at - self.claim_observed_at).total_seconds() / 60.0
+        if not math.isclose(self.lead_time_minutes, expected_lead, abs_tol=1e-9):
+            raise ValueError("lead_time_minutes must equal slate lock minus claim observation")
+        if self.verdict == "ungradable":
+            if self.rule_id is not None or self.rule_sha256 is not None:
+                raise ValueError("ungradable claims cannot claim a configured rule")
+        elif self.rule_id is None or self.rule_sha256 is None:
+            raise ValueError("graded or indeterminate claims require a configured rule")
+        return self
+
+
+class SourceCredibilityRow(StoreRow):
+    """One append-only multidimensional posterior snapshot; never a source-wide score."""
+
+    source_credibility_id: str
+    grading_run_id: str
+    season: int = Field(ge=1)
+    week: int = Field(ge=1, le=99)
+    source_id: str
+    team: str
+    claim_type: ClaimTypeValue
+    claim_dimension: ClaimDimensionValue
+    as_of_at: datetime
+    n_graded: int = Field(ge=0)
+    correct_count: int = Field(ge=0)
+    incorrect_count: int = Field(ge=0)
+    indeterminate_count: int = Field(ge=0)
+    ungradable_count: int = Field(ge=0)
+    beta_prior_alpha: float = Field(gt=0, allow_inf_nan=False)
+    beta_prior_beta: float = Field(gt=0, allow_inf_nan=False)
+    accuracy_posterior_mean: float = Field(ge=0, le=1, allow_inf_nan=False)
+    accuracy_interval_low: float = Field(ge=0, le=1, allow_inf_nan=False)
+    accuracy_interval_high: float = Field(ge=0, le=1, allow_inf_nan=False)
+    posterior_interval_mass: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    precision: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    coverage: float = Field(ge=0, le=1, allow_inf_nan=False)
+    average_lead_time_minutes: float = Field(ge=0, allow_inf_nan=False)
+    correction_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
+    last_claim_at: datetime
+    decay_weight: float = Field(ge=0, allow_inf_nan=False)
+    decay_half_life_days: float = Field(gt=0, allow_inf_nan=False)
+    grading_config_version: str
+    grading_config_sha256: Sha256
+
+    @field_validator("as_of_at", "last_claim_at")
+    @classmethod
+    def normalize_credibility_timestamps(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def validate_credibility_counts(self) -> Self:
+        if self.n_graded != self.correct_count + self.incorrect_count:
+            raise ValueError("n_graded must equal correct_count + incorrect_count")
+        if not (
+            self.accuracy_interval_low
+            <= self.accuracy_posterior_mean
+            <= self.accuracy_interval_high
+        ):
+            raise ValueError("posterior mean must lie inside its interval")
+        return self
+
+
 ManifestArtifactKind = Literal[
     "salary",
     "projection",
@@ -1705,6 +1816,7 @@ class OpsRunRow(StoreRow):
         "results_replay",
         "results_report",
         "results_labels",
+        "results_grade",
     ]
     status: Literal["succeeded", "failed", "skipped"]
     started_at: datetime

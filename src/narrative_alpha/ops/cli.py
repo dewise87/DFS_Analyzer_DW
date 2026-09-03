@@ -163,7 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     results = commands.add_parser(
         "results",
-        help="capture standings, ingest labels, verify replay, and write the baseline report",
+        help=(
+            "capture standings, ingest labels, verify replay, write the baseline report, "
+            "and grade claims"
+        ),
     )
     results.add_argument("--season", type=_positive_int, required=True)
     results.add_argument("--week", type=_positive_int, required=True)

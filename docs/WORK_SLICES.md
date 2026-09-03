@@ -2267,6 +2267,35 @@ rules decide what the ledger means.
 > append-only; the step records on an empty week. Gates green; never the production
 > database.
 
+**Implementation status (2026-09-03):** landed as `src/narrative_alpha/grading/` with
+`config/claim_grading.toml` (byte-hashed onto every grade and ledger row), migration 0018
+(`claim_grades`, `source_credibility`, and the `results_grade` step in `ops_runs`), a
+`results_grade` step at the end of `na-ops results`, `na-report sources`, and grading
+counts on `na-ops status`. Three rules: availability against post-lock facts, usage against
+the player's own workload reference on the stat line, field propagation against the
+actual-minus-baseline ownership direction. Unfalsifiable claims and claims with no rule are
+`ungradable` with the reason and never enter n. Append-only with lineage triggers; scipy's
+Beta quantiles for the interval; isolated from every pre-lock path.
+
+**Review outcome (2026-09-03):** two blockers and three majors, fixed. (1) Availability
+was graded against the official row observed *before* lock whenever the post-lock fact was
+missing — and the post-lock fact is structurally missing, because the standings ingest
+writes only fantasy points and contest metadata into the stat line. A Saturday "available"
+that became a Sunday scratch scored the correct beat writer wrong. The outcome is now the
+official row observed after lock, the pre-lock row is context only, and no post-lock
+evidence is `indeterminate`. (2) Usage claims fell back to a league constant (0.50 snap
+share) when the player's own reference was absent, which credits "he plays more" for being
+a starter — §5.9's named prohibition. There is no fallback: no per-player reference, or no
+stat at all, is `ungradable` with the reason. Today no ingestion writes shares, so every
+usage claim is honestly ungradable until a workload source lands (queued below). (3) The
+decay weight was stored but never entered the posterior; weighted counts now form the Beta
+and are stored beside the raw n. (4) The report printed only n=1 cells and a "precision"
+that was the bare win rate under the accuracy interval; it now leads with cells pooled by
+(source, claim type) and labels the raw rate as unshrunk with no interval. (5) Grade ids
+are content hashes, so an identical regrade on a later Tuesday inserts nothing; claims
+observed after lock are counted in the step summary rather than dropped silently; three
+inert config knobs went. Suite 663 → 690.
+
 ### Slice 35 — MCP server over the reads (Phase 3, §7.1)
 
 **Goal:** the interface layer's second face: a local MCP server whose tools are the reads
@@ -2352,10 +2381,14 @@ files as the oracle.
   to be capture-only for that source.
 - **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
   real vendor export as Slice 9.
-- **Slice 37 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
+- **Slice 37 — Workload stats ingestion** (Family 1 outcomes): nflverse weekly player stats
+  (snaps, routes, targets, touches) as post-lock `results` stat lines with per-player
+  trailing references, so Slice 34's usage rules grade something. Until then every usage
+  claim is ungradable, by design.
+- **Slice 38 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
   the no-episode ratio features (both noted at Slices 20–21) once a month of live episodes
   shows what the clusters actually look like.
-- **Slice 38 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
+- **Slice 39 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.
 - **Late swap MVP** (§6.7, Phase 3): after Week 1 shows what in-slate captures look like.

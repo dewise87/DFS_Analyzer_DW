@@ -243,7 +243,10 @@ frame carries no usable origin, and it is refused rather than trusted.
 - **Tuesday after settlement** — keep each export's contest ID in its filename, then run
   `na-ops results --season 2026 --week N --site dk|fd <standings files...>`. The lane
   captures the exports, ingests actual ownership/results, verifies every frozen decision,
-  writes the baseline report, and updates the three-week label gate in `na-ops status`.
+  writes the baseline report, updates the three-week label gate, and grades eligible claims
+  into the report-only source ledger. Inspect the weekly cells with
+  `na-report sources --season 2026 --week N`; `na-ops status` shows the week's graded and
+  ungradable counts.
 - **Whenever `status` says so** — clear the crosswalk unresolved queue
   (`na-crosswalk resolve`), review flagged items (`na-extract review`), and paste a
   reviewed nflverse pin when the refresh check reports a moved roster:

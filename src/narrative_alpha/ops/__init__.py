@@ -74,6 +74,7 @@ from narrative_alpha.ops.slate import (
 )
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.ops.status import (
+    ClaimGradingStatus,
     EpisodeSnapshotStatus,
     FastLaneRulesStatus,
     LabelCohortStatus,
@@ -104,6 +105,7 @@ __all__ = [
     "SLATE_STEP_ERRORS",
     "BatchDependencies",
     "BatchReport",
+    "ClaimGradingStatus",
     "DashboardContext",
     "DashboardDependencies",
     "DashboardError",

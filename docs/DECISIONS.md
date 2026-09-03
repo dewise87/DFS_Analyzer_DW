@@ -262,6 +262,24 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slice 34 review outcomes
+
+- **An outcome is a post-lock fact or it is not an outcome.** Availability grades use the
+  official row observed after lock; the pre-lock row is context. Grading against the
+  pre-lock row inverts the verdict on the late scratch, which is the one availability case
+  the ledger exists to score. Where no post-lock fact exists the grade is indeterminate.
+- **A player's claim is graded against the player's own reference.** No league-wide
+  constant stands in for a missing per-player workload reference; the claim is ungradable
+  with the reason. Until a workload stats source is ingested, every usage claim is
+  ungradable, and the report says so.
+- **Time decay is in the posterior, not beside it.** Weighted counts form the Beta; the
+  raw n is stored and printed beside them so the reader sees both.
+- **The report leads with pooled cells.** After one week the (source, team, type,
+  dimension) cells are n=1; the (source, type) pool is what a reader should act on, and
+  the raw rate is labelled unshrunk with no interval.
+- **A grade's id is its content.** An identical regrade is a no-op; only a changed verdict
+  or outcome row appends.
+
 ## 2026-09-03 — Slice 33 review outcomes
 
 - **The contest policy is a frozen input, like a salary file.** The exact policy bytes a

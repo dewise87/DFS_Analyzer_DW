@@ -16,6 +16,7 @@ from narrative_alpha.evaluation import (
     build_baseline_report,
     render_baseline_report,
 )
+from narrative_alpha.grading import GradeWeekReport, GradingConfigError, GradingError, grade_week
 from narrative_alpha.ingest.results import (
     ContestArchetype,
     ContestLoadReport,
@@ -56,6 +57,7 @@ ReplayDecision = Callable[..., ReplayResult]
 BuildBaseline = Callable[..., BaselineEvaluationReport]
 RenderBaseline = Callable[[BaselineEvaluationReport], str]
 WriteReport = Callable[[Path, str], None]
+GradeClaims = Callable[..., GradeWeekReport]
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class ResultsDependencies:
     build_baseline_report: BuildBaseline = build_baseline_report
     render_baseline_report: RenderBaseline = render_baseline_report
     write_report: WriteReport = write_report_atomic
+    grade_claims: GradeClaims = grade_week
 
 
 DEFAULT_RESULTS_DEPENDENCIES = ResultsDependencies()
@@ -82,6 +85,8 @@ RESULTS_STEP_ERRORS: tuple[type[BaseException], ...] = (
     SlateIngestError,
     StoreConfigurationError,
     ValueError,
+    GradingConfigError,
+    GradingError,
     sqlite3.Error,
 )
 
@@ -136,7 +141,7 @@ def run_results(
     dependencies: ResultsDependencies = DEFAULT_RESULTS_DEPENDENCIES,
     now: datetime | None = None,
 ) -> ResultsReport:
-    """Run all five Tuesday steps while preserving every completed step in history."""
+    """Run all six Tuesday steps while preserving every completed step in history."""
 
     started_at = ensure_utc(now or datetime.now(UTC))
     canonical_site = normalize_site(site).value
@@ -238,6 +243,18 @@ def run_results(
         )
 
     recorder.run("results_labels", lambda: _labels(connection))
+    recorder.run(
+        "results_grade",
+        lambda: _grade(
+            dependencies,
+            connection,
+            season=season,
+            week=week,
+            site=canonical_site,
+            grading_run_id=results_run_id,
+            graded_at=started_at,
+        ),
+    )
     return ResultsReport(
         results_run_id=results_run_id,
         season=season,
@@ -682,3 +699,41 @@ def _labels(
     connection: sqlite3.Connection,
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     return "succeeded", label_summary(connection), None
+
+
+def _grade(
+    dependencies: ResultsDependencies,
+    connection: sqlite3.Connection,
+    *,
+    season: int,
+    week: int,
+    site: str,
+    grading_run_id: str,
+    graded_at: datetime,
+) -> tuple[OpsStepStatus, dict[str, object], str | None]:
+    """Grade after the label gate, including a valid zero-row week."""
+
+    report = dependencies.grade_claims(
+        connection,
+        season=season,
+        week=week,
+        site=site,
+        grading_run_id=grading_run_id,
+        graded_at=graded_at,
+    )
+    return (
+        "succeeded",
+        {
+            "grading_run_id": report.grading_run_id,
+            "grading_config_version": report.grading_config_version,
+            "grading_config_sha256": report.grading_config_sha256,
+            "claim_targets_seen": report.claim_targets_seen,
+            "grades_inserted": report.grades_inserted,
+            "ledger_rows_inserted": report.ledger_rows_inserted,
+            "claims_excluded_post_lock": report.claims_excluded_post_lock,
+            "claims_excluded_stale": report.claims_excluded_stale,
+            "verdicts": report.verdict_counts,
+            "by_claim_type": report.by_claim_type,
+        },
+        None,
+    )

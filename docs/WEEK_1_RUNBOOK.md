@@ -39,5 +39,5 @@
 
 ## Tue 2026-09-15
 
-- [ ] **After settlement — results lane (Slice 25 landed).** Command: `na-ops results --season 2026 --week 1 --site dk <standings-file.csv>`. Done: RESULTS LANE shows all five `results_*` steps succeeded; Week 1/archetype labels and report path appear. Fail: preserve export/filename; correct/add contest metadata; rerun.
+- [ ] **After settlement — results lane.** Command: `na-ops results --season 2026 --week 1 --site dk <standings-file.csv>`. Done: RESULTS LANE shows all six `results_*` steps succeeded; Week 1/archetype labels, grading counts, and report path appear. Review source cells with `na-report sources --season 2026 --week 1`. Fail: preserve export/filename; correct/add contest metadata; rerun.
 - [ ] **Fallback only — Slice 25 absent.** Command: `na-snapshot capture --season 2026 --week 1 --kind standings --source draftkings <standings-file.csv>`. Done: Status lists standings captured. Fail: retain original; retry capture after file/path correction.

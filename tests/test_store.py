@@ -131,9 +131,10 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
         15,
         16,
         17,
+        18,
     ]
     assert second == ()
-    assert len(records) == 17
+    assert len(records) == 18
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -173,6 +174,9 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
     assert records[15][0] == 16
     assert records[15][1] == "0016_ownership_model.sql"
     assert len(records[15][2]) == 64
+    assert records[17][0] == 18
+    assert records[17][1] == "0018_claim_grading.sql"
+    assert len(records[17][2]) == 64
 
 
 def test_source_versioning_migration_preserves_existing_narrative_rows(
@@ -275,6 +279,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
             15,
             16,
             17,
+            18,
         ]
     assert counts == {
         "source_keys": 1,
@@ -338,6 +343,7 @@ def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
             15,
             16,
             17,
+            18,
         ]
     assert parent["observed_at"] == timestamp
     assert parent["ingested_at"] == timestamp

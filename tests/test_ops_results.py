@@ -198,6 +198,15 @@ def test_lane_captures_ingests_idempotently_and_counts_labels(tmp_path: Path) ->
 
     assert first.ok and second.ok
     assert [step.step for step in first.steps] == list(RESULTS_STEPS)
+    grade = first.step("results_grade")
+    assert grade is not None and grade.status == "succeeded"
+    assert grade.summary["grades_inserted"] == 0
+    assert grade.summary["verdicts"] == {
+        "correct": 0,
+        "incorrect": 0,
+        "indeterminate": 0,
+        "ungradable": 0,
+    }
     first_capture = first.step("results_capture")
     second_capture = second.step("results_capture")
     assert first_capture is not None and first_capture.summary["files_new"] == 1
@@ -220,10 +229,13 @@ def test_lane_captures_ingests_idempotently_and_counts_labels(tmp_path: Path) ->
     assert len(captures) == 1
     assert tuple(ownership) == (3, utc_timestamp(FIRST_RESULTS), utc_timestamp(FIRST_RESULTS))
     assert status.labels.weeks_with_labels == 1
+    assert status.grading is not None
+    assert (status.grading.graded, status.grading.ungradable) == (0, 0)
     cohort = status.labels.by_week_and_archetype[0]
     assert (cohort.label_rows, cohort.distinct_contests) == (3, 1)
     payload = status_payload(status)
     assert payload["labels"]["weeks_with_labels"] == 1  # type: ignore[index]
+    assert payload["grading"]["graded"] == 0  # type: ignore[index]
     assert [step["step"] for step in payload["results_steps"]] == list(  # type: ignore[index]
         RESULTS_STEPS
     )

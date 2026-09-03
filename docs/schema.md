@@ -147,6 +147,39 @@ Each row references its raw response hash and carries §3.2 provenance for point
 Stores player fantasy outcomes and an optional raw stat-line object for a game and DFS site.  
 Rows retain the result-file hash and §3.2 source fields even though they are post-lock labels.
 
+## `claim_grades`
+
+Stores append-only, per-run comparisons of one pre-lock claim/player/slate target with its nearest
+available outcome. Every row freezes the claim and team cell, verdict and reason, lead time to lock,
+grading-config version/hash, rule ID/hash (or an explicit no-rule `ungradable` state), a stable target
+key, and exact foreign keys to the result, official availability, actual ownership, and
+decision-time ownership-baseline rows used. The target key names the graded outcome — a player's
+game for availability and workload, a contest/player/roster role for ownership — so it
+de-duplicates retries and refuses, by unique constraint, to score one game outcome twice because a
+second slate of that game priced the player. The outcome facts and thresholds applied
+are retained as canonical JSON. Updates and deletes are forbidden.
+Availability grades use the official row observed *after* lock (`availability_id`) as the
+outcome; the pre-lock row is recorded in `outcome_json` as context only. `claim_grade_id` is
+a hash of the grade's content (claim, target, rule, verdict, outcome, outcome rows), so an
+identical regrade is a no-op and only a changed verdict appends.
+
+## `source_credibility`
+
+Stores one append-only multidimensional ledger snapshot per grading run and
+`(source_id, team, claim_type, claim_dimension)` cell. Each row reports determinate graded `n`,
+correct/incorrect/indeterminate/ungradable counts, the configured Beta prior, posterior mean and
+90% interval, raw precision beside that uncertainty context, coverage, average lead time, extracted
+contradiction/correction rate, last claim time, and a time-decay weight with its configured half-life.
+Retries write new snapshots; they never update history, and newest claim-target grades—not every
+retry row—feed the posterior. This table is report-only and is not a source catalog grade or a build,
+routing, extraction, or fast-lane input.
+`weighted_correct`/`weighted_incorrect` are the decay-weighted counts (weight
+`0.5 ** (age_days / half_life)` at the grading instant) that form the Beta posterior;
+`n_graded` stays the raw count. `precision` is the raw, unshrunk `correct / n_graded` and
+carries no interval; `coverage` is the determinate share of the source's own graded targets
+in the cell, not coverage of the week's events. The report leads with cells pooled by
+(source, claim type) because the fine cells are tiny after one week (§12.4.2).
+
 ## `sources`
 
 Configures only supported public RSS/Atom and official-team feeds, with an explicit collector kind.

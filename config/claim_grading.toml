@@ -1,0 +1,69 @@
+# Deterministic nearest-target claim grading. The raw file bytes are SHA-256 hashed into
+# every claim grade and ledger snapshot; change the version whenever any rule changes.
+config_version = "claim-grading-v1"
+claim_lookback_days = 7
+decay_half_life_days = 42.0
+beta_prior_alpha = 1.0
+beta_prior_beta = 1.0
+posterior_interval_mass = 0.90
+
+# One grade per claim per outcome target per run. An availability or workload target is a
+# player's game, not a slate, so a claim reaching both a game's classic and showdown slates
+# is one observation (§12.4.1); an ownership target is one contest/player/roster role.
+#
+# Ledger definitions: n_graded = correct + incorrect; precision = correct / n_graded;
+# coverage = n_graded / all latest targets in the cell; correction_rate is the share whose
+# immutable Stage 1 novelty label is `contradicting`; decay_weight sums determinate target
+# weights `0.5 ** (age_days / decay_half_life_days)` as of the grading run.
+
+[rules.availability]
+rule_id = "availability-active-status-v1"
+claim_type = "availability"
+dimensions = ["active_status"]
+
+[rules.usage]
+rule_id = "usage-workload-share-v1"
+claim_type = "usage"
+
+# A workload outcome is classified relative to THIS PLAYER'S reference, carried on the
+# stat line as `<stat_key>_baseline`. There is no league-wide fallback: grading a starter's
+# "more snaps" claim against a constant would credit the claim for the player being a
+# starter (§5.9). No reference, or no stat at all, is `ungradable` with the reason. A move
+# within the threshold is neutral. Shares must be fractions. As of this version no
+# ingestion writes shares into the stat line, so usage claims are ungradable until one does.
+[rules.usage.dimensions.snap_share]
+stat_key = "snap_share"
+reference_key = "snap_share_baseline"
+direction_threshold = 0.03
+
+[rules.usage.dimensions.route_share]
+stat_key = "route_share"
+reference_key = "route_share_baseline"
+direction_threshold = 0.03
+
+[rules.usage.dimensions.touch_share]
+stat_key = "touch_share"
+reference_key = "touch_share_baseline"
+direction_threshold = 0.03
+
+[rules.usage.dimensions.target_share]
+stat_key = "target_share"
+reference_key = "target_share_baseline"
+direction_threshold = 0.03
+
+# `role` is the extractor's general workload label. It uses snap share as the documented
+# playing-time proxy and a wider band than the specific share dimensions.
+[rules.usage.dimensions.role]
+stat_key = "snap_share"
+reference_key = "snap_share_baseline"
+direction_threshold = 0.05
+
+[rules.field_propagation]
+rule_id = "field-propagation-ownership-residual-v1"
+claim_type = "field_propagation"
+dimensions = ["ownership"]
+direction_field = "roster_behavior_direction"
+classic_neutral_threshold = 0.01
+showdown_neutral_threshold = 0.02
+# The baseline is the latest eligible vendor row at the decision; the actual is the latest
+# row per contest, player, and roster role. Both selections are fixed in code.
