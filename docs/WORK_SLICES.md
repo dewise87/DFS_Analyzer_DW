@@ -2443,6 +2443,184 @@ fast lane's re-freeze govern under those bytes. The refusal remains where it bel
 *build* that finds a scenario set written under a different configuration than the current
 file refuses and says to regenerate the set. Suite 715 → 716.
 
+### Slice 37 — Workload stats ingestion (Family 1 outcomes)
+
+**Goal:** the post-lock facts Slice 34's grading is waiting for: each player's snap, route,
+target, and touch shares for the week, and a per-player trailing reference for each, as
+`results` stat lines — plus the played/DNP fact the availability rule needs, which today
+exists only when a player scored. Until this lands every usage claim is ungradable and the
+availability arm relies on a nonzero score.
+
+**Design doc:** §4.2 (Family 1: "validation target: first usage mediators, then fantasy
+points"), §5.9 (grade only falsifiable claims), §3.2 (point-in-time fields on outcome rows
+too), Slice 16's dated-pin discipline for anything from nflverse.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/identity/nflverse.py` (dated pins and the content-addressed archive
+> — reuse `fetch_pinned_roster`'s pattern, do not write a second downloader),
+> `docs/schema.md` for `results` (`UNIQUE(source, site, game_id, player_id, observed_at)`,
+> `stat_line_json`), `ingest/results.py` (what the standings ingest writes), and
+> `src/narrative_alpha/grading/core.py` (`grade_usage_claim` reads `<stat_key>` and
+> `<stat_key>_baseline` from the stat line; `_played_fact` reads `played`/`dnp`/`status`)
+> with `config/claim_grading.toml`.
+>
+> 1. **Source.** nflverse weekly player stats and snap counts for the season, pinned by
+>    date and archived by hash exactly as the roster is (a new pin table or the roster
+>    pin's mechanism generalized, your call — one mechanism, stated in the PR). Row
+>    identity resolves through the crosswalk's nflverse ids; an unresolved player enters
+>    the unresolved queue and the row is held, never guessed.
+> 2. **Stat lines.** For each player-game, write one `results` row with `source =
+>    "nflverse-stats"` (site-neutral: use the site column as the schema requires, one row
+>    per site the player was salaried on that week) whose `stat_line_json` carries
+>    `snap_share`, `route_share`, `target_share`, `touch_share` as fractions, `played` as a
+>    boolean (snaps > 0), and for each share a `<stat_key>_baseline`: the player's trailing
+>    mean over the previous N games of the season (N in a versioned config, default 4),
+>    computed only from games before this one — a game's baseline may never include the
+>    game itself. A player with no prior games this season has no baseline and the key is
+>    absent, so the grade is ungradable, by design. `fantasy_points` on these rows is the
+>    site's scoring as nflverse reports it, or refuse the row if nflverse does not carry
+>    it for that site.
+> 3. **The lane.** A `results_stats` step in `na-ops results` before `results_grade`
+>    (widen the `ops_runs` CHECK by migration as 0013/0014/0018 did), fetching the pinned
+>    files for the week, writing rows, and summarizing players written, held, and without
+>    a baseline. `na-ops status` shows the newest stats pin and its age.
+> 4. Grading needs no change: the keys are the ones the rules already read. Prove it with
+>    a test that grades a usage claim end to end from a seeded stats row.
+>
+> Tests: pin drift refuses like the roster's does; a baseline never includes the current
+> game; an unresolved player holds the row; the `played` fact for a zero-snap player is
+> false and a DNP claim grades correct; re-running the step inserts nothing new. Gates
+> green; never the production database.
+
+### Slice 38 — Stage 2/3 hardening (start after Week 2's episodes exist)
+
+**Goal:** the two limits recorded at Slices 20–21 — paraphrase detection that is headline
+Jaccard only, and the no-episode ratio features that are constant zero — fixed against
+what real weeks of episodes look like, not against a fixture.
+
+**Design doc:** §5.3 Stage 2 (duplicate copies must not raise event counts), §5.4
+(Family 3 heat inputs), Appendix B (feature contract), §12.3 (claim-dimension residuals).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse. Do not hand
+out before two live weeks of `narrative_episodes` exist; the prompt asks the model to read
+them first.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/narrative/episodes.py`
+> (`_cluster_claims`, `_relation_to_prior`, `_tokens`), `narrative/features.py` (the
+> ratio features and where they are zero), `config/heat.toml`, and the review notes under
+> Slices 20, 21, and 26 in `docs/WORK_SLICES.md`. Then, before writing code, run
+> `na-episodes show` over the two most recent live snapshots (copy the production database
+> to a scratch path first; never read it in place) and write down, in the PR, ten pairs of
+> claims the current clustering got wrong — five it merged that it should not have, five it
+> split that it should have merged.
+>
+> 1. **Paraphrase detection on the source text, not the headline.** Similarity over the
+>    canonical source text's shingles (MinHash or token-set Jaccard on 3-shingles; pick one
+>    and say why), with the threshold and shingle size in `config/heat.toml` under a new
+>    `episode_method_version`. Snapshot reuse is already scoped by method version (commit
+>    `40e02fd`); a new version must build new snapshots rather than reuse old ones.
+> 2. **No-episode ratio features.** Define each ratio so that a player with no episodes
+>    has a *defined* value the model can use (a stated floor, not zero and not NaN), and
+>    record the choice in Appendix B's contract table in `docs/schema.md`. Standardization
+>    then gives no-episode players a consistent z, which Stage 4's hold-at-baseline rule
+>    (Slice 30 review) depends on.
+> 3. **Formula hashing.** The feature formula code is not hashed today (Slice 21's open
+>    item); hash the formula module's bytes into `narrative_feature_versions` so a code
+>    change without a version bump is refused.
+> 4. The ten pairs from the first step become tests: the new clustering must merge the
+>    five and split the five, on the real text (anonymize nothing; the claims are already
+>    in the store as public text).
+>
+> Gates green. Byte-identity of existing decision snapshots is untouched because features
+> are versioned and snapshots are as-of; prove it by replaying one existing decision.
+
+### Slice 40 — Entry ledger and probe-contest report
+
+**Goal:** the design's "build contest selection/bankroll tracking early" (§9 Appendix E
+item 9): a ledger of the entries this tool produced — which decision, which contest, what
+fee, what the standings said it scored and won — and a weekly report of realized ROI by
+archetype beside the label counts. Season one's stakes are a data-acquisition line item
+(§4.3); this is the line item's receipt.
+
+**Design doc:** §4.3 (probe contests as deliberate data collection), §11 item 15 (bankroll
+risk), Appendix E item 9, §6.4 (lineup decision metrics are contest-level).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/ingest/results.py`
+> (`parse_contest_standings` reads every entry's rank, id, and points but stores only
+> ownership and player results), `portfolio/models.py` (`UploadEntry`: the entry ids a
+> frozen decision uploaded), `replay.py` (`read_frozen_decision` gives a decision's
+> request and upload entries without optimizing), `contest_cli.py` (`contests`,
+> `contest_payouts`), `ops/results.py`, and `docs/schema.md`.
+>
+> 1. **Entry rows.** A migration adds `contest_entries` (append-only): one row per entry
+>    id in a frozen decision's upload entries — decision snapshot, contest (by external
+>    id), entry id, entry fee, the lineup id the decision assigned it — written by
+>    `na-ops slate` at `slate_build` when the request carries upload entries, and by the
+>    fast lane's re-freeze for the entries it replaced. An entry uploaded outside the tool
+>    is not in the ledger and the report says the count that the standings show for our
+>    entry name but the ledger does not.
+> 2. **Settlement.** `results_ingest` (Slice 25) additionally records, per ledger entry
+>    found in the standings export, its rank, points, and payout (from `contest_payouts`
+>    by rank; refuse with the remedy when the contest has no payout table), as
+>    `contest_entry_results` (append-only, point-in-time fields, the standings capture's
+>    sha256 as the source hash). An entry in the ledger absent from the export is
+>    recorded as `unsettled` with the reason, not dropped.
+> 3. **Report.** `na-report entries --season N --week N` and a section in the Tuesday
+>    baseline report: per archetype, entries, fees, winnings, net, realized ROI, best and
+>    worst rank, and beside them the labels the same contests produced — so the cost per
+>    labeled week is a number. Cumulative since season start. `na-ops status` shows fees
+>    and net to date. Never a projection of future ROI: this is a receipt.
+>
+> Tests: an entry uploaded by a frozen decision settles against a synthesized export with
+> the payout the table gives; an entry absent from the export is `unsettled`; a contest
+> without a payout table refuses; the report agrees with the rows on a seeded store;
+> re-running settlement inserts nothing new. Gates green; never the production database.
+
+### Slice 41 — Monthly review report (Appendix D's last line)
+
+**Goal:** the monthly checklist item nobody will do by hand: source yield, API cost, model
+evaluations, prompt versions, and signal statuses, as one report from the store.
+
+**Design doc:** Appendix D (monthly), §10 (cost controls: the tracked quantities are
+listed), §5.8 (status rules), §7.5 (prompt and model evaluation).
+
+**Model:** Claude **Haiku 4.5** · ChatGPT **GPT-5.1** (cheap tier): every number exists in
+the store already; this is a query and a renderer. Sonnet 5 if the first draft invents a
+number the store does not hold.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read Appendix D and §10.1 of the design doc;
+> then `src/narrative_alpha/ops/spend.py` (spend by month), `ops/status.py` (the sections
+> already computed), `narrative/stage1_eval.py` and `ownership/evaluation.py` (evaluation
+> rows in `model_evals`), `grading/report.py` (the ledger report), and `docs/schema.md`
+> for `sources`, `source_items`, `prompt_versions`, `model_runs`, `model_evals`.
+>
+> Build `na-report monthly --month YYYY-MM` rendering, from the store alone: per source,
+> items collected, retained after dedupe, extracted, claims, grades and the pooled
+> credibility cell (Slice 34); Stage 1 cost that month against the budget, tokens in and
+> out, cost per retained item and per claim; every prompt version used that month with its
+> newest Stage 1 evaluation; every ownership evaluation that month with its verdict beside
+> the baseline; signal statuses as `ownership_scenarios.governance_status` shows them; and
+> the lanes' step failures for the month from `ops_runs`. Every section states the query
+> window and says "none recorded" rather than omitting a heading. Write the file to
+> `<report dir>/monthly/<month>.txt` and add a `monthly` line to `na-ops status` naming the
+> newest report and its age. No new tables, no new writes beyond the file.
+>
+> Tests: the report renders on an empty store with every heading present; a seeded month
+> reconciles to the rows (spend to the cent, counts exactly); the CLI refuses a malformed
+> month. Gates green.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
@@ -2451,13 +2629,6 @@ file refuses and says to regenerate the set. Suite 715 → 716.
   to be capture-only for that source.
 - **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
   real vendor export as Slice 9.
-- **Slice 37 — Workload stats ingestion** (Family 1 outcomes): nflverse weekly player stats
-  (snaps, routes, targets, touches) as post-lock `results` stat lines with per-player
-  trailing references, so Slice 34's usage rules grade something. Until then every usage
-  claim is ungradable, by design.
-- **Slice 38 — Stage 2/3 hardening:** paraphrase detection beyond headline Jaccard, and
-  the no-episode ratio features (both noted at Slices 20–21) once a month of live episodes
-  shows what the clusters actually look like.
 - **Slice 39 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.
