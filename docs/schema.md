@@ -23,9 +23,25 @@ timestamps record when each recovery edge was created.
 
 ## `model_evals`
 
-Stores immutable Stage 1 label-set evaluations by exact prompt version, model ID, and label-file
-SHA-256. The metrics JSON, evaluation run, item/row counts, and complete §3.2 fields make every
-prompt/model release comparison reproducible without retaining a committed label file.
+Stores immutable typed evaluations. Stage 1 rows retain their exact prompt version, model ID, and
+label-file SHA-256; ownership rows instead bind the site/archetype, heat-feature version, ownership
+configuration hash, report path, and out-of-week baseline verdict. The metrics JSON, evaluation run,
+item/row counts, and complete §3.2 fields make each release comparison reproducible.
+
+## `ownership_model_fits`
+
+Stores one immutable MAP/Laplace ownership fit per model run: the site and single contest archetype,
+feature/config versions, raw configuration SHA-256, saturation amplitude, ordered parameter vector,
+posterior covariance, exact input hash, missing-row counts, and training decision bounds. The parent
+`model_runs` row carries the same configuration hash.
+ `dispersion` is the quasi-binomial factor (≥ 1) by which the stored covariance was inflated.
+## `ownership_scenarios`
+
+Stores immutable §12.2.9 player-role scenarios for a frozen decision: untouched baseline,
+p10/p50/p90, median delta and sign probability, governance status/multiplier, and the capped,
+roster-calibrated applied ownership. Every row binds the producing scenario run, fitted-model run,
+configuration hash, feature version, and decision snapshot. This table is not consumed by
+`na-build`; that integration belongs to Slice 30.
 
 ## `teams`
 

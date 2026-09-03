@@ -617,10 +617,11 @@ def _report(
 
 @dataclass(frozen=True)
 class LabelCohort:
-    """One season/week/archetype label population, as the store holds it now."""
+    """One season/week/site/archetype label population, as the store holds it now."""
 
     season: int
     week: int
+    site: str
     contest_archetype: str
     label_rows: int
     distinct_contests: int
@@ -631,19 +632,20 @@ def label_cohorts(connection: sqlite3.Connection) -> tuple[LabelCohort, ...]:
 
     rows = connection.execute(
         """
-        SELECT s.season, s.week, ao.contest_archetype,
+        SELECT s.season, s.week, ao.site, ao.contest_archetype,
                count(*) AS label_rows,
                count(DISTINCT ao.site || ':' || ao.external_contest_id) AS distinct_contests
         FROM actual_ownership AS ao
         JOIN slates AS s ON s.slate_id = ao.slate_id
-        GROUP BY s.season, s.week, ao.contest_archetype
-        ORDER BY s.season, s.week, ao.contest_archetype
+        GROUP BY s.season, s.week, ao.site, ao.contest_archetype
+        ORDER BY s.season, s.week, ao.site, ao.contest_archetype
         """
     ).fetchall()
     return tuple(
         LabelCohort(
             season=int(row["season"]),
             week=int(row["week"]),
+            site=str(row["site"]),
             contest_archetype=str(row["contest_archetype"]),
             label_rows=int(row["label_rows"]),
             distinct_contests=int(row["distinct_contests"]),
@@ -666,6 +668,7 @@ def label_summary(connection: sqlite3.Connection) -> dict[str, object]:
             {
                 "season": cohort.season,
                 "week": cohort.week,
+                "site": cohort.site,
                 "contest_archetype": cohort.contest_archetype,
                 "label_rows": cohort.label_rows,
                 "distinct_contests": cohort.distinct_contests,

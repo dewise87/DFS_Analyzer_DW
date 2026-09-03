@@ -1,0 +1,69 @@
+# First deployable ownership model (§12.2.4–§12.2.9).
+#
+# Any semantic change requires a new model_version.  The loader records the SHA-256 of
+# these exact bytes on every fit, evaluation, and scenario row.
+
+config_version = "ownership-model-config-v1"
+model_version = "ownership-logit-offset-v1"
+feature_version = "narrative-heat-v1"
+amplitude = 0.75
+probability_epsilon = 0.000001
+posterior_draws = 4000
+posterior_seed = 20260903
+
+[priors]
+beta_signed_family = "half_normal"
+beta_signed_scale = 0.20
+beta_dfs_family = "normal"
+beta_dfs_scale = 0.15
+beta_velocity_family = "normal"
+beta_velocity_scale = 0.10
+intercept_family = "normal"
+intercept_scale = 0.10
+
+[evaluation]
+material_delta_points = 2.0
+minimum_weeks = 3
+beat_rule = "mae_and_log_score_and_brier"
+
+[calibration]
+draftkings_classic_slots = 9.0
+fanduel_classic_slots = 9.0
+showdown_captain_slots = 1.0
+showdown_flex_slots = 5.0
+tolerance = 0.0000000001
+maximum_iterations = 200
+
+[caps.classic.UNVALIDATED]
+multiplier = 0.25
+maximum_points = 2.0
+
+[caps.classic.TESTING]
+multiplier = 0.50
+maximum_points = 5.0
+
+[caps.classic.PROVISIONAL]
+multiplier = 1.0
+maximum_points = 10.0
+
+[caps.classic.VALIDATED]
+multiplier = 1.0
+maximum_points = 10.0
+
+# Showdown is deliberately wider because ownership is structurally concentrated.  These
+# are governance rails, not estimated uncertainty, and remain independently versioned.
+[caps.showdown.UNVALIDATED]
+multiplier = 0.25
+maximum_points = 4.0
+
+[caps.showdown.TESTING]
+multiplier = 0.50
+maximum_points = 10.0
+
+[caps.showdown.PROVISIONAL]
+multiplier = 1.0
+maximum_points = 20.0
+
+[caps.showdown.VALIDATED]
+multiplier = 1.0
+maximum_points = 20.0

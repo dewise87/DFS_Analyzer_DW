@@ -112,10 +112,11 @@ class SlateLaneStatus:
 
 @dataclass(frozen=True)
 class LabelCohortStatus:
-    """One season/week/archetype label population."""
+    """One season/week/site/archetype label population."""
 
     season: int
     week: int
+    site: str
     contest_archetype: str
     label_rows: int
     distinct_contests: int
@@ -714,6 +715,7 @@ def _label_status(connection: sqlite3.Connection) -> LabelsStatus:
             LabelCohortStatus(
                 season=cohort.season,
                 week=cohort.week,
+                site=cohort.site,
                 contest_archetype=cohort.contest_archetype,
                 label_rows=cohort.label_rows,
                 distinct_contests=cohort.distinct_contests,
@@ -836,7 +838,8 @@ def render_status(status: OpsStatus) -> str:
     else:
         for cohort in status.labels.by_week_and_archetype:
             lines.append(
-                f"  {cohort.season} week {cohort.week:02d} {cohort.contest_archetype:<18} "
+                f"  {cohort.season} week {cohort.week:02d} {cohort.site:<12} "
+                f"{cohort.contest_archetype:<18} "
                 f"{cohort.label_rows} row(s), {cohort.distinct_contests} contest(s)"
             )
 
@@ -996,6 +999,7 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                 {
                     "season": row.season,
                     "week": row.week,
+                    "site": row.site,
                     "contest_archetype": row.contest_archetype,
                     "label_rows": row.label_rows,
                     "distinct_contests": row.distinct_contests,

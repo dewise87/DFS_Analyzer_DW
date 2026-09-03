@@ -1885,6 +1885,35 @@ must be right and the evaluation must be honest.
 > `~/.local/bin/uv run pytest -q`, `ruff check .`, `mypy` green. Never run against
 > `data/db/narrative_alpha.sqlite3`.
 
+**Implementation status (2026-09-03):** landed as `src/narrative_alpha/ownership/` with
+`na-ownership fit | evaluate | scenarios`, `config/ownership_model.toml` (hashed onto
+every fit, evaluation, and scenario row), and migration 0016 (`ownership_model_fits`,
+`ownership_scenarios`, and `model_evals` generalized to carry ownership evaluations beside
+Stage 1's). The fit is MAP with a Laplace posterior on numpy/scipy only; `beta_signed` is
+half-normal by bound and by rejection in the draws. Training rows join each label to the
+slate's frozen decision — features at its instant, the baseline the feature cites — and a
+label with no complete row is reported, never imputed. The CLI gate needs three labeled
+weeks *with complete rows* and refuses any label whose source looks like a fixture; the
+library seam takes `allow_synthetic=True` and the CLI does not expose it. Evaluation is
+forward chaining only, pooled over folds, with week one prior-driven; `scenarios` refuses
+when the newest evaluation lost to the baseline and otherwise writes §12.2.9 rows at
+UNVALIDATED (no evaluation yet) or TESTING, capped in probability space and calibrated to
+roster totals by a bounded logistic IPF per position (captain/flex for showdown).
+
+**Review outcome (2026-09-03):** two fixes. (1) The likelihood was pure binomial on
+`lineup_count` trials, and contests have tens of thousands of lineups, so the Laplace
+posterior would have been far tighter than rows that share slates and stories can justify
+(§12.2.7) — every p10/p90 would have hugged p50. The fit now computes quasi-binomial
+dispersion (Pearson chi-square per degree of freedom, floored at one), inflates the
+covariance by it, and stores it on the fit row. (2) The training join took the slate's
+newest decision snapshot; after a `na-fast inactives` re-freeze that is a later decision
+with no feature rows of its own, so the whole week would have gone "missing" and the fit
+would have proceeded on fewer weeks than the gate counted. The join now ranks only
+decisions that froze features at their own instant. Noted, not changed: one contest per
+archetype per week is enforced (a second probe contest of the same archetype refuses with
+both ids); the pooled beat rule includes the prior-only first fold, which makes "beat"
+harder, not easier. Suite 617 → 635.
+
 ### Slice 30 — Stage 4/5: channel routing, caps, and the red-team block in the memo
 
 **Goal:** the ownership scenarios reach the build through deterministic permissions

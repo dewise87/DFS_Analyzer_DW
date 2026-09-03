@@ -104,8 +104,23 @@ reporting success), each ingested slate with its lock time, player count and unr
 count, the latest salary/projection/ownership observation, how many features exist at the
 latest decision instant, and the decision snapshot frozen against it. `--json` prints the
 same data. Its RESULTS LANE and RESULT LABELS sections show Tuesday's five steps and the
-per-week/archetype label counts that gate the first ownership model. It answers "did this
+per-week/site/archetype label counts that gate the first ownership model. It answers "did this
 week run, and what do I need to do by hand" without any other command.
+
+After three real labeled weeks exist for one site/archetype cohort, the ownership layer is
+operated explicitly and remains disconnected from `na-build` until Slice 30:
+
+```bash
+uv run na-ownership fit --archetype single_entry --site dk
+uv run na-ownership evaluate --archetype single_entry --site dk
+uv run na-ownership scenarios --decision-snapshot <decision-snapshot-id> \
+  --archetype single_entry
+```
+
+`fit` refuses fixture/test labels and reports incomplete point-in-time joins. `evaluate` uses
+expanding weekly folds and writes its model-versus-vendor report under
+`data/reports/ownership/`. `scenarios` writes immutable capped and roster-calibrated records;
+a recorded losing out-of-week evaluation blocks their application.
 
 **Run the lane by hand** when you want it now rather than on Wednesday:
 

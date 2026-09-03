@@ -262,6 +262,25 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-03 — Slice 29 review outcomes
+
+- **The posterior is quasi-binomial, not binomial.** Actual-ownership labels are counts
+  over contests of tens of thousands of lineups, so a binomial likelihood treats every row
+  as that many independent trials and the Laplace posterior collapses onto the MAP. The rows
+  are not independent: they share slates, weeks, and stories (§12.2.7). The fit inflates the
+  covariance by the Pearson chi-square per degree of freedom, floored at one, and records the
+  factor. This is the cheapest honest treatment; the hierarchical model that replaces it is
+  Phase 4 work and needs a season of labels.
+- **A training week's decision is the one that froze features.** The fast lane's re-freeze
+  is a later decision snapshot without feature rows. Ranking it as "the" decision for the
+  week would silently drop every label that week from the fit while the gate still counted
+  the week as labeled. The join now requires features at the decision's own instant; the
+  fast snapshot remains the decision for lineups, and the featured snapshot is the decision
+  for learning.
+- **Synthetic labels never reach a production fit.** The CLI gate refuses any stored label
+  whose source names a fixture or test, and the library's `allow_synthetic` seam is not
+  exposed to the CLI. Rule 1.5.2 is enforced by code, not by remembering it.
+
 ## 2026-09-03 — Slices 26–28 review outcomes
 
 - **A refusal writes nothing but the refusal.** The fast lane's availability rows and the
