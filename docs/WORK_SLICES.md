@@ -2675,6 +2675,234 @@ as of different instants; pooling is now within the newest grading run in the wi
 rather than listed for ever, and an unknown lane step degrades one line rather than the
 report. Suite 733 → 742.
 
+### Slice 42 — Preflight and backup (`na-ops doctor`, `na-ops backup`)
+
+**Goal:** the two things a solo operator needs before the first live Sunday and never has
+time to build during one: a preflight that says, in one screen, whether every piece the
+week depends on is in place, and a nightly backup of the store and the frozen decisions
+with a restore that is actually tested.
+
+**Design doc:** §1.6 (solo operator), §9.0 (a missed week is irreplaceable), Appendix D
+(Sunday pre-lock: "fast lane healthy; prompt cache warm; baseline fallback current"), §3.2.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`). Read
+> `src/narrative_alpha/ops/cli.py`, `ops/status.py` (`collect_ops_status` — do not
+> duplicate a check status already makes; call it), `ops/schedule.py`
+> (`inspect_schedule`), `ops/secrets.py`, `identity/pins.py` and `identity/nflverse.py`
+> (roster and stats pins), every loader under `config/` (ops, heat, ownership_model,
+> contest_policies, claim_grading, workload_stats, fast_lane_rules, narrative_sources,
+> model_pricing), `store/migrations.py`, `build_cli.py` (`DEFAULT_ARTIFACT_DIRECTORY`),
+> and `data/README.md`.
+>
+> 1. **`na-ops doctor`.** One screen, each line a named check with OK / WARN / FAIL and
+>    the remedy in words: the Keychain item is readable (without printing it); every
+>    config file parses under its own loader and its hash is stated; migrations are
+>    current (or name the pending ones, since `doctor` must not apply them); the launchd
+>    agents are installed and loaded and their next fire times; the roster pin and the
+>    stats pin are current for the week (or say which is missing and the refresh
+>    command); the fast-lane rule set is signed and unexpired; the artifact, report, and
+>    snapshot directories exist and are writable with free space stated; the dashboard
+>    port is free; the newest backup's age (item 2). Exit nonzero on any FAIL. Never
+>    change anything. Add `doctor` to the Week 1 runbook's Thursday preflight line and to
+>    the Sunday pre-lock line.
+> 2. **`na-ops backup`.** Copy the store with SQLite's online backup API (never a file
+>    copy of a live WAL database), plus the decision artifact directory, the reports, and
+>    the pin archive, into `data/backups/<UTC stamp>/` with a manifest of every file's
+>    sha256 and size; the snapshot captures are excluded by default (they are the largest
+>    thing and already immutable) with a flag to include them. Keep the newest N (config;
+>    default 14) and say what was pruned. `na-ops schedule install` gains a nightly backup
+>    agent through the same wrapper mechanism. `na-ops status` shows the newest backup's
+>    age.
+> 3. **`na-ops restore --backup <stamp> --into <directory>`.** Never in place: restores to
+>    a directory, re-hashes every file against the manifest, opens the restored store,
+>    checks migrations and row counts against the manifest's recorded counts, and prints
+>    the exact `--database` and `--artifact-directory` flags to run against it. The drill
+>    is the test: a build in a temporary store, backup, restore elsewhere, replay the
+>    decision from the restored copy byte-identically.
+>
+> Tests: every doctor check in its FAIL and OK state with a fixture (missing Keychain
+> item, unparseable config, pending migration, expired rules, missing pin, no backup);
+> backup manifest hashes verify; pruning keeps N; restore refuses a manifest mismatch;
+> the drill above. Gates green; never the production database.
+
+### Slice 43 — Contest simulator in shadow mode (§6.6)
+
+**Goal:** the Phase 2 deliverable that turns "this lineup projects well" into "this lineup
+cashes with probability p in this contest": an internal field generator and outcome
+simulator that runs beside the build, writes a report, and changes nothing the optimizer
+does. It stays labeled experimental until it reproduces the properties of real contests
+the entry ledger (Slice 40) and the labels (Slice 25) will accumulate.
+
+**Design doc:** §6.6 (the six components and the shadow starting point), §6.4 (lineup
+decision metrics), §6.3, §12.2.6 (roster totals), §1.5 rule 5 (no false precision), §9
+Phase 2 ("simple internal field generator and outcome simulator in shadow mode").
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier: the
+dependence model and the duplication model are where a plausible-looking simulator lies.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read §6.6, §6.4, §6.3, and §12.2.6 of the design
+> doc; then `src/narrative_alpha/quant/distributions.py` (`PlayerOutcomeDistribution`,
+> `sample`, `quantile`), `quant/scoring.py`, `portfolio/models.py` (`Lineup`,
+> `CandidatePlayerScenario`, `OptimizationRequest`), `portfolio/pydfs_adapter.py` (an
+> ownership-weighted objective is not supported there — the field generator must not go
+> through pydfs), `portfolio/heuristic_report.py` (the report this replaces the
+> heuristics of), `contests.py` (`load_contest_payouts`), `interface/slate_memo.py`,
+> `ops/slate.py`, and `docs/schema.md` for `player_distributions`,
+> `ownership_baselines`, `contests`, `contest_payouts`, `decision_snapshots`.
+>
+> Build `src/narrative_alpha/simulation/` with `na-simulate --decision-snapshot <id>
+> --contest <external id> [--draws N]`, every input read as-of the decision:
+>
+> 1. **Outcomes.** Per-player draws from the stored `player_distributions` as-of the
+>    decision (refuse a player with none — no imputation), made dependent by a Gaussian
+>    copula over latent factors: one per game (environment), one per team (offense
+>    pace), and a within-position negative relation for teammates who share touches.
+>    Factor loadings live in a versioned `config/simulation.toml` (hashed onto every
+>    output) and are stated as first-season assumptions; a `--independent` flag runs the
+>    copula off so the effect of the assumption is visible.
+> 2. **Field.** A stochastic field generator that draws N lineups satisfying the site's
+>    roster and salary rules with player inclusion probabilities calibrated to the
+>    ownership marginals in force at the decision (the routed applied ownership when the
+>    decision applied a set, else the vendor baseline — read the routing record, never
+>    recompute it), with roster-total calibration (§12.2.6) and a stack-rate knob from the
+>    config. Report the achieved marginals beside the targets; a marginal off by more
+>    than a stated tolerance fails the run rather than being reported as a success.
+> 3. **Contest.** Score every field lineup and every lineup of the decision's portfolio
+>    under each outcome draw, rank with ties, pay through `contest_payouts` with tied
+>    payouts split, and count exact-duplicate lineups of our entries in the field (the
+>    duplication model: same nine players).
+> 4. **Output.** Per portfolio lineup: expected payout, expected ROI, cash probability,
+>    top-1% probability, duplication distribution, and downside (5th percentile payout);
+>    per portfolio: the same, plus the correlation between our lineups' outcomes. Written
+>    to `<report dir>/<season>/week_NN/simulation-<decision>-<stamp>.txt` and an
+>    append-only `simulation_runs` row (migration) carrying the config hash, draw count,
+>    seed, and the ownership source. Every page of output carries the line "EXPERIMENTAL
+>    — not calibrated against a real contest" until item 5 removes it.
+> 5. **Calibration hooks, not calibration.** A `na-simulate calibrate --season N --week N`
+>    that, when the entry ledger and standings for a contest exist, compares simulated
+>    versus realized ownership marginals, score distribution quantiles, and duplication
+>    counts for that contest and writes the comparison beside the report. It removes the
+>    experimental label from nothing; that is a human's decision recorded in the config.
+>
+> Nothing here changes a request, a candidate, a lineup, or a memo number: the slate lane
+> gains an optional `slate_simulate` step after `slate_memo` that runs item 4 on the
+> frozen decision and records the report path, skipped with the reason when the store has
+> no distributions or no contest. Determinism: same inputs, same seed, same bytes.
+>
+> Tests: draws reproduce each marginal's quantiles within tolerance; the copula moves
+> teammate correlation in the stated direction and `--independent` removes it; the field
+> hits its ownership targets and fails loudly when it cannot; tied payouts split; a
+> duplicate of our lineup in the field halves its payout; the report is byte-identical
+> for the same seed; the lane step skips with the reason on an empty store. Gates green;
+> never the production database.
+
+### Slice 44 — Showdown slates end to end
+
+**Goal:** Thursday, Monday, and Sunday night slates are showdown. Today the optimizer
+refuses showdown rules, so those slates get captures and nothing else, and Stage 4 routing
+falls back to baseline on them by design. This slice makes a showdown slate a real
+decision: captain-mode optimization, one ownership per role in the candidate scenario,
+routing per role, and the memo and replay treating it like any other frozen decision.
+
+**Design doc:** §6.5 (site and slate rules), §12.2.5 (showdown caps are separate and
+wider), §12.2.6 (captain and flex totals calibrated separately), §4.3 (showdown labels
+carry a role), Slice 22's open risk (real DK showdown exports may carry CPT and FLEX rows
+per player).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse; the captain
+multiplier and the roster rules are known, not estimated.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/portfolio/models.py`
+> (`CLASSIC_SITE_RULES`, `SlateType`, `CandidatePlayer` — one `projected_ownership`),
+> `portfolio/pydfs_adapter.py` (`_unsupported_features` refuses showdown; pydfs supports
+> DraftKings captain mode natively), `candidate_selection.py`, `ownership_routing.py`
+> (the showdown early return and `ROUTING_SLATE_KIND`), `ownership/scenarios.py`
+> (captain/flex calibration already exists), `ownership/data.py`
+> (`load_scenario_inputs` already yields both roles), `ingest/salaries.py` and
+> `ingest/results.py` (roles), `interface/slate_memo.py`, `replay.py`, and the Slice 22
+> status note about dual CPT/FLEX rows.
+>
+> 1. **Rules.** `SHOWDOWN_SITE_RULES` beside the classic ones: DraftKings captain (1.5×
+>    points, 1.5× salary) plus five flex; FanDuel MVP (1.5× points, same salary) plus
+>    four; salary caps as the sites publish them. `SlateType.SHOWDOWN` reaches the
+>    adapter through pydfs captain mode, and `Lineup` validation knows the captain slot.
+> 2. **Candidates.** `CandidatePlayer` gains `projected_ownership_captain` (None on
+>    classic slates) beside the existing flex value; selection reads both roles from
+>    `ownership_baselines` as-of the decision. The upload CSV renders the site's showdown
+>    template (captain first). Byte-identity: a classic request's JSON must not change —
+>    add the field with `exclude_if` as `pinned_lineups` was added, and prove it with the
+>    existing replay tests.
+> 3. **Routing.** Stage 4 applies a showdown scenario set per role, with the showdown caps
+>    from the ownership config, and the manifest hash covers both roles' rows; the
+>    hold-at-baseline and cap re-assertion rules apply per role.
+> 4. **Ingest.** A DraftKings showdown salary export with separate CPT and FLEX rows for
+>    one player is ingested as one player with two roles, not refused and not
+>    deduplicated by dropping one; a standings export's captain rows carry the 1.5×
+>    points and are graded as such.
+> 5. The memo prints the captain choice and its two ownership numbers; the red-team
+>    block's "do nothing" case names the captain swap; `na-ops slate` and the fast lane
+>    work unchanged on a showdown slate (the fast lane pins and replaces lineups exactly
+>    as on classic).
+>
+> Tests: a showdown build through the real adapter on a seeded six-player pool; replay
+> byte-identity; a classic decision's request bytes unchanged; routing per role with the
+> showdown caps; the dual-row salary export; a captain standings row's points. Gates
+> green; never the production database.
+
+### Slice 45 — Dashboard design pass
+
+**Goal:** the page stays "not pretty" no longer, without becoming anything else: same
+pages, same reads, same security, no JavaScript, no framework, no external asset. Type,
+spacing, color, and layout only, so the operator can read status at a glance on a laptop
+and a phone.
+
+**Design doc:** §7.1 (interface layer), §1.6 (complexity budget — this slice adds no
+behavior).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Hand out after Slices 42
+and 44 merge, so it is styling a settled set of pages.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `src/narrative_alpha/ops/dashboard.py`
+> entirely — the `STYLE` block, `_page`, every `_*_page`, and the security checks
+> (`_check_host`, `_check_origin`, `_require_confirmation`) which you will not touch —
+> and `tests/test_ops_dashboard.py`. Then look at the real thing: start the dashboard
+> with `uv run na-ops dashboard` against a *copy* of the production database
+> (`--database <copy>`), open http://127.0.0.1:8765/, and write down the five things
+> hardest to read before changing anything.
+>
+> Constraints, all hard: no JavaScript; no framework; no external asset, font, or icon
+> (system font stack only); one inline stylesheet; every existing test passes unchanged;
+> `read_page`-style structure unchanged (same headings, same section order, same form
+> field names); dark and light through `color-scheme` and `prefers-color-scheme` only.
+>
+> Do: a readable type scale and measure; a status strip at the top of the status page
+> that says in one line whether anything needs a hand (from `manual_actions` and
+> `warnings`, already in the payload); consistent tables (numeric columns right-aligned,
+> monospace for ids and hashes, row striping); the LANES block as cards on narrow
+> screens; the forms visibly separated from the reads, with the confirmation checkbox
+> and button on one line; FAILED and RUNNING states with color and a symbol so they read
+> without color; `<details>` for long `<pre>` blocks (HTML, not script) so a failure text
+> does not push the page down; a print stylesheet for the memo page; a footer with the
+> as-of instant and the code version on every page.
+>
+> Don't: add a page, a query, a form, or a field; reorder sections; change any text the
+> tests assert on; introduce a build step.
+>
+> Deliver before-and-after screenshots of the status, queues, and memo pages at laptop
+> and phone widths in the PR. Tests: the existing suite unchanged, plus one that the
+> status strip says "nothing needs a hand" on an empty store and names the actions on a
+> seeded one, and one that the stylesheet contains no `url(` and the page no `<script`.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
