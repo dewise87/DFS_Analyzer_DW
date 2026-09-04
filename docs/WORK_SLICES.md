@@ -3118,12 +3118,112 @@ table's "last failure text" column is the narrowest of six at laptop width becau
 "none" columns keep their nowrap headers; a fixed column width would fix it and was not
 worth a rule this pass.
 
+### Slice 46 — Stokastic Data Hub stats exports as a component-projection source
+
+**Goal:** the first real purchased file in the store. Stokastic's Data Hub opened its NFL
+**Stats** page on 2026-09-05 (Projections/Ownership still empty), exporting three CSVs per
+slate view — passing, rushing, receiving — with projected volume and scoring components but
+no fantasy points, no salary, no position, and no ownership. Capture them as a new kind,
+store the components per player as of the capture, and derive a site-scored projection
+that is explicitly labeled derived and bonus-free. This is not Slice 9: the projection
+adapter still waits for the Projections/Ownership export.
+
+**Design doc:** §4.3 (store every source independently; never overwrite), §3.2
+(point-in-time fields), §6.1 (equal-weight blend across sources — this source becomes a
+blend input only through Slice 9b), Slice 16's discipline for anything derived from a
+configured constant.
+
+**Real-file facts the executing model must respect** (from the 2026-09-05 exports):
+passing `Player,Team,Opp,Att,Comp,Pass Yds,TD,INT,Fum`; rushing
+`Player,Team,Opp,Rush,Rush Yds,TD,Fum`; receiving
+`Player,Team,Opp,Tgt,Tgt %,Rec,Catch %,Rec Yds,YPC,TD,Fum`. Quarterbacks appear in both
+passing and rushing; backs and receivers in both rushing and receiving; a player's line is
+the join across files on `(Player, Team, Opp)`. `Catch %` is the constant `75.0%` in every
+receiving row and `Rec` is that constant times `Tgt` — a vendor placeholder, not a
+projection. `Fum` is not labeled as fumbles versus fumbles lost. The export covers all 32
+teams (the whole week), not one slate.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse — the seams
+(capture kinds, `SourceFormatRegistry`, insert-only writes) all exist. Run it in a local
+coding session on the Mac; the model must read the files from disk.
+
+**Prerequisite (human):** copy the three exports to `data/vendor/stokastic/2026-09-05/`
+(everything under `data/` is git-ignored) as `stats_passing.csv`, `stats_rushing.csv`,
+`stats_receiving.csv`. Note the vendor timestamp the Stats page shows, if any.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; gates are
+> `uv run --frozen ruff check .`, `uv run --frozen mypy src/narrative_alpha`,
+> `uv run --frozen pytest -q`). Read `docs/DECISIONS.md` (binding: no silent fallback, no
+> magnitude-inferred units, insert-only point-in-time writes, canonical UTC-Z timestamps
+> via triggers, never a connection-registered SQL function), `src/narrative_alpha/snapshots/`
+> (`CaptureKind`, the capture manifest, `na-snapshot capture`), `ingest/projections.py`
+> (`SourceFormatRegistry`, `SourcePlayerFields`, the crosswalk resolution and unresolved
+> queue in `load_projection_capture`), `ingest/nflverse_stats.py` (how a stat line is
+> written and how a config file's bytes become `source_version`), `docs/schema.md`, and
+> the three real files under `data/vendor/stokastic/2026-09-05/`. The real headers are the
+> schema; if those files are absent, STOP and say so.
+>
+> 1. **Capture kind.** Add `STATS = "stats"` to `CaptureKind` so
+>    `na-snapshot capture --season 2026 --week 1 --kind stats --source stokastic <3 files>`
+>    stores the three files with one manifest. `na-snapshot status` lists the new kind.
+> 2. **Storage.** Migration 0022: a `projected_stats` table, one row per
+>    `(source, season, week, player_id, stat, observed_at)` with `value REAL`, `file_sha256`,
+>    `source_version`, the standard point-in-time columns (`published_at` nullable —
+>    vendor-asserted, `observed_at`, `ingested_at`), UNIQUE on the key, insert-only. Stat
+>    names are a closed enum you define from the real headers (`pass_att`, `pass_cmp`,
+>    `pass_yds`, `pass_td`, `pass_int`, `rush_att`, `rush_yds`, `rush_td`, `targets`,
+>    `target_share`, `receptions`, `rec_yds`, `rec_td`, `fumbles`); `Catch %` and `YPC`
+>    are not stored as facts — the parser verifies `Rec ≈ 0.75 × Tgt` and `Rec Yds ≈ Rec ×
+>    YPC` within tolerance and records in the load report that receptions are a vendor
+>    placeholder. Percent columns become fractions by the `%` sign in the header/cell,
+>    never by magnitude. Keep `Fum` from the three files as three separate stats
+>    (`pass_fumbles`, `rush_fumbles`, `rec_fumbles`) because the export does not say
+>    whether they are lost; do not sum them.
+> 3. **Parser.** A `stokastic_stats` `SourceFormat` with header-signature detection for
+>    each of the three files; an unknown or drifted header raises `SourceFormatError`
+>    naming missing and unexpected columns. Identity resolves through the crosswalk by
+>    name + team (the export carries no position and no site id); an unresolved name is
+>    queued and the load report says so, and the whole capture is held if more than a
+>    configured fraction is unresolved (state the default). Rows for teams outside the
+>    requested slate are stored anyway — the export is a full week — and the load report
+>    counts them; slate scoping is a read-time concern.
+> 4. **Derived points, explicitly.** `config/derived_scoring.toml` holds the DraftKings and
+>    FanDuel per-stat point values for the stored stats (passing yards, passing TD,
+>    interception, rushing yards, rushing TD, reception, receiving yards, receiving TD).
+>    Yardage bonuses (DK 300/100) and fumbles are **excluded** and the config says so: the
+>    expectation of a threshold bonus cannot be taken from an expected yardage total, and
+>    fumble units are unknown. A read function returns, per player, the derived mean
+>    labeled `source = "stokastic-stats-derived"` with the config's byte hash as
+>    `source_version`. Do **not** write derived points into `projection_snapshots` and do
+>    not wire them into `candidate_selection` — that is Slice 9b's blend decision. Expose
+>    them as a read (library + `na-slate stats --season --week --site` print) so the
+>    operator can eyeball them against the site's own projections when those arrive.
+> 5. **Fixtures.** Anonymize a dozen rows of each real file (fake names, same columns,
+>    same quirks — the constant catch rate, the QB in two files) into
+>    `tests/golden/stokastic_stats_{passing,rushing,receiving}.csv`. Never commit the real
+>    exports.
+> 6. **Tests:** golden parse for each file; drift refusal names the columns; percent
+>    handling; the placeholder-reception check both passes on the fixture and fails on a
+>    doctored row; the cross-file join for a QB; an unresolved name queues and the
+>    threshold holds the capture; re-ingesting the same capture inserts nothing; derived
+>    points for one fixture player equal the hand computation from the config; an
+>    end-to-end load through a real `na-snapshot` capture directory into a seeded scratch
+>    store.
+>
+> Finish by capturing the three real files with the new kind under
+> `data/snapshots/2026/week_01/` and loading them into a **copy** of the production store
+> in a scratch path (never the file under `data/db/`); report players written, unresolved
+> names, out-of-slate rows, and the ten highest derived DraftKings means. Gates green.
+
 ### Queued, not yet prompted (in order)
 
-- **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under
-  `data/snapshots/`. Stokastic opens NFL main-slate data within about twelve hours of lock,
-  so the first chance is Saturday 2026-09-12; hand the slice out that day, and expect Week 1
-  to be capture-only for that source.
+- **Slice 9 — Stokastic adapter** (prompt above) stays open until the Data Hub
+  **Projections/Ownership** export exists under `data/snapshots/`. As of 2026-09-05 the Data
+  Hub's Stats page is open for Week 1 (Slice 46 consumes it) but the Projections page is
+  still empty; check it daily and hand Slice 9 out the day the export appears — expect
+  Week 1 to be capture-only for that source.
 - **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
   real vendor export as Slice 9.
 - **Slice 39 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
