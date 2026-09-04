@@ -1313,3 +1313,33 @@ def test_every_page_carries_the_instant_and_the_code_version(seeded_client: _Cli
     # second read of the clock a few milliseconds later.
     _, status = seeded_client.get("/")
     assert status.count(utc_timestamp(NOW)) >= 2
+
+
+def test_a_long_text_folds_whole_under_a_named_or_first_line_head() -> None:
+    """The fold keeps every character; only the head that names it is chosen."""
+
+    from narrative_alpha.ops.dashboard import _text_block
+
+    text = "\n".join(f"line {index}" for index in range(12))
+    folded = _text_block(text)
+    assert folded.startswith("<details><summary>line 0 ")
+    assert "12 lines" in folded
+    assert f"<pre>{escape(text)}</pre>" in folded, "nothing inside the fold is trimmed"
+    # A blank first line does not become an empty head.
+    assert _text_block("\n\n" + text).startswith("<details><summary>line 0 ")
+    # A JSON summary opens with `{`, which names nothing; the caller names it instead.
+    assert _text_block(text, head="summary").startswith("<details><summary>summary ")
+    # Short text is a plain <pre>, with nothing to open.
+    assert _text_block("one line") == "<pre>one line</pre>"
+
+
+def test_the_write_forms_do_not_widen_a_phone_page(seeded_client: _Client) -> None:
+    """A fieldset defaults to `min-width: min-content`: one unbreakable path in the results
+    form pushed a 375px page out to 576px, and every section scrolled sideways with it. The
+    stylesheet undoes the default, and this holds the line."""
+
+    _, body = seeded_client.get("/")
+    stylesheet = body[body.index("<style>") : body.index("</style>")]
+    rule = stylesheet[stylesheet.index("\nfieldset {") :]
+    rule = rule[: rule.index("}")]
+    assert "min-width: 0" in rule

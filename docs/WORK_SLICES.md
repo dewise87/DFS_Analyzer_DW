@@ -3036,6 +3036,34 @@ and 44 merge, so it is styling a settled set of pages.
 > status strip says "nothing needs a hand" on an empty store and names the actions on a
 > seeded one, and one that the stylesheet contains no `url(` and the page no `<script`.
 
+**Implementation status (2026-09-04):** landed on branch `dashboard-design-pass` as one
+stylesheet and presentation-only edits to `ops/dashboard.py`: the status strip built from
+`warnings` and `manual_actions`, long text folded into `<details>` past three lines or 240
+characters, one table shape (figures right and tabular, identifiers and instants monospace,
+rows striped, wide tables scrolling in their own box, long ones given a height and a sticky
+header), the lane block as cards below 46rem, tinted write forms with the confirmation and
+its button on one line, a symbol beside every state colour, a print stylesheet, and a footer
+with the read instant and the code version. No page, query, form, field, or section order
+changed; the host, origin, and confirmation checks are untouched. Suite 787 → 795.
+
+**Review outcome (2026-09-04):** accepted with four presentation fixes, found by opening the
+pages against a copy of the production store at 1280px and at a true 375px emulation
+(headless desktop Chrome cannot go below about 500px, so a phone check needs emulation).
+Every page is now exactly viewport-wide at 375px; before the fixes the status page scrolled
+sideways to 576px. (1) `fieldset` keeps the browser default `min-width: min-content`, so the
+one unbreakable path in the results form's directory list set the width of the whole page;
+the stylesheet now sets `min-width: 0` and lets `<code>` wrap. (2) A bare value in a section
+— the database path — is one unbreakable token and widened the page by 71px; sections now
+`overflow-wrap: break-word`, which unlike `anywhere` leaves table column sizing alone.
+(3) `html { font-size: 16px }` overrode the reader's own default size for no gain, since
+every other size is in rem; it is `100%`. (4) A fold's head was the first line even when
+that line was blank or, for a run's JSON summary, the single character `{`; the head is the
+first non-empty line, and the summary fold is named "summary". Two tests added (the fold
+head and the fieldset rule). Suite 795 → 797. Not changed, noted for later: the steps
+table's "last failure text" column is the narrowest of six at laptop width because the four
+"none" columns keep their nowrap headers; a fixed column width would fix it and was not
+worth a rule this pass.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until real exports exist under

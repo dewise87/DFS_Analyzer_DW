@@ -841,7 +841,7 @@ STYLE = """
 }
 
 /* ---- page frame ---- */
-html { font-size: 16px; }
+html { font-size: 100%; }  /* the reader's own default size, not a fixed one */
 body { margin: 0; padding: 0 0 1rem; background: var(--bg); color: var(--ink);
        font-family: var(--sans); font-size: 1rem; line-height: 1.55;
        -webkit-text-size-adjust: 100%; }
@@ -855,7 +855,10 @@ nav a { padding: .2rem .5rem; border-radius: 4px; text-decoration: none;
 nav a:hover { background: var(--sunk); text-decoration: underline; }
 a { color: var(--link); }
 main { padding: 0 1.5rem; max-width: 78rem; min-width: 0; }
-section { margin: 1.75rem 0; }
+/* A bare value in a section — the database path, a file name — is one unbreakable
+   token; `break-word` splits it only when it would otherwise widen the page, and
+   unlike `anywhere` leaves table column sizing alone. */
+section { margin: 1.75rem 0; overflow-wrap: break-word; }
 h2 { font-family: var(--mono); font-size: .8125rem; font-weight: 700; letter-spacing: .1em;
      text-transform: uppercase; color: var(--soft); margin: 0 0 .5rem;
      border-bottom: 1px solid var(--rule); padding-bottom: .3rem; }
@@ -864,7 +867,7 @@ p { margin: .5rem 0; max-width: var(--measure); }
 ul, ol { max-width: var(--measure); padding-left: 1.35rem; }
 li { margin: .2rem 0; }
 code { font-family: var(--mono); font-size: .875rem; background: var(--sunk);
-       padding: .05rem .3rem; border-radius: 3px; }
+       padding: .05rem .3rem; border-radius: 3px; overflow-wrap: anywhere; }
 .note { color: var(--soft); font-size: .9375rem; margin: .4rem 0; }
 .none { color: var(--soft); }
 
@@ -949,9 +952,11 @@ summary:hover, details[open] > summary { color: var(--ink); }
 
 /* ---- writes look like writes; the reads above them do not ---- */
 form { margin: .75rem 0; }
+/* `min-width: 0` undoes the browser default of min-content, which otherwise lets one
+   unbreakable path in the results form push a 375px phone page out to 576px. */
 fieldset { border: 1px solid var(--write); border-left-width: 4px; border-radius: 6px;
            background: var(--write-bg); padding: .5rem 1.1rem 1rem; margin: 1rem 0;
-           max-width: 54rem; }
+           max-width: 54rem; min-width: 0; }
 legend { font-weight: 700; color: var(--write); padding: 0 .4rem; font-size: .9375rem; }
 .card { border: 1px solid var(--rule); border-radius: 6px; background: var(--panel);
         padding: .85rem 1.1rem 1rem; margin: 1rem 0; max-width: 54rem; }
@@ -1469,7 +1474,9 @@ def _run_row(run: RecordedRun) -> str:
     css, mark = _status_mark(run.status)
     detail = "" if run.error_text is None else _text_block(run.error_text)
     summary = (
-        "" if not run.summary else _text_block(json.dumps(run.summary, indent=2, sort_keys=True))
+        ""
+        if not run.summary
+        else _text_block(json.dumps(run.summary, indent=2, sort_keys=True), head="summary")
     )
     return (
         f'<tr><td class="stamp">{escape(utc_timestamp(run.started_at))}</td>'
@@ -1724,13 +1731,18 @@ def _render(value: object) -> str:
     return escape(text)
 
 
-def _text_block(text: str) -> str:
-    """A <pre>, and around it a <details> when the text is long enough to bury the page."""
+def _text_block(text: str, *, head: str | None = None) -> str:
+    """A <pre>, and around it a <details> when the text is long enough to bury the page.
+
+    ``head`` names the fold when the text's own first line would not: a JSON summary
+    opens with ``{``, which tells the reader nothing about what they are deciding to open.
+    """
 
     lines = text.splitlines()
     if len(lines) <= FOLD_TEXT_LINES and len(text) <= FOLD_TEXT_CHARACTERS:
         return f"<pre>{escape(text)}</pre>"
-    head = (lines[0] if lines else text).strip()
+    if head is None:
+        head = next((line.strip() for line in lines if line.strip()), text.strip())
     if len(head) > FOLD_SUMMARY_CHARACTERS:
         head = f"{head[:FOLD_SUMMARY_CHARACTERS].rstrip()}\u2026"
     return (

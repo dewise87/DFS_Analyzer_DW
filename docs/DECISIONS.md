@@ -2,6 +2,28 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-04 — Slice 45 review outcomes: the dashboard is a document, sized by the reader
+
+- **The dashboard's design pass added no behavior and is held to that.** One inline
+  stylesheet, no script, no asset, no build step; the tests assert `url(` and `@import`
+  are absent from the stylesheet and `<script` from every page. The status strip is the
+  payload's own `warnings` and `manual_actions` read first, not a new judgement.
+- **Every page must be exactly viewport-wide on a phone, and that is checked by emulation,
+  not by a narrow desktop window.** Desktop Chrome will not shrink below about 500px, so a
+  "375px" headless capture is a lie; the check is a 375px device emulation reading
+  `scrollWidth`. Two browser defaults broke it and are overridden: `fieldset`'s
+  `min-width: min-content` and an unbreakable bare token in a section. Wide tables scroll
+  inside their own box; the page never scrolls sideways.
+- **Prose breaks with `overflow-wrap: break-word`; identifiers with `anywhere`.** `anywhere`
+  changes min-content sizing and would let a table squeeze every column to a few
+  characters; `break-word` only splits a token that would otherwise widen the page.
+- **The root font size is the reader's (`100%`), never a fixed pixel size.** Every other
+  size is in rem, so a fixed root only defeats the browser's own accessibility setting.
+- **A fold never trims what it folds.** A `<details>` head is the first non-empty line or a
+  caller's name for the block; the `<pre>` inside holds every character. Revisit if a
+  recorded failure text ever exceeds what a page can hold at all, which is a `StepRecorder`
+  question, not a dashboard one.
+
 ## 2026-09-04 — One pin mechanism, and workload facts that never see their own game
 
 - **The roster's dated-pin machinery was generalized, not copied.** Selection as-of a date,
