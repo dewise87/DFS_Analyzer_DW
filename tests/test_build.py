@@ -99,17 +99,20 @@ def test_build_then_replay_is_byte_identical_and_commits_run(tmp_path: Path) -> 
     assert replayed.output_bytes == built.replay.output_bytes
 
 
+@pytest.mark.parametrize("site", [DfsSite.DRAFTKINGS, DfsSite.FANDUEL])
 def test_showdown_build_uses_both_ownership_roles_and_replays_identically(
     tmp_path: Path,
+    site: DfsSite,
 ) -> None:
     database = tmp_path / "showdown.sqlite3"
     artifacts = tmp_path / "artifacts"
-    _seed_showdown_database(database)
+    _seed_showdown_database(database, site=site)
+    captain_slot = "CPT" if site is DfsSite.DRAFTKINGS else "MVP"
 
     built = build_decision(
         database,
         slate_id=1,
-        site=DfsSite.DRAFTKINGS,
+        site=site,
         decision_at=DECISION_AT,
         artifact_directory=artifacts,
         contest_archetype=ContestArchetype.SHOWDOWN,
@@ -119,14 +122,15 @@ def test_showdown_build_uses_both_ownership_roles_and_replays_identically(
     assert built.generated_lineups_path.read_bytes() == built.replay.output_bytes
     assert (
         built.generated_lineups_path.read_text(encoding="utf-8").splitlines()[0].split(",")[0]
-        == "CPT"
+        == captain_slot
     )
     assert all(
         player.projected_ownership == pytest.approx(5 / 6)
         and player.projected_ownership_captain == pytest.approx(1 / 6)
         for player in built.request.candidate_player_scenario.players
     )
-    captain = next(player for player in built.lineups[0].players if player.slot == "CPT")
+    assert len(built.lineups[0].players) == 6
+    captain = next(player for player in built.lineups[0].players if player.slot == captain_slot)
     candidate = next(
         player
         for player in built.request.candidate_player_scenario.players
@@ -303,11 +307,20 @@ def _seed_database(database: Path) -> None:
         _seed_candidate_pool(connection, _players())
 
 
-def _seed_showdown_database(database: Path, *, player_count: int = 6) -> None:
+def _seed_showdown_database(
+    database: Path,
+    *,
+    player_count: int = 6,
+    site: DfsSite = DfsSite.DRAFTKINGS,
+) -> None:
     players = _showdown_players(player_count=player_count)
     with connect_database(database) as connection:
         apply_migrations(connection)
         _seed_candidate_pool(connection, players)
+        if site is DfsSite.FANDUEL:
+            connection.execute("UPDATE slates SET site = 'fanduel'")
+            connection.execute("UPDATE projection_snapshots SET site = 'fanduel'")
+            connection.execute('UPDATE salaries SET roster_positions_json = \'["MVP","FLEX"]\'')
         connection.execute(
             "UPDATE slates SET slate_type = 'showdown', name = 'AAA at BBB Showdown' "
             "WHERE slate_id = 1"
@@ -320,7 +333,7 @@ def _seed_showdown_database(database: Path, *, player_count: int = 6) -> None:
                     {
                         "slate_id": 1,
                         "player_id": player.player_id,
-                        "site": "draftkings",
+                        "site": site.value,
                         "role": role,
                         "ownership": ownership,
                         "source_file_sha256": (

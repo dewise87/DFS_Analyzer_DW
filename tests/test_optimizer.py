@@ -124,7 +124,7 @@ def test_generated_lineups_pass_independent_validation_across_randomized_pools(
     ("site", "captain_slot", "roster_size", "salary_multiplier"),
     (
         (DfsSite.DRAFTKINGS, "CPT", 6, 1.5),
-        (DfsSite.FANDUEL, "MVP", 5, 1.0),
+        (DfsSite.FANDUEL, "MVP", 6, 1.5),
     ),
 )
 def test_showdown_build_uses_native_captain_mode_and_site_multipliers(
@@ -485,7 +485,7 @@ def _showdown_request(site: DfsSite) -> OptimizationRequest:
             eligible_roster_slots=("CPT", "FLEX")
             if site is DfsSite.DRAFTKINGS
             else ("MVP", "FLEX"),
-            salary=(6_200 if site is DfsSite.DRAFTKINGS else 9_000) + index * 100,
+            salary=(6_200 if site is DfsSite.DRAFTKINGS else 8_000) + index * 100,
             projection=round(24.0 - index, 4),
             projected_ownership=5 / 6,
             projected_ownership_captain=1 / 6,

@@ -365,6 +365,7 @@ def select_routed_candidate_scenario(
     salary_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     projection_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     availability_artifacts: frozenset[SelectedSourceArtifact] | None = None,
+    ownership_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     pinned: PinnedOwnershipRouting | None = None,
     config: OwnershipModelConfig | None = None,
 ) -> RoutedCandidateSelection:
@@ -387,6 +388,7 @@ def select_routed_candidate_scenario(
         salary_artifacts=salary_artifacts,
         projection_artifacts=projection_artifacts,
         availability_artifacts=availability_artifacts,
+        ownership_artifacts=ownership_artifacts,
     )
     routing = select_ownership_routing(
         session,
@@ -427,6 +429,7 @@ def select_routed_candidate_scenario(
             salary_artifacts=selection.salary_artifacts,
             projection_artifacts=selection.projection_artifacts,
             availability_artifacts=selection.availability_artifacts,
+            ownership_artifacts=selection.ownership_artifacts,
         ),
         routing=routing,
     )

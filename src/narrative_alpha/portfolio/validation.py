@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 
 from narrative_alpha.portfolio.models import (
@@ -9,9 +10,11 @@ from narrative_alpha.portfolio.models import (
     DfsSite,
     Lineup,
     OptimizationRequest,
+    ShowdownSiteRules,
     SlateType,
     ValidationIssue,
     ValidationResult,
+    lineup_sha256,
     site_rules,
 )
 
@@ -23,6 +26,8 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
     rules = site_rules(request.site, request.slate_type)
     if lineup.site is not request.site or lineup.slate_id != request.slate_id:
         errors.append(_issue("wrong_slate", "lineup site/slate does not match request"))
+    if lineup.lineup_id != lineup_sha256(lineup.site, lineup.slate_id, lineup.players):
+        errors.append(_issue("lineup_identity", "lineup ID differs from its roster contents"))
 
     expected_slots = Counter(rules.slots)
     actual_slots = Counter(player.slot for player in lineup.players)
@@ -51,6 +56,42 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
             errors.append(
                 _issue("site_player_id", f"site ID mismatch for player {candidate.player_id}")
             )
+        if candidate.is_injured:
+            errors.append(_issue("unavailable_player", f"{candidate.name} is unavailable"))
+        for field in ("team", "opponent", "position", "game_id"):
+            if getattr(lineup_player, field) != getattr(candidate, field):
+                errors.append(
+                    _issue("candidate_metadata", f"{candidate.name} {field} differs from scenario")
+                )
+        salary_multiplier = 1.0
+        points_multiplier = 1.0
+        if isinstance(rules, ShowdownSiteRules) and lineup_player.slot == rules.captain_slot:
+            salary_multiplier = rules.captain_salary_multiplier
+            points_multiplier = rules.captain_points_multiplier
+        if lineup_player.salary != round(candidate.salary * salary_multiplier):
+            errors.append(_issue("player_salary", f"{candidate.name} salary differs from scenario"))
+        # The fast lane intentionally retains historical estimates on pinned rows.
+        # New rows must use the current scenario's points and ownership verbatim.
+        if lineup not in request.pinned_lineups:
+            if not math.isclose(
+                lineup_player.projection,
+                round(candidate.projection * points_multiplier, 6),
+                rel_tol=0,
+                abs_tol=1e-6,
+            ):
+                errors.append(
+                    _issue(
+                        "player_projection", f"{candidate.name} projection differs from scenario"
+                    )
+                )
+            if (
+                lineup_player.projected_ownership != candidate.projected_ownership
+                or lineup_player.projected_ownership_captain
+                != candidate.projected_ownership_captain
+            ):
+                errors.append(
+                    _issue("player_ownership", f"{candidate.name} ownership differs from scenario")
+                )
         if not eligible_for_slot(candidate, lineup_player.slot, request.site, request.slate_type):
             errors.append(
                 _issue(
@@ -60,24 +101,36 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
                 )
             )
 
-    if lineup.total_salary > request.salary_cap:
+    actual_salary = sum(player.salary for player in lineup.players)
+    if lineup.total_salary != actual_salary:
+        errors.append(_issue("salary_total", "lineup total differs from player salaries"))
+    if not math.isclose(
+        lineup.total_projection,
+        round(sum(player.projection for player in lineup.players), 6),
+        rel_tol=0,
+        abs_tol=1e-6,
+    ):
+        errors.append(_issue("projection_total", "lineup total differs from player projections"))
+    salary_cap = min(request.salary_cap, rules.default_salary_cap)
+    if actual_salary > salary_cap:
         errors.append(
             _issue(
                 "salary_cap",
-                f"salary {lineup.total_salary} exceeds cap {request.salary_cap}",
+                f"salary {actual_salary} exceeds cap {salary_cap}",
             )
         )
 
     team_counts = Counter(player.team for player in lineup.players)
-    max_team = request.max_players_per_team or rules.default_max_players_per_team
+    maxima = (request.max_players_per_team, rules.default_max_players_per_team)
+    max_team = min((value for value in maxima if value is not None), default=None)
     if max_team is not None and team_counts and max(team_counts.values()) > max_team:
         errors.append(
             _issue("max_team", f"lineup exceeds maximum {max_team} players from one team")
         )
-    min_teams = request.min_teams or rules.default_min_teams
+    min_teams = max(request.min_teams or 0, rules.default_min_teams or 0)
     if min_teams is not None and len(team_counts) < min_teams:
         errors.append(_issue("min_teams", f"lineup uses fewer than {min_teams} teams"))
-    min_games = request.min_games or rules.default_min_games
+    min_games = max(request.min_games or 0, rules.default_min_games or 0)
     if min_games is not None and len({player.game_id for player in lineup.players}) < min_games:
         errors.append(_issue("min_games", f"lineup uses fewer than {min_games} games"))
 
@@ -92,8 +145,10 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
             errors.append(_issue("ownership_missing", "ownership bound requires every player"))
         else:
             total = sum(value for value in ownership if value is not None)
-            if not (
-                request.ownership_sum_range.minimum <= total <= request.ownership_sum_range.maximum
+            if not math.isfinite(total) or not (
+                request.ownership_sum_range.minimum - 1e-9
+                <= total
+                <= request.ownership_sum_range.maximum + 1e-9
             ):
                 errors.append(
                     _issue(
@@ -108,7 +163,20 @@ def validate_portfolio(
     lineups: tuple[Lineup, ...], request: OptimizationRequest
 ) -> ValidationResult:
     errors: list[ValidationIssue] = []
+    if len(lineups) != request.number_of_lineups:
+        errors.append(
+            _issue(
+                "lineup_count", f"expected {request.number_of_lineups} lineups, got {len(lineups)}"
+            )
+        )
+    if lineups[: len(request.pinned_lineups)] != request.pinned_lineups:
+        errors.append(
+            _issue("pinned_lineups", "pinned lineups must be returned verbatim and first")
+        )
+    excluded = {frozenset(ids) for ids in request.excluded_lineup_player_ids}
     for index, lineup in enumerate(lineups, start=1):
+        if frozenset(player.player_id for player in lineup.players) in excluded:
+            errors.append(_issue("excluded_lineup", f"lineup {index} was explicitly excluded"))
         result = validate_lineup(lineup, request)
         errors.extend(
             _issue(f"lineup_{index}_{issue.code}", issue.message) for issue in result.errors

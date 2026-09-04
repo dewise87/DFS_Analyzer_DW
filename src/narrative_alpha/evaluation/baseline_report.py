@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from narrative_alpha.ingest.availability import inactive_salary_status as _inactive_salary_status
 from narrative_alpha.ingest.nflverse_stats import WORKLOAD_STATS_SOURCE
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.quant.distributions import PlayerOutcomeDistribution
@@ -52,7 +53,6 @@ POPULATION_DEFINITION: Literal["exact_manifest_bound_point_in_time_salary_pool"]
     "exact_manifest_bound_point_in_time_salary_pool"
 )
 
-_INACTIVE_SALARY_STATUSES = frozenset({"O", "OUT", "INACTIVE", "IR", "PUP", "SUSPENDED"})
 _INACTIVE_RESULT_STATUSES = frozenset({"OUT", "INACTIVE", "DNP", "DID_NOT_PLAY", "NOT_ACTIVE"})
 
 
@@ -1343,13 +1343,6 @@ def _explicit_activity(raw: object) -> bool | None:
     if len(signals) > 1:
         raise BaselineReportError("result stat_line_json contains conflicting activity signals")
     return next(iter(signals)) if signals else None
-
-
-def _inactive_salary_status(value: str | None) -> bool:
-    if value is None:
-        return False
-    normalized = value.strip().upper().replace(" ", "_")
-    return normalized in _INACTIVE_SALARY_STATUSES
 
 
 def _position(value: object) -> str:

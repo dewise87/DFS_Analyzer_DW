@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 from test_build import (
     DATA_AT,
-    DECISION_AT,
     _players,
     _seed_database,
     _seed_showdown_database,
     _showdown_players,
+)
+from test_build import (
+    DECISION_AT as BASE_DECISION_AT,
 )
 from test_extraction import (
     PRICING_PATH,
@@ -36,6 +38,9 @@ from narrative_alpha.portfolio import PydfsAdapter
 from narrative_alpha.replay import read_frozen_decision, replay_decision
 from narrative_alpha.store import apply_migrations, connect_database
 
+# Leave time for both news waves before the fixture's 17:00 slate lock.
+DECISION_AT = BASE_DECISION_AT - timedelta(minutes=30)
+
 
 def test_rules_refuse_expired_unsigned_and_unknown_fields(tmp_path: Path) -> None:
     expired = tmp_path / "expired.yaml"
@@ -52,6 +57,25 @@ def test_rules_refuse_expired_unsigned_and_unknown_fields(tmp_path: Path) -> Non
     unknown.write_text(_rules_yaml() + "surprise: true\n", encoding="utf-8")
     with pytest.raises(FastLaneRuleError, match="surprise"):
         load_fast_lane_rules(unknown, at=DECISION_AT)
+
+
+def test_inactives_refuse_at_lock_before_recording_availability(tmp_path: Path) -> None:
+    database = tmp_path / "locked.sqlite3"
+    _seed_fast_build(database)
+    with pytest.raises(FastInactivesError, match="cannot replace locked lineups"):
+        process_official_inactives(
+            database,
+            season=2026,
+            week=1,
+            site="dk",
+            snapshot_root=tmp_path / "snapshots",
+            text="AAA: QB Player 1",
+            artifact_directory=tmp_path / "artifacts",
+            now=BASE_DECISION_AT + timedelta(minutes=5),
+        )
+    with connect_database(database) as connection:
+        assert connection.execute("SELECT count(*) FROM player_availability").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM decision_snapshots").fetchone()[0] == 0
 
 
 def test_inactives_refreeze_only_affected_lineups_and_replay_byte_identically(

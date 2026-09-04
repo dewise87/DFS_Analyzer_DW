@@ -53,6 +53,7 @@ from narrative_alpha.portfolio import (
     load_contest_policies,
     policy_request_fields,
     site_rules,
+    validate_portfolio,
 )
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -119,6 +120,12 @@ class BuildArtifactError(BuildError):
     """Raised when immutable decision artifacts cannot be written."""
 
     code = "artifact_write_failed"
+
+
+class BuildValidationError(BuildError):
+    """Raised before exporting output that violates the frozen request or site rules."""
+
+    code = "invalid_optimizer_output"
 
 
 class BuildSelfVerificationError(BuildError):
@@ -323,6 +330,11 @@ def _build_in_transaction(
         raise BuildInputError(
             f"slate {slate_id} belongs to {slate.site!r}, not requested site {site.value!r}"
         )
+    if decision_at >= slate.locks_at:
+        raise BuildInputError(
+            f"decision_at must precede slate lock {utc_timestamp(slate.locks_at)}; "
+            "full-slate builds do not support late swap. Use na-replay to inspect a frozen decision"
+        )
 
     # The existing crosswalk guard is intentionally fail-closed. Until unresolved rows
     # carry a slate key, its site scope is stricter than the active slate and cannot allow
@@ -387,6 +399,9 @@ def _build_in_transaction(
         )
 
     lineups = adapter.build_lineups(request)
+    validation = validate_portfolio(lineups, request)
+    if not validation.valid:
+        raise BuildValidationError("; ".join(issue.message for issue in validation.errors))
     upload_bytes = adapter.export_upload_csv(lineups, request.site, request.upload_entries)
     upload_sha256 = _sha256(upload_bytes)
 
@@ -563,6 +578,11 @@ def _scenario_id(
             {"sha256": artifact.sha256, "source": artifact.source}
             for artifact in selected.availability_artifacts
         ]
+    if selected.ownership_artifacts:
+        payload["ownership_artifacts"] = [
+            {"sha256": artifact.sha256, "source": artifact.source}
+            for artifact in selected.ownership_artifacts
+        ]
     if routing.applied:
         payload["ownership_scenario_set"] = {
             "run_id": routing.scenario_run_id,
@@ -591,6 +611,9 @@ def _decision_manifest(
     availability = tuple(
         _source_manifest_item("availability", artifact)
         for artifact in selected.availability_artifacts
+    )
+    ownership = tuple(
+        _source_manifest_item("ownership", artifact) for artifact in selected.ownership_artifacts
     )
     scenarios = (
         ()
@@ -639,7 +662,7 @@ def _decision_manifest(
             source="narrative-alpha",
         ),
     )
-    return (*salary, *projections, *availability, *scenarios, *generated)
+    return (*salary, *projections, *availability, *ownership, *scenarios, *generated)
 
 
 def _source_manifest_item(

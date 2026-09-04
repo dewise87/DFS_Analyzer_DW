@@ -70,15 +70,17 @@ SHOWDOWN_SITE_RULES = {
         captain_salary_multiplier=1.5,
     ),
     DfsSite.FANDUEL: ShowdownSiteRules(
-        slots=("MVP", "FLEX", "FLEX", "FLEX", "FLEX"),
+        # FanDuel replaced its five-player format in 2025. See the dated rule
+        # references in docs/REPOSITORY_REVIEW.md; pydfs 3.6.1 predates this change.
+        slots=("MVP", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"),
         default_salary_cap=60_000,
-        default_max_players_per_team=4,
+        default_max_players_per_team=5,
         default_min_teams=2,
         default_min_games=None,
         captain_slot="MVP",
         flex_slot="FLEX",
         captain_points_multiplier=1.5,
-        captain_salary_multiplier=1.0,
+        captain_salary_multiplier=1.5,
     ),
 }
 
@@ -100,7 +102,7 @@ class ContestArchetype(StrEnum):
 class CandidatePlayer(BaseModel):
     """One canonical player in an optimizer scenario."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     player_id: int
     site_player_id: str
@@ -138,7 +140,10 @@ class CandidatePlayer(BaseModel):
     @field_validator("eligible_roster_slots")
     @classmethod
     def normalize_slots(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(slot.strip().upper() for slot in value if slot.strip()))
+        normalized = tuple(dict.fromkeys(slot.strip().upper() for slot in value if slot.strip()))
+        if not normalized:
+            raise ValueError("eligible_roster_slots must contain a non-empty slot")
+        return normalized
 
     @field_validator("game_start")
     @classmethod
@@ -157,7 +162,7 @@ class CandidatePlayer(BaseModel):
 
 
 class CandidatePlayerScenario(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     scenario_id: str
     players: tuple[CandidatePlayer, ...] = Field(min_length=5)
@@ -183,7 +188,7 @@ class CandidatePlayerScenario(BaseModel):
 
 
 class StackRule(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     positions: tuple[str, ...] = Field(min_length=1)
     count: int = Field(ge=1)
@@ -199,7 +204,7 @@ class StackRule(BaseModel):
 
 
 class BringBackRule(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     stack_positions: tuple[str, ...] = Field(min_length=1)
     opponent_positions: tuple[str, ...] = Field(min_length=1)
@@ -207,7 +212,7 @@ class BringBackRule(BaseModel):
 
 
 class ExposureLimit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     key: str
     minimum: float = Field(default=0, ge=0, le=1)
@@ -229,7 +234,7 @@ class ExposureLimit(BaseModel):
 
 
 class PlayerExposureRange(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     player_id: int
     minimum: float = Field(default=0, ge=0, le=1)
@@ -243,7 +248,7 @@ class PlayerExposureRange(BaseModel):
 
 
 class NumericRange(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     minimum: float = Field(ge=0)
     maximum: float = Field(ge=0)
@@ -258,7 +263,7 @@ class NumericRange(BaseModel):
 class UploadEntry(BaseModel):
     """Reserved-entry metadata copied from a site's upload template."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     entry_id: str
     contest_id: str
@@ -277,7 +282,7 @@ class UploadEntry(BaseModel):
 class OptimizationRequest(BaseModel):
     """The complete section 6.5 request, including unsupported Phase 0 controls."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     site: DfsSite
     slate_id: int
@@ -340,6 +345,8 @@ class OptimizationRequest(BaseModel):
             raise ValueError("upload_entries must have exactly one row per requested lineup")
         rules = site_rules(self.site, self.slate_type)
         roster_size = len(rules.slots)
+        if self.lineup_uniqueness > roster_size:
+            raise ValueError("lineup_uniqueness cannot exceed the slate roster size")
         if len(scenario_ids) < roster_size:
             raise ValueError(
                 f"candidate scenario must contain at least {roster_size} players for "
@@ -380,7 +387,7 @@ class OptimizationRequest(BaseModel):
 
 
 class LineupPlayer(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     slot: str
     player_id: int
@@ -407,7 +414,7 @@ class LineupPlayer(BaseModel):
 
 
 class Lineup(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     lineup_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     site: DfsSite
@@ -454,14 +461,14 @@ def _lineup_uniqueness_key(lineup: Lineup, slate_type: SlateType) -> tuple[objec
 
 
 class ValidationIssue(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     code: str
     message: str
 
 
 class ValidationResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     valid: bool
     errors: tuple[ValidationIssue, ...] = ()

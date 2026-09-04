@@ -2,6 +2,32 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Repository review: enforce the decision contract independently
+
+- **Current site rules belong to this project, not the legacy optimizer package.** FanDuel
+  Single Game uses six players and 1.5× MVP salary/points. The adapter owns the replacement
+  settings; classic behavior is unchanged. Review the dated primary references and live
+  acceptance requirements in [REPOSITORY_REVIEW.md](REPOSITORY_REVIEW.md).
+- **Dedicated ownership captures are decision inputs.** New classic builds use the latest
+  eligible dedicated baseline per player, with embedded ownership as the per-player fallback.
+  Both classic and showdown freeze consumed ownership source/hash pairs. Legacy classic
+  replay with no ownership artifacts continues to use its embedded ownership. Revisit source
+  precedence after evaluating real vendor cohorts; never silently change a frozen decision.
+- **Observation and ingestion both bound decision availability.** Salaries, projections,
+  availability facts, slates, and joined identities/games must exist by the cutoff. Backfilled
+  database inputs do not become historical decision inputs merely because they were captured
+  earlier. Salary-feed inactive labels also reach candidate eligibility, using the same
+  interpretation as outcome accounting and yielding to explicit official availability.
+- **Replayable bytes are insufficient evidence of legality.** Build, replay, and frozen reads
+  enforce independent portfolio validation. The validator checks values against candidates,
+  site constraints, requested count, unavailable players, exclusions, and pinned rows. Pinned
+  estimates remain historical by the existing fast-lane contract; new estimates must match
+  the current scenario. The added checks must also apply to future optimizer adapters.
+- **Full-slate builds stop at lock.** The fast lane also refuses locked replacements before
+  recording availability. Revisit only when late swap preserves every locked player and slot;
+  do not treat a full rebuild as late swap. Tests now place their news/scenario updates before
+  the fixture's lock instead of depending on the old missing guard.
+
 ## 2026-09-04 — Slice 45 review outcomes: the dashboard is a document, sized by the reader
 
 - **The dashboard's design pass added no behavior and is held to that.** One inline

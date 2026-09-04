@@ -63,7 +63,7 @@ HEAT_CONFIG_PATH = Path("config/heat.toml")
 
 ITEM_AT = DATA_AT + timedelta(hours=1)
 EXTRACTED_AT = DATA_AT + timedelta(hours=2)
-FIRST_DECISION_AT = datetime(2026, 9, 13, 16, 55, tzinfo=UTC)
+FIRST_DECISION_AT = datetime(2026, 9, 13, 16, 25, tzinfo=UTC)
 SCENARIOS_AT = FIRST_DECISION_AT + timedelta(minutes=1)
 SECOND_DECISION_AT = FIRST_DECISION_AT + timedelta(minutes=15)
 

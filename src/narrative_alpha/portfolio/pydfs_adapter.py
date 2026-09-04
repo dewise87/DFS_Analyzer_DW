@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from pydfs_lineup_optimizer import (  # type: ignore[import-untyped]
+    LineupOptimizer,
     LineupOptimizerException,
     Player,
     Site,
@@ -15,6 +16,10 @@ from pydfs_lineup_optimizer import (  # type: ignore[import-untyped]
     get_optimizer,
 )
 from pydfs_lineup_optimizer.player import GameInfo  # type: ignore[import-untyped]
+from pydfs_lineup_optimizer.settings import (  # type: ignore[import-untyped]
+    BaseSettings,
+    LineupPosition,
+)
 
 from narrative_alpha.portfolio.adapter import (
     OptimizerError,
@@ -61,7 +66,7 @@ class PydfsAdapter:
         # Every pydfs interaction stays inside this boundary so callers only ever
         # see the adapter's own error type, never a raw LineupOptimizerException.
         try:
-            optimizer = get_optimizer(_pydfs_site(request.site, request.slate_type), Sport.FOOTBALL)
+            optimizer = _new_optimizer(request)
             optimizer.settings.budget = request.salary_cap
             if request.max_players_per_team is not None:
                 optimizer.settings.max_from_one_team = request.max_players_per_team
@@ -412,7 +417,7 @@ def _ownership_optimizer(
 ) -> tuple[Any, dict[str, CandidatePlayer]]:
     """Build the one-lineup solver used only to characterize ownership feasibility."""
 
-    optimizer = get_optimizer(_pydfs_site(request.site, request.slate_type), Sport.FOOTBALL)
+    optimizer = _new_optimizer(request)
     optimizer.settings.budget = request.salary_cap
     if request.max_players_per_team is not None:
         optimizer.settings.max_from_one_team = request.max_players_per_team
@@ -517,6 +522,24 @@ def _pydfs_site(site: DfsSite, slate_type: SlateType) -> str:
     return cast(str, value)
 
 
+class _FanDuelSingleGameSettings(BaseSettings):  # type: ignore[misc]
+    """Current six-player format, isolated from the dependency's legacy rules."""
+
+    site = Site.FANDUEL_SINGLE_GAME
+    sport = Sport.FOOTBALL
+    budget = SHOWDOWN_SITE_RULES[DfsSite.FANDUEL].default_salary_cap
+    max_from_one_team = SHOWDOWN_SITE_RULES[DfsSite.FANDUEL].default_max_players_per_team
+    positions: ClassVar[list[Any]] = [
+        LineupPosition(slot, (slot,)) for slot in SHOWDOWN_SITE_RULES[DfsSite.FANDUEL].slots
+    ]
+
+
+def _new_optimizer(request: OptimizationRequest) -> Any:
+    if request.site is DfsSite.FANDUEL and request.slate_type is SlateType.SHOWDOWN:
+        return LineupOptimizer(_FanDuelSingleGameSettings)
+    return get_optimizer(_pydfs_site(request.site, request.slate_type), Sport.FOOTBALL)
+
+
 def _pydfs_position(player: CandidatePlayer, site: DfsSite) -> str:
     if site is DfsSite.FANDUEL and player.position in {"DEF", "DST"}:
         return "D"
@@ -589,11 +612,7 @@ def _pydfs_player_variants(
                 player_id=candidate.site_player_id,
                 first_name=first_name,
                 last_name=last_name,
-                positions=(
-                    ["FLEX"]
-                    if request.site is DfsSite.DRAFTKINGS
-                    else [_pydfs_position(candidate, request.site)]
-                ),
+                positions=["FLEX"],
                 team=candidate.team,
                 salary=candidate.salary,
                 fppg=flex_projection,

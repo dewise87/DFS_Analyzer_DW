@@ -7,6 +7,13 @@
 **Status:** DRAFT — reconciled; ready for build planning  
 **Scope:** NFL daily fantasy on DraftKings and FanDuel, classic and showdown slates. Components should be reusable for NBA and MLB where the data-generating process permits.
 
+**Implementation review, 2026-09-05:** This document describes the target architecture.
+[The repository review](../REPOSITORY_REVIEW.md) records current implementation boundaries,
+correctness fixes, current site-rule references, and the remaining live-data acceptance gates.
+In particular, the implemented optimizer maximizes projections under contest policies;
+after-fee expected utility remains a target, and simulation remains experimental. FanDuel's
+current Single Game roster is six players, with 1.5× MVP salary and points.
+
 ### What changed in v0.2
 
 1. Reframed the objective from finding “best plays” to maximizing after-fee expected utility for a defined contest portfolio.

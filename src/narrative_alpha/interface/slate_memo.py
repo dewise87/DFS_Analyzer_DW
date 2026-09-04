@@ -607,6 +607,7 @@ def _validate_build_result(
 
     salary_artifacts = _source_artifacts(build_result.snapshot, "salary")
     projection_artifacts = _source_artifacts(build_result.snapshot, "projection")
+    ownership_artifacts = _source_artifacts(build_result.snapshot, "ownership", required=False)
     availability_artifacts = frozenset(
         SelectedSourceArtifact(sha256=item.sha256, source=item.source or "")
         for item in build_result.snapshot.manifest_hashes_json
@@ -619,6 +620,11 @@ def _validate_build_result(
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
             availability_artifacts=availability_artifacts,
+            ownership_artifacts=(
+                None
+                if not ownership_artifacts and slate.slate_type == "showdown"
+                else ownership_artifacts
+            ),
             slate_type=slate.slate_type,
             contest_archetype=request.contest_archetype.value,
             ownership_routing=pinned_routing_from_manifest(
@@ -644,6 +650,8 @@ def _validate_build_result(
         raise SlateMemoError("not every salary manifest source/hash pair contributed memo rows")
     if frozenset(selected.projection_artifacts) != projection_artifacts:
         raise SlateMemoError("not every projection manifest source/hash pair contributed memo rows")
+    if ownership_artifacts and frozenset(selected.ownership_artifacts) != ownership_artifacts:
+        raise SlateMemoError("not every ownership manifest source/hash pair contributed memo rows")
     scenario = request.candidate_player_scenario
     if selected.players != scenario.players:
         raise SlateMemoError(
@@ -899,7 +907,9 @@ def _memo_lineup(lineup: Lineup) -> SlateMemoLineup:
 
 def _source_artifacts(
     snapshot: DecisionSnapshotRow,
-    artifact_kind: Literal["salary", "projection"],
+    artifact_kind: Literal["salary", "projection", "ownership"],
+    *,
+    required: bool = True,
 ) -> frozenset[SelectedSourceArtifact]:
     missing_sources = tuple(
         item.sha256
@@ -916,6 +926,6 @@ def _source_artifacts(
         for item in snapshot.manifest_hashes_json
         if item.artifact_kind == artifact_kind
     )
-    if not artifacts:
+    if required and not artifacts:
         raise ReplayArtifactError(f"decision manifest has no {artifact_kind} artifacts")
     return artifacts

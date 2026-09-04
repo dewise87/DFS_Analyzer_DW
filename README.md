@@ -2,7 +2,7 @@
 
 An NFL DFS decision engine for context, field behavior, and uncertainty. DraftKings and FanDuel, classic and showdown slates.
 
-**Status:** Phase −1 (perishable-data capture). Season one is an instrumentation season — the primary output is a clean, point-in-time labeled dataset and a graded source ledger.
+**Status:** The capture, ingest, decision/replay, operations, ownership, grading, and shadow-simulation layers are implemented. Live vendor integration and site-upload acceptance remain release gates. Season one is an instrumentation season — the primary output is a clean, point-in-time labeled dataset and a graded source ledger. See the [repository and architecture review](docs/REPOSITORY_REVIEW.md) for verified behavior and remaining priorities.
 
 The full specification lives in [docs/design/narrative-alpha-design-doc-v0_3.md](docs/design/narrative-alpha-design-doc-v0_3.md). The build plan, work slices, and per-slice prompts live in [docs/WORK_SLICES.md](docs/WORK_SLICES.md). Standing technical decisions are logged in [docs/DECISIONS.md](docs/DECISIONS.md).
 
@@ -108,8 +108,9 @@ Tuesday's steps, the reviewed nflverse workload pin with its age, and the
 per-week/site/archetype label counts that gate the first ownership model. It answers "did this
 week run, and what do I need to do by hand" without any other command.
 
-After three real labeled weeks exist for one site/archetype cohort, the ownership layer is
-operated explicitly and remains disconnected from `na-build` until Slice 30:
+After three real labeled weeks exist for one site/archetype cohort, operate the ownership
+layer explicitly. `na-build` applies eligible scenario sets through the Stage 4 governance
+gates; without an eligible set it retains the vendor baseline:
 
 ```bash
 uv run na-ownership fit --archetype single_entry --site dk
@@ -164,9 +165,10 @@ Showdown slates use the same command and fast-inactives workflow. The lane selec
 showdown contest policy from the ingested slate, reads separate captain and flex ownership
 baselines as of the decision, and writes the site's captain-first upload template. DraftKings
 uses one CPT at 1.5× salary and points plus five FLEX slots; FanDuel uses one MVP at 1.5×
-points and unchanged salary plus four FLEX slots. A DraftKings salary export that lists one
-player on separate CPT and FLEX rows is validated and stored as one base player with both
-roles.
+salary and points plus five FLEX slots (the format introduced in 2025). Supported DraftKings
+exports with the same site ID on separate CPT and FLEX rows are validated and stored as one
+base player with both roles. Native exports with distinct role IDs still need the storage
+and export changes described in the [review](docs/REPOSITORY_REVIEW.md).
 
 After distributions and a contest payout curve have been captured, run the shadow simulator
 against the frozen decision (it never changes that decision or calls the lineup optimizer):
@@ -520,9 +522,17 @@ format guessing or silent fallback is allowed.
 ## Lineup generation and upload
 
 `OptimizationRequest` is solver-independent and carries every design-doc §6.5 control. The Phase
-0 `PydfsAdapter` explicitly rejects controls it cannot honor, and its output is checked again by
-the independent `validate_lineup` implementation before export. DraftKings and FanDuel classic
-uploads support reserved-entry metadata and render deterministic UTF-8 CSV bytes.
+0 `PydfsAdapter` explicitly rejects controls it cannot honor. Build, replay, and frozen-decision
+reads independently validate the whole portfolio, including salaries against candidates,
+availability, site limits, requested count, exclusions, and pinned lineups. Classic and
+showdown uploads support reserved-entry metadata and render deterministic UTF-8 CSV bytes.
+
+Dedicated ownership captures take precedence over ownership embedded in projection files;
+their source/hash pairs are frozen with the decision. Where a dedicated classic baseline is
+absent, the blend uses the available embedded ownership. Every selected input must have been
+observed and ingested by the cutoff. Explicit salary-feed inactive labels exclude players
+unless an official availability decision overrides them. Full-slate builds and fast-inactive
+replacements refuse at or after slate lock; late swap is not implemented.
 
 Before treating site compatibility as accepted, complete
 [the manual upload checklist](docs/manual-lineup-upload-checklist.md) once on each site. Automated

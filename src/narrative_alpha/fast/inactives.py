@@ -213,6 +213,11 @@ def process_official_inactives(
     with connect_database(database) as connection:
         apply_migrations(connection)
         slate = _one_slate(connection, season=season, week=week, site=typed_site)
+        if observed_at >= slate.locks_at:
+            raise FastInactivesError(
+                f"slate {slate.slate_id} locked at {utc_timestamp(slate.locks_at)}; "
+                "the fast lane cannot replace locked lineups"
+            )
         base = _latest_decision(
             connection,
             slate=slate,

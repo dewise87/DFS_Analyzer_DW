@@ -1,5 +1,9 @@
 # Work Slices
 
+**Current review:** [2026-09-05 repository assessment](REPOSITORY_REVIEW.md). It supersedes
+the obsolete five-player FanDuel assumptions in Slice 44 and distinguishes fixture coverage
+from native vendor/site acceptance. Historical slice prompts below are retained as history.
+
 The build plan, cut into PR-sized slices. Each slice has: goal, design-doc references, a
 ready-to-paste prompt for the executing model, and a model recommendation for both Claude
 and ChatGPT.

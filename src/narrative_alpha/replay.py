@@ -52,6 +52,7 @@ from narrative_alpha.portfolio import (
     load_contest_policies_bytes,
     policy_request_fields,
     site_rules,
+    validate_portfolio,
 )
 from narrative_alpha.store import DecisionManifestHash, DecisionSnapshotRow, SlateRow
 
@@ -156,6 +157,7 @@ class PointInTimeSession:
             FROM slates
             WHERE slate_id = :slate_id
               AND rtrim(observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(ingested_at, 'Z') <= rtrim(:as_of, 'Z')
               AND rtrim(valid_from, 'Z') <= rtrim(:as_of, 'Z')
               AND (
                   valid_to IS NULL
@@ -178,6 +180,7 @@ class PointInTimeSession:
         projection_artifacts: frozenset[SelectedSourceArtifact],
         as_of: datetime | None,
         availability_artifacts: frozenset[SelectedSourceArtifact] = frozenset(),
+        ownership_artifacts: frozenset[SelectedSourceArtifact] | None = frozenset(),
         slate_type: str = "classic",
         contest_archetype: str = ContestArchetype.CASH.value,
         ownership_routing: PinnedOwnershipRouting = NO_PINNED_ROUTING,
@@ -203,6 +206,7 @@ class PointInTimeSession:
                 salary_artifacts=salary_artifacts,
                 projection_artifacts=projection_artifacts,
                 availability_artifacts=availability_artifacts,
+                ownership_artifacts=ownership_artifacts,
                 as_of=_require_as_of(as_of),
                 pinned=ownership_routing,
                 config=ownership_config,
@@ -232,6 +236,7 @@ def replay_decision(
     salary_artifacts = _source_artifacts(snapshot, "salary")
     projection_artifacts = _source_artifacts(snapshot, "projection")
     availability_artifacts = _source_artifacts(snapshot, "availability", required=False)
+    ownership_artifacts = _source_artifacts(snapshot, "ownership", required=False)
     contest_policy = _contest_policy(snapshot, artifact_root)
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
@@ -261,6 +266,13 @@ def replay_decision(
             salary_artifacts=salary_artifacts,
             projection_artifacts=projection_artifacts,
             availability_artifacts=availability_artifacts,
+            # Legacy showdown decisions read dedicated baselines without manifest
+            # entries; retain that read plus the exact candidate-value check below.
+            ownership_artifacts=(
+                None
+                if not ownership_artifacts and slate.slate_type == "showdown"
+                else ownership_artifacts
+            ),
             as_of=cutoff,
             pinned=pinned_routing,
             config=frozen_config,
@@ -282,6 +294,10 @@ def replay_decision(
     if frozenset(rebuilt.availability_artifacts) != availability_artifacts:
         raise ReplayArtifactError(
             "not every availability manifest source/hash pair contributed replay rows"
+        )
+    if ownership_artifacts and frozenset(rebuilt.ownership_artifacts) != ownership_artifacts:
+        raise ReplayArtifactError(
+            "not every ownership manifest source/hash pair contributed replay rows"
         )
     original_scenario = original_request.candidate_player_scenario
     if rebuilt.players != original_scenario.players:
@@ -316,6 +332,7 @@ def replay_decision(
         update={"candidate_player_scenario": scenario, **policy_fields.as_update()}
     )
     lineups = adapter.build_lineups(request)
+    _require_valid_portfolio(lineups, request)
     output = adapter.export_upload_csv(lineups, request.site, request.upload_entries)
     actual_hash = hashlib.sha256(output).hexdigest()
     report = ReplayReport(
@@ -378,6 +395,13 @@ def read_frozen_decision(
         request = OptimizationRequest.model_validate_json(request_bytes)
     except ValidationError as error:
         raise ReplayArtifactError(f"frozen optimizer request is not valid: {error}") from error
+    slate = session.slate(snapshot.slate_id, as_of=cutoff)
+    if (
+        request.slate_id != snapshot.slate_id
+        or request.site.value != slate.site
+        or request.slate_type.value != slate.slate_type
+    ):
+        raise ReplayArtifactError("frozen optimizer request does not match the decision slate")
     try:
         policy_fields = policy_request_fields(
             contest_policy,
@@ -393,6 +417,7 @@ def read_frozen_decision(
                 f"{contest_policy.policy_version!r}"
             )
     lineups = _lineups_from_upload(request, upload_bytes)
+    _require_valid_portfolio(lineups, request)
     try:
         rendered = export_upload_csv(lineups, request.site, request.upload_entries)
     except Exception as error:  # the export raises its own adapter error type
@@ -490,6 +515,15 @@ def _lineups_from_upload(request: OptimizationRequest, upload_bytes: bytes) -> t
             )
         )
     return tuple(lineups)
+
+
+def _require_valid_portfolio(lineups: tuple[Lineup, ...], request: OptimizationRequest) -> None:
+    validation = validate_portfolio(lineups, request)
+    if not validation.valid:
+        raise ReplayArtifactError(
+            "independent lineup validation failed: "
+            + "; ".join(issue.message for issue in validation.errors)
+        )
 
 
 def _site_player_id(cell: str, site: DfsSite) -> str:
