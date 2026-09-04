@@ -13,6 +13,12 @@ from pathlib import Path
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
 from narrative_alpha.ingest.slates import SlateIngestError
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.ops.backup import (
+    DEFAULT_BACKUP_DIRECTORY,
+    BackupError,
+    create_backup,
+    restore_backup,
+)
 from narrative_alpha.ops.batch import (
     DEFAULT_DEPENDENCIES,
     BatchDependencies,
@@ -34,6 +40,7 @@ from narrative_alpha.ops.dashboard import (
     build_dashboard,
     serve_dashboard,
 )
+from narrative_alpha.ops.doctor import collect_doctor, render_doctor
 from narrative_alpha.ops.results import (
     DEFAULT_RESULTS_DEPENDENCIES,
     ResultsDependencies,
@@ -222,6 +229,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REPORT_DIRECTORY,
         help="directory containing monthly reports (default: data/reports)",
     )
+    status.add_argument(
+        "--backup-directory",
+        type=Path,
+        default=DEFAULT_BACKUP_DIRECTORY,
+    )
+
+    doctor = commands.add_parser("doctor", help="read-only preflight of every live-week dependency")
+    doctor.add_argument("--repository", type=Path, default=Path.cwd())
+    doctor.add_argument("--home", type=Path)
+    doctor.add_argument("--executable", type=Path)
+    doctor.add_argument("--artifact-directory", type=Path, default=DEFAULT_ARTIFACT_DIRECTORY)
+    doctor.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+    doctor.add_argument("--snapshot-directory", type=Path)
+    doctor.add_argument("--backup-directory", type=Path, default=DEFAULT_BACKUP_DIRECTORY)
+    doctor.add_argument("--port", type=_port, default=DEFAULT_PORT)
+
+    backup = commands.add_parser("backup", help="create and verify a UTC-stamped backup generation")
+    backup.add_argument("--artifact-directory", type=Path, default=DEFAULT_ARTIFACT_DIRECTORY)
+    backup.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+    backup.add_argument("--backup-directory", type=Path, default=DEFAULT_BACKUP_DIRECTORY)
+    backup.add_argument(
+        "--include-snapshots",
+        action="store_true",
+        help="include immutable snapshot captures (excluded by default)",
+    )
+    backup.add_argument(
+        "--keep-newest",
+        type=_positive_int,
+        help="override backup.keep_newest from the operator config",
+    )
+
+    restore = commands.add_parser("restore", help="verify and restore one backup out of place")
+    restore.add_argument("--backup", required=True, help="UTC generation stamp")
+    restore.add_argument("--into", type=Path, required=True)
+    restore.add_argument("--backup-directory", type=Path, default=DEFAULT_BACKUP_DIRECTORY)
 
     schedule = commands.add_parser("schedule", help="manage the macOS launchd user agents")
     schedule.add_argument("action", choices=("install", "show", "uninstall"))
@@ -260,6 +302,16 @@ def main(
     arguments = build_parser().parse_args(argv)
     try:
         config = load_ops_config(arguments.config)
+    except OpsConfigError as error:
+        if arguments.command == "doctor":
+            print("NARRATIVE ALPHA — DOCTOR (read-only)")
+            print(
+                f"FAIL  config ops.toml  {error}; repair {arguments.config} and rerun doctor"
+            )
+            return EXIT_STEP_FAILED
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
         if arguments.command == "schedule":
             return _schedule(arguments, config)
         if arguments.command == "batch":
@@ -270,8 +322,15 @@ def main(
             return _results(arguments, config, results_dependencies)
         if arguments.command == "dashboard":
             return _dashboard(arguments, config, dashboard_dependencies)
+        if arguments.command == "doctor":
+            return _doctor(arguments, config)
+        if arguments.command == "backup":
+            return _backup_store(arguments, config)
+        if arguments.command == "restore":
+            return _restore(arguments)
         return _status(arguments, config)
     except (
+        BackupError,
         DashboardError,
         MigrationError,
         OpsConfigError,
@@ -412,11 +471,65 @@ def _status(arguments: argparse.Namespace, config: OpsConfig) -> int:
             database=database,
             now=datetime.now(UTC),
             report_directory=arguments.report_directory,
+            backup_directory=arguments.backup_directory,
         )
     if arguments.json:
         print(json.dumps(status_payload(status), indent=2, sort_keys=True))
     else:
         print(render_status(status), end="")
+    return EXIT_OK
+
+
+def _doctor(arguments: argparse.Namespace, config: OpsConfig) -> int:
+    report = collect_doctor(
+        config=config,
+        database=_database(arguments, config),
+        repository=arguments.repository,
+        home=arguments.home or Path.home(),
+        artifact_directory=arguments.artifact_directory,
+        report_directory=arguments.report_directory,
+        snapshot_root=arguments.snapshot_directory,
+        backup_directory=arguments.backup_directory,
+        dashboard_port=arguments.port,
+        na_ops_executable=arguments.executable,
+    )
+    print(render_doctor(report), end="")
+    return EXIT_OK if report.ok else EXIT_STEP_FAILED
+
+
+def _backup_store(arguments: argparse.Namespace, config: OpsConfig) -> int:
+    report = create_backup(
+        database=_database(arguments, config),
+        artifact_directory=arguments.artifact_directory,
+        report_directory=arguments.report_directory,
+        pin_archive=config.nflverse_archive,
+        snapshot_root=config.snapshot_root,
+        backup_directory=arguments.backup_directory,
+        include_snapshots=arguments.include_snapshots,
+        keep_newest=arguments.keep_newest or config.backup_keep_newest,
+    )
+    print(f"backup {report.stamp}")
+    print(f"  path      {report.path}")
+    print(f"  manifest  {report.manifest_path}")
+    print(f"  files     {len(report.files)} verified")
+    if report.pruned:
+        print("  pruned    " + ", ".join(path.name for path in report.pruned))
+    else:
+        print("  pruned    none")
+    return EXIT_OK
+
+
+def _restore(arguments: argparse.Namespace) -> int:
+    report = restore_backup(
+        backup=arguments.backup,
+        into=arguments.into,
+        backup_directory=arguments.backup_directory,
+    )
+    print(f"restored {report.backup_stamp}")
+    print(f"  path      {report.path}")
+    print(f"  files     {report.files_verified} verified")
+    print(f"  tables    {len(report.row_counts)} row counts verified")
+    print(f"  flags     {report.flags}")
     return EXIT_OK
 
 

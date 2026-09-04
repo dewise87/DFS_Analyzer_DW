@@ -1,5 +1,16 @@
 """L6: the operator console — one command per lane, one screen for their state."""
 
+from narrative_alpha.ops.backup import (
+    BACKUP_MANIFEST_FILENAME,
+    DEFAULT_BACKUP_DIRECTORY,
+    BackupError,
+    BackupFile,
+    BackupReport,
+    RestoreReport,
+    create_backup,
+    newest_backup,
+    restore_backup,
+)
 from narrative_alpha.ops.batch import (
     BATCH_STEP_ERRORS,
     DEFAULT_DEPENDENCIES,
@@ -27,6 +38,7 @@ from narrative_alpha.ops.dashboard import (
     build_dashboard,
     serve_dashboard,
 )
+from narrative_alpha.ops.doctor import DoctorCheck, DoctorReport, collect_doctor, render_doctor
 from narrative_alpha.ops.results import (
     DEFAULT_RESULTS_DEPENDENCIES,
     RESULTS_STEP_ERRORS,
@@ -74,6 +86,7 @@ from narrative_alpha.ops.slate import (
 )
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
 from narrative_alpha.ops.status import (
+    BackupStatus,
     ClaimGradingStatus,
     EpisodeSnapshotStatus,
     FastLaneRulesStatus,
@@ -91,8 +104,10 @@ from narrative_alpha.ops.status import (
 )
 
 __all__ = [
+    "BACKUP_MANIFEST_FILENAME",
     "BATCH_STEPS",
     "BATCH_STEP_ERRORS",
+    "DEFAULT_BACKUP_DIRECTORY",
     "DEFAULT_DASHBOARD_DEPENDENCIES",
     "DEFAULT_DEPENDENCIES",
     "DEFAULT_OPS_CONFIG_PATH",
@@ -104,6 +119,10 @@ __all__ = [
     "RESULTS_STEP_ERRORS",
     "SLATE_STEPS",
     "SLATE_STEP_ERRORS",
+    "BackupError",
+    "BackupFile",
+    "BackupReport",
+    "BackupStatus",
     "BatchDependencies",
     "BatchReport",
     "ClaimGradingStatus",
@@ -111,6 +130,8 @@ __all__ = [
     "DashboardDependencies",
     "DashboardError",
     "DashboardServer",
+    "DoctorCheck",
+    "DoctorReport",
     "EpisodeSnapshotStatus",
     "FastLaneRulesStatus",
     "JobState",
@@ -127,6 +148,7 @@ __all__ = [
     "OpsStep",
     "OpsStepStatus",
     "RecordedRun",
+    "RestoreReport",
     "ResultsDependencies",
     "ResultsReport",
     "ScheduleChange",
@@ -143,7 +165,9 @@ __all__ = [
     "WorkloadStatsPinStatus",
     "build_dashboard",
     "build_jobs",
+    "collect_doctor",
     "collect_ops_status",
+    "create_backup",
     "default_na_ops_executable",
     "eastern_to_local",
     "extraction_window_start",
@@ -155,10 +179,13 @@ __all__ = [
     "load_ops_config",
     "month_start_utc",
     "month_to_date_spend_nanos",
+    "newest_backup",
     "recent_runs",
     "record_ops_run",
+    "render_doctor",
     "render_status",
     "replay_command",
+    "restore_backup",
     "run_batch",
     "run_results",
     "run_slate",

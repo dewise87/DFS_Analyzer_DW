@@ -7,8 +7,10 @@ from narrative_alpha.store.migrations import (
     Migration,
     MigrationDriftError,
     MigrationError,
+    MigrationStatus,
     apply_migrations,
     discover_migrations,
+    inspect_migrations,
 )
 from narrative_alpha.store.models import (
     ActualOwnershipRow,
@@ -88,6 +90,7 @@ __all__ = [
     "Migration",
     "MigrationDriftError",
     "MigrationError",
+    "MigrationStatus",
     "ModelRunRow",
     "NarrativeEpisodeRow",
     "NarrativeFeatureRow",
@@ -125,6 +128,7 @@ __all__ = [
     "discover_migrations",
     "distribution_source_set_sha256",
     "insert_player_distribution",
+    "inspect_migrations",
     "manifest_hash_set_sha256",
     "prompt_version_sha256",
 ]

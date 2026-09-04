@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ import narrative_alpha.replay as replay_module
 from narrative_alpha.build import BuildSelfVerificationError, build_decision
 from narrative_alpha.identity import CrosswalkError
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.ops.backup import create_backup, restore_backup
 from narrative_alpha.portfolio import CandidatePlayer, DfsSite, PydfsAdapter
 from narrative_alpha.replay import replay_decision
 from narrative_alpha.store import (
@@ -90,6 +91,51 @@ def test_build_then_replay_is_byte_identical_and_commits_run(tmp_path: Path) -> 
     )
     assert replayed.report.output_matches
     assert replayed.output_bytes == built.replay.output_bytes
+
+
+def test_backup_restore_drill_replays_decision_byte_identically(tmp_path: Path) -> None:
+    """The recovery proof is a real build, online backup, out-of-place restore, and replay."""
+
+    database = tmp_path / "live-fixture" / "store.sqlite3"
+    artifacts = tmp_path / "live-fixture" / "decisions"
+    reports = tmp_path / "live-fixture" / "reports"
+    pins = tmp_path / "live-fixture" / "pins"
+    snapshots = tmp_path / "live-fixture" / "snapshots"
+    backups = tmp_path / "backups"
+    for directory in (reports, pins, snapshots):
+        directory.mkdir(parents=True)
+    _seed_database(database)
+    built = build_decision(
+        database,
+        slate_id=1,
+        site=DfsSite.DRAFTKINGS,
+        decision_at=DECISION_AT,
+        artifact_directory=artifacts,
+    )
+    backup = create_backup(
+        database=database,
+        artifact_directory=artifacts,
+        report_directory=reports,
+        pin_archive=pins,
+        snapshot_root=snapshots,
+        backup_directory=backups,
+        now=DECISION_AT + timedelta(hours=1),
+    )
+    restored = restore_backup(
+        backup=backup.stamp,
+        into=tmp_path / "restored-fixture",
+        backup_directory=backups,
+    )
+    with connect_database(restored.database) as connection:
+        replayed = replay_decision(
+            connection,
+            decision_snapshot_id=built.snapshot.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=restored.artifact_directory,
+            adapter=PydfsAdapter(),
+        )
+    assert replayed.report.output_matches
+    assert replayed.output_bytes == built.generated_lineups_path.read_bytes()
 
 
 def test_self_verify_artifact_corruption_is_failure_and_rolls_back_rows(

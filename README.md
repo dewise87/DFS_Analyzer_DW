@@ -515,6 +515,20 @@ unresolved players, and conflicting contest cohort metadata remain explicit rath
 The Tuesday `na-ops results` lane matches each export to the append-only `contests` record by the
 external contest ID in its filename and refuses with the `na-contest add` remedy when it cannot.
 
+## Preflight and backup
+
+```bash
+uv run na-ops doctor
+```
+
+One screen of named checks — Keychain item, every config file, migrations, launchd agents,
+pins, fast-lane rules, directories, the dashboard port, the newest backup — each OK, WARN,
+or FAIL with the remedy. Reads only. `na-ops backup` copies the store through SQLite's
+online backup API with the decisions, reports, and pin archive under `data/backups/<stamp>/`
+and a hashed manifest, keeping the newest fourteen; `na-ops schedule install` adds a nightly
+backup agent. `na-ops restore --backup <stamp> --into <dir>` restores to a separate
+directory only, verifies every hash, and prints the flags to run against the copy.
+
 ## Contest policies
 
 `config/contest_policies.toml` gives each classic contest archetype its request policy: an

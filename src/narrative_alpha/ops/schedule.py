@@ -274,6 +274,26 @@ def build_jobs(
             executable=na_ops,
         )
     ]
+    backup_label = f"{LABEL_PREFIX}.backup"
+    jobs.append(
+        _job(
+            label=backup_label,
+            agents=agents,
+            wrapper_directory=wrapper_directory,
+            log_directory=log_directory,
+            weekday_numbers=tuple(range(7)),
+            local_time=config.backup_local_time,
+            description=f"nightly backup at {config.backup_local_time.strftime('%H:%M')} local",
+            script=_backup_script(
+                config,
+                repository=repository,
+                na_ops=na_ops,
+                log_path=log_directory / f"{backup_label}.log",
+                label=backup_label,
+            ),
+            executable=na_ops,
+        )
+    )
     for reminder in REMINDERS:
         label = f"{LABEL_PREFIX}.reminder-{reminder.slug}"
         local = eastern_to_local(
@@ -417,6 +437,36 @@ printf '%s %s\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(reminder.title
 {instructions}
 printf '\\n' >>"$LOG"
 /usr/bin/osascript -e {shlex.quote(applescript)} || true
+"""
+
+
+def _backup_script(
+    config: OpsConfig,
+    *,
+    repository: Path,
+    na_ops: Path,
+    log_path: Path,
+    label: str,
+) -> str:
+    """The nightly wrapper uses the same logging and exit-code discipline as batch."""
+
+    return f"""#!/bin/sh
+{WRAPPER_MARKER} {label}
+# Written by `na-ops schedule install`. This job uses SQLite's online backup API and
+# needs no credential.
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+LOG={shlex.quote(str(log_path))}
+mkdir -p "$(dirname "$LOG")"
+cd {shlex.quote(str(repository))}
+printf '%s starting %s\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(label)} >>"$LOG"
+status=0
+{shlex.quote(str(na_ops))} --config {shlex.quote(str(config.path))} backup \\
+    >>"$LOG" 2>&1 || status=$?
+printf '%s finished %s exit=%s\\n' \\
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(label)} "$status" >>"$LOG"
+exit "$status"
 """
 
 

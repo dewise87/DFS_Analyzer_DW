@@ -28,6 +28,11 @@ local_time = "09:30"
 # raise it once a labeled evaluation has passed.
 max_items_per_run = 200
 
+[backup]
+# The nightly launchd job keeps this many complete UTC-stamped backup generations.
+keep_newest = 14
+local_time = "02:00"
+
 [paths]
 database = "data/db/narrative_alpha.sqlite3"
 snapshot_root = "data/snapshots"

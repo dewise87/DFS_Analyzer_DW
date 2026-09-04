@@ -7,6 +7,7 @@ behind a healthy-looking summary: a missing roster is a warning in words, not a 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -20,7 +21,10 @@ from narrative_alpha.fast.rules import (
 )
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
 from narrative_alpha.identity.pins import NflversePinError
-from narrative_alpha.ingest.nflverse_stats import PinnedStatsRelease, pinned_stats_release
+from narrative_alpha.ingest.nflverse_stats import (
+    PinnedStatsRelease,
+    pinned_stats_release,
+)
 from narrative_alpha.ingest.slates import SlateSummary, list_slates
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.narrative import (
@@ -32,6 +36,7 @@ from narrative_alpha.narrative import (
 )
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import DEFAULT_PRICING_PATH
+from narrative_alpha.ops.backup import DEFAULT_BACKUP_DIRECTORY, newest_backup
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
 from narrative_alpha.ops.results import label_cohorts, weeks_with_labels
 from narrative_alpha.ops.runs import (
@@ -220,6 +225,15 @@ class MonthlyReportStatus:
 
 
 @dataclass(frozen=True)
+class BackupStatus:
+    """The newest complete generation under the configured backup root."""
+
+    stamp: str
+    path: Path
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class OpsStatus:
     """The whole screen as data, so `--json` and the text render never diverge."""
 
@@ -257,6 +271,7 @@ class OpsStatus:
     budget_remaining_usd: str
     warnings: tuple[str, ...]
     monthly_report: MonthlyReportStatus | None
+    newest_backup: BackupStatus | None
 
     @property
     def manual_actions(self) -> tuple[str, ...]:
@@ -322,6 +337,8 @@ def collect_ops_status(
     pricing_path: Path = DEFAULT_PRICING_PATH,
     fast_lane_rules_path: Path = DEFAULT_FAST_LANE_RULES_PATH,
     report_directory: Path = DEFAULT_REPORT_DIRECTORY,
+    backup_directory: Path = DEFAULT_BACKUP_DIRECTORY,
+    workload_stats_releases: Mapping[int, tuple[PinnedStatsRelease, ...]] | None = None,
 ) -> OpsStatus:
     """Gather the whole screen. Every section degrades to a stated gap, never a crash."""
 
@@ -440,7 +457,9 @@ def collect_ops_status(
         slate=slate,
         ownership_scenarios=_ownership_scenario_status(connection, slate=slate),
         labels=_label_status(connection),
-        workload_stats_pin=_workload_stats_pin(config.season, as_of),
+        workload_stats_pin=_workload_stats_pin(
+            config.season, as_of, releases=workload_stats_releases
+        ),
         grading=_claim_grading_status(connection, slate=slate),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
@@ -453,7 +472,16 @@ def collect_ops_status(
         budget_remaining_usd=_usd(max(budget - spent, 0)),
         warnings=tuple(warnings),
         monthly_report=_monthly_report_status(report_directory),
+        newest_backup=_newest_backup_status(backup_directory),
     )
+
+
+def _newest_backup_status(backup_directory: Path) -> BackupStatus | None:
+    found = newest_backup(backup_directory)
+    if found is None:
+        return None
+    stamp, created_at, path = found
+    return BackupStatus(stamp=stamp, path=path, created_at=created_at)
 
 
 def _monthly_report_status(report_directory: Path) -> MonthlyReportStatus | None:
@@ -469,11 +497,20 @@ def _monthly_report_status(report_directory: Path) -> MonthlyReportStatus | None
     return MonthlyReportStatus(path=newest, written_at=written_at)
 
 
-def _workload_stats_pin(season: int, as_of: datetime) -> WorkloadStatsPinStatus | None:
+def _workload_stats_pin(
+    season: int,
+    as_of: datetime,
+    *,
+    releases: Mapping[int, tuple[PinnedStatsRelease, ...]] | None = None,
+) -> WorkloadStatsPinStatus | None:
     """The newest reviewed workload pin for the configured season, or nothing yet."""
 
     try:
-        release: PinnedStatsRelease = pinned_stats_release(season, as_of)
+        release: PinnedStatsRelease = (
+            pinned_stats_release(season, as_of)
+            if releases is None
+            else pinned_stats_release(season, as_of, releases=releases)
+        )
     except NflversePinError:
         return None
     return WorkloadStatsPinStatus(
@@ -981,6 +1018,13 @@ def render_status(status: OpsStatus) -> str:
         f"  as of      {utc_timestamp(status.as_of)}",
         f"  database   {status.database}",
         f"  config     {status.config_path}",
+        "  backup     "
+        + (
+            "none recorded"
+            if status.newest_backup is None
+            else f"{status.newest_backup.stamp} "
+            f"({_humanize(status.as_of - status.newest_backup.created_at)} ago)"
+        ),
         "  monthly    "
         + (
             "none recorded"
@@ -1235,6 +1279,14 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
             "path": str(status.monthly_report.path),
             "written_at": utc_timestamp(status.monthly_report.written_at),
             "age_seconds": _age_seconds(status.monthly_report.written_at, status.as_of),
+        },
+        "newest_backup": None
+        if status.newest_backup is None
+        else {
+            "stamp": status.newest_backup.stamp,
+            "path": str(status.newest_backup.path),
+            "created_at": utc_timestamp(status.newest_backup.created_at),
+            "age_seconds": _age_seconds(status.newest_backup.created_at, status.as_of),
         },
         "entry_receipts": {
             "fees_to_date_usd": status.entry_fees_to_date_usd,

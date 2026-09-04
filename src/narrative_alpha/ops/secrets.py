@@ -23,6 +23,18 @@ def anthropic_api_key(config: OpsConfig) -> str | None:
         value = os.environ.get(name)
         if value:
             return value
+    return _keychain_api_key(config)
+
+
+def keychain_item_readable(config: OpsConfig) -> bool:
+    """Read the configured item without exposing it, specifically ignoring env overrides."""
+
+    return _keychain_api_key(config) is not None
+
+
+def _keychain_api_key(config: OpsConfig) -> str | None:
+    """Return the login-Keychain value in memory only, or ``None`` when unavailable."""
+
     try:
         completed = subprocess.run(
             (

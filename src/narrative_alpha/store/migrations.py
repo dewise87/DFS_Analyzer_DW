@@ -44,6 +44,64 @@ class AppliedMigration:
     applied_at: datetime
 
 
+@dataclass(frozen=True)
+class MigrationStatus:
+    """Read-only comparison of the store ledger with the shipped migration files."""
+
+    applied: tuple[Migration, ...]
+    pending: tuple[Migration, ...]
+
+    @property
+    def current(self) -> bool:
+        return not self.pending
+
+
+def inspect_migrations(
+    connection: sqlite3.Connection,
+    migrations_path: Path = DEFAULT_MIGRATIONS_PATH,
+) -> MigrationStatus:
+    """Inspect migration state without creating a table or applying a migration.
+
+    Doctor and restore are deliberately read-only.  A database with no migration ledger
+    therefore reports every shipped migration as pending instead of acquiring a ledger as
+    a side effect of being inspected.
+    """
+
+    migrations = discover_migrations(migrations_path)
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'applied_migrations'"
+    ).fetchone()
+    if table is None:
+        return MigrationStatus(applied=(), pending=migrations)
+
+    existing = {
+        int(row[0]): (str(row[1]), str(row[2]))
+        for row in connection.execute(
+            "SELECT version, name, sha256 FROM applied_migrations ORDER BY version"
+        )
+    }
+    discovered = {migration.version: migration for migration in migrations}
+    unknown = sorted(set(existing) - set(discovered))
+    if unknown:
+        versions = ", ".join(f"{version:04d}" for version in unknown)
+        raise MigrationDriftError(f"database records unknown migration version(s): {versions}")
+
+    applied: list[Migration] = []
+    pending: list[Migration] = []
+    for migration in migrations:
+        prior = existing.get(migration.version)
+        if prior is None:
+            pending.append(migration)
+            continue
+        prior_name, prior_sha256 = prior
+        if prior_name != migration.name or prior_sha256 != migration.sha256:
+            raise MigrationDriftError(
+                f"migration {migration.version:04d} differs from the applied record"
+            )
+        applied.append(migration)
+    return MigrationStatus(applied=tuple(applied), pending=tuple(pending))
+
+
 def apply_migrations(
     connection: sqlite3.Connection,
     migrations_path: Path = DEFAULT_MIGRATIONS_PATH,

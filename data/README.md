@@ -22,6 +22,9 @@ data/
   db/                      # SQLite operational store (WAL mode)
     narrative_alpha.sqlite3.stage1-receipts/
                             # fsynced accepted-batch recovery receipts, when present
+  decisions/               # frozen optimizer requests, policies, and generated lineups
+  reports/                 # saved operator/evaluation reports
+  backups/<UTC stamp>/     # verified store/artifact/report/pin generation + manifest
 ```
 
 ## Rules
@@ -42,6 +45,12 @@ data/
   If receipts exist, preferably run extraction once at the original path to reconcile them before
   moving or restoring anything; otherwise preserve both together at matching sibling paths. Never
   back up, rename, move, or restore only the database while an accepted-batch receipt remains.
+- `na-ops backup` uses SQLite's online backup API and records every payload file's SHA-256 and
+  size. Snapshot captures are excluded unless `--include-snapshots` is passed; the newest
+  `backup.keep_newest` complete generations are retained.
+- `na-ops restore --backup <UTC stamp> --into <new-directory>` never overwrites a live tree. It
+  verifies source and restored hashes, the migration ledger, and every table row count before
+  printing the exact database and artifact-directory flags for the restored copy.
 
 ## Weather games CSV
 

@@ -73,6 +73,24 @@ class _PathsConfig(BaseModel):
     log_directory: Path
 
 
+class _BackupConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    keep_newest: int = Field(default=14, ge=1)
+    local_time: str = "02:00"
+
+    @field_validator("local_time")
+    @classmethod
+    def validate_local_time(cls, value: str) -> str:
+        try:
+            parsed = time.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("backup local_time must be HH:MM in 24-hour local time") from error
+        if parsed.second or parsed.microsecond:
+            raise ValueError("backup local_time must not include seconds")
+        return value
+
+
 class _OpsConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -81,6 +99,7 @@ class _OpsConfigFile(BaseModel):
     monthly_llm_budget_usd: Decimal = Field(ge=0)
     keychain_service: str = Field(min_length=1)
     batch: _BatchConfig
+    backup: _BackupConfig = _BackupConfig()
     paths: _PathsConfig
 
     @field_validator("timezone")
@@ -105,6 +124,8 @@ class OpsConfig:
     batch_weekdays: tuple[str, ...]
     batch_local_time: time
     batch_max_items_per_run: int | None
+    backup_keep_newest: int
+    backup_local_time: time
     database: Path
     snapshot_root: Path
     nflverse_archive: Path
@@ -145,6 +166,8 @@ def load_ops_config(path: Path = DEFAULT_OPS_CONFIG_PATH) -> OpsConfig:
         batch_weekdays=parsed.batch.weekdays,
         batch_local_time=time.fromisoformat(parsed.batch.local_time),
         batch_max_items_per_run=parsed.batch.max_items_per_run,
+        backup_keep_newest=parsed.backup.keep_newest,
+        backup_local_time=time.fromisoformat(parsed.backup.local_time),
         database=parsed.paths.database,
         snapshot_root=parsed.paths.snapshot_root,
         nflverse_archive=parsed.paths.nflverse_archive,

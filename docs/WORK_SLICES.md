@@ -2729,6 +2729,21 @@ with a restore that is actually tested.
 > backup manifest hashes verify; pruning keeps N; restore refuses a manifest mismatch;
 > the drill above. Gates green; never the production database.
 
+**Implementation status (2026-09-04):** landed as `ops/doctor.py` (`na-ops doctor`: Keychain
+readable without printing, every config file under its own loader with its hash, migrations
+by a read-only inspection that never creates the ledger, launchd agents installed and
+loaded with next fire times, roster and stats pins, fast-lane rules, directories with free
+space, dashboard port, newest backup age; exit nonzero on any FAIL; nothing written) and
+`ops/backup.py` (`na-ops backup` through SQLite's online backup API plus decisions, reports,
+and the pin archive, hashed manifest, keeps the newest N; `na-ops restore --into` never in
+place, re-hashes, re-inspects migrations and row counts, prints the flags to run against the
+copy; a nightly launchd backup agent through the same wrapper mechanism; backup age on
+status). The drill is a test: build, back up, restore elsewhere, replay byte-identically.
+
+**Review outcome (2026-09-04):** accepted with one change: a listener on the dashboard port
+was a FAIL, but that listener is usually the dashboard itself, so it is a WARN. Suite
+742 → 766.
+
 ### Slice 43 — Contest simulator in shadow mode (§6.6)
 
 **Goal:** the Phase 2 deliverable that turns "this lineup projects well" into "this lineup
