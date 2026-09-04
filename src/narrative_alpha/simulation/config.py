@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import tomllib
 from pathlib import Path
 from typing import Self
@@ -20,25 +21,49 @@ class DependenceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     game_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
-    team_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    team_loading_by_position: dict[str, float]
+    qb_pass_catcher_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
     within_position_negative_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
     touch_positions: tuple[str, ...] = Field(min_length=1)
+    pass_catcher_positions: tuple[str, ...] = Field(min_length=1)
 
-    @field_validator("touch_positions")
+    @field_validator("team_loading_by_position")
+    @classmethod
+    def normalize_team_loadings(cls, value: dict[str, float]) -> dict[str, float]:
+        normalized = {_position(position): float(loading) for position, loading in value.items()}
+        required = {"QB", "RB", "WR", "TE", "DST"}
+        if set(normalized) != required:
+            raise ValueError(
+                "team_loading_by_position must contain exactly QB, RB, WR, TE, and DST"
+            )
+        if any(
+            not math.isfinite(loading) or not 0 <= loading < 1 for loading in normalized.values()
+        ):
+            raise ValueError("team loadings must be finite values in [0, 1)")
+        return normalized
+
+    @field_validator("touch_positions", "pass_catcher_positions")
     @classmethod
     def normalize_positions(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(dict.fromkeys(item.strip().upper() for item in value))
+        normalized = tuple(dict.fromkeys(_position(item) for item in value))
         if any(not item for item in normalized):
-            raise ValueError("touch_positions may not contain an empty position")
+            raise ValueError("position lists may not contain an empty position")
         return normalized
 
     @model_validator(mode="after")
     def leave_idiosyncratic_variance(self) -> Self:
-        variance = (
-            self.game_loading**2 + self.team_loading**2 + self.within_position_negative_loading**2
-        )
-        if variance >= 1.0:
-            raise ValueError("squared dependence loadings must sum to less than one")
+        pass_positions = frozenset(("QB", *self.pass_catcher_positions))
+        touch_positions = frozenset(self.touch_positions)
+        for position, team_loading in self.team_loading_by_position.items():
+            variance = self.game_loading**2 + team_loading**2
+            if position in pass_positions:
+                variance += self.qb_pass_catcher_loading**2
+            if position in touch_positions:
+                variance += self.within_position_negative_loading**2
+            if variance >= 1.0:
+                raise ValueError(
+                    f"squared dependence loadings for {position} must sum to less than one"
+                )
         return self
 
 
@@ -48,8 +73,17 @@ class FieldConfig(BaseModel):
     stack_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     stack_weight: float = Field(gt=0, allow_inf_nan=False)
     ownership_tolerance: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    salary_use: float = Field(gt=0, le=1, allow_inf_nan=False)
+    salary_use_tolerance: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    replicates: int = Field(ge=1, le=64)
     calibration_iterations: int = Field(ge=1, le=100)
     lineup_attempts: int = Field(ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def salary_band_is_possible(self) -> Self:
+        if self.salary_use - self.salary_use_tolerance <= 0:
+            raise ValueError("salary_use minus its tolerance must be positive")
+        return self
 
 
 class CalibrationConfig(BaseModel):
@@ -108,3 +142,8 @@ def load_simulation_config(
         )
     except ValueError as error:
         raise SimulationConfigError(f"invalid simulation config {path}: {error}") from error
+
+
+def _position(value: str) -> str:
+    normalized = value.strip().upper()
+    return "DST" if normalized in {"D", "DEF"} else normalized

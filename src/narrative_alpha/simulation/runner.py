@@ -8,7 +8,7 @@ import io
 import json
 import re
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +30,7 @@ from narrative_alpha.simulation.evaluation import evaluate_contest
 from narrative_alpha.simulation.field import FieldGenerationResult, generate_field
 from narrative_alpha.simulation.models import (
     EXPERIMENTAL_NOTICE,
+    DistributionProvenance,
     LineupSimulationResult,
     OwnershipMarginal,
     PlayerSimulationInput,
@@ -37,12 +38,19 @@ from narrative_alpha.simulation.models import (
     SimulationReport,
     SimulationRunResult,
 )
-from narrative_alpha.simulation.outcomes import draw_player_outcomes
+from narrative_alpha.simulation.outcomes import (
+    draw_player_outcomes,
+    implied_pairwise_correlations,
+)
 from narrative_alpha.store import ContestPayoutRow, ContestRow, PlayerDistributionRow
 
-#: The largest contest field the settlement loop finishes on a Sunday (measured at
-#: roughly 25 ms per draw per 5,000 entries); a Slice 43b vectorization raises it.
-MAX_SIMULATED_FIELD_SIZE = 10_000
+#: A whole run at this size measured 218.9 seconds on the reference laptop: eight
+#: calibrated field replicates (162.1s), 1,000 outcome draws (0.1s), and settlement
+#: against 15,000 payout rows (56.7s). That is the number this constant has to keep
+#: true. Settlement alone is the cheap end of the run, and sizing the limit on it is
+#: how this constant was first set too high: the same contest took 7.2 minutes before
+#: replicates stopped rediscovering one another's ownership calibration.
+MAX_SIMULATED_FIELD_SIZE = 100_000
 
 
 class SimulationRunError(RuntimeError):
@@ -124,9 +132,6 @@ def run_simulation(
             "contest would not accept is not a number"
         )
     if contest.field_size > MAX_SIMULATED_FIELD_SIZE:
-        # Settlement is a Python loop over entries and payout bands per draw; above this
-        # size it does not finish on a Sunday. Refusing states the limit rather than
-        # simulating a smaller field and calling it the contest.
         raise SimulationRunError(
             f"contest {contest.external_contest_id} has field_size {contest.field_size}, "
             f"above the {MAX_SIMULATED_FIELD_SIZE} this simulator can settle in useful time; "
@@ -139,14 +144,25 @@ def run_simulation(
             f"the decision's {len(frozen.lineups)} portfolio entries"
         )
     seed_sequence = np.random.SeedSequence(selected_seed)
-    field_seed, outcome_seed = seed_sequence.spawn(2)
-    field = generate_field(
-        frozen.request,
-        ownership,
-        lineup_count=opponent_count,
-        rng=np.random.default_rng(field_seed),
-        config=config.field,
-    )
+    child_seeds = seed_sequence.spawn(config.field.replicates + 2)
+    field_seeds = child_seeds[: config.field.replicates]
+    outcome_seed = child_seeds[-2]
+    score_sample_seed = int(child_seeds[-1].generate_state(1, dtype=np.uint64)[0])
+    # Every replicate calibrates to the same pool and the same targets, so only the first
+    # has to discover the correction vector; the rest start from it and differ by seed
+    # alone. Each still measures what it drew and still refuses outside tolerance.
+    fields: list[FieldGenerationResult] = []
+    for field_seed in field_seeds:
+        fields.append(
+            generate_field(
+                frozen.request,
+                ownership,
+                lineup_count=opponent_count,
+                rng=np.random.default_rng(field_seed),
+                config=config.field,
+                biases=fields[0].calibration_biases if fields else None,
+            )
+        )
     outcomes = draw_player_outcomes(
         simulation_players,
         draws=draw_count,
@@ -158,11 +174,13 @@ def run_simulation(
         outcomes,
         player_ids=tuple(item.player.player_id for item in simulation_players),
         portfolio_lineups=frozen.lineups,
-        field_lineups=field.lineups,
+        field_lineups=fields[0].lineups,
+        field_replicates=tuple(field.lineups for field in fields),
         payout_bands=payouts,
         entry_fee_cents=contest.entry_fee_cents,
         score_quantiles=config.calibration.score_quantiles,
         score_sample_limit=config.calibration.score_sample_limit,
+        score_sample_seed=score_sample_seed,
     )
     report = _report(
         config=config,
@@ -176,11 +194,14 @@ def run_simulation(
         independent=independent,
         ownership_source=ownership_source,
         scenario_run_id=scenario_run_id,
-        field=field,
+        fields=fields,
+        simulation_players=simulation_players,
         lineup_results=evaluation.lineup_results,
         portfolio_result=evaluation.portfolio_result,
         score_quantiles=evaluation.score_quantiles,
-        field_duplication_distribution=_field_duplication_distribution(field.lineups),
+        field_duplication_distribution=_field_duplication_distribution(
+            tuple(field.lineups for field in fields)
+        ),
     )
     report_bytes = render_simulation_report(report).encode("utf-8")
     stamp = ensure_utc(run_at or datetime.now(UTC)).strftime("%Y%m%dT%H%M%S%fZ")
@@ -324,7 +345,8 @@ def load_ownership_for_decision(
         raise SimulationRunError(
             "decision has no decision_ownership_routing row; ownership must not be recomputed"
         )
-    player_ids = {player.player_id for player in request.candidate_player_scenario.players}
+    candidates = request.candidate_player_scenario.players
+    player_ids = {player.player_id for player in candidates}
     stamp = utc_timestamp(as_of)
     if bool(route["applied"]):
         run_id = str(route["scenario_run_id"])
@@ -342,36 +364,25 @@ def load_ownership_for_decision(
         _require_complete_ownership(values, player_ids, "routed applied ownership")
         return "scenario_model", run_id, values
 
-    rows = connection.execute(
-        """
-        WITH ranked AS (
-            SELECT ob.*,
-                   row_number() OVER (
-                       PARTITION BY ob.source, ob.player_id
-                       ORDER BY rtrim(ob.observed_at, 'Z') DESC,
-                                ob.ownership_baseline_id DESC
-                   ) AS version_rank
-            FROM ownership_baselines AS ob
-            WHERE ob.slate_id = ? AND ob.site = ? AND ob.role = 'classic'
-              AND rtrim(ob.observed_at, 'Z') <= rtrim(?, 'Z')
-              AND rtrim(ob.ingested_at, 'Z') <= rtrim(?, 'Z')
-              AND rtrim(ob.valid_from, 'Z') <= rtrim(?, 'Z')
-              AND (ob.valid_to IS NULL OR rtrim(ob.valid_to, 'Z') > rtrim(?, 'Z'))
+    missing_flex = sorted(
+        player.player_id for player in candidates if player.projected_ownership is None
+    )
+    missing_captain = sorted(
+        player.player_id
+        for player in candidates
+        if request.slate_type.value == "showdown" and player.projected_ownership_captain is None
+    )
+    if missing_flex or missing_captain:
+        raise SimulationRunError(
+            "the frozen candidate scenario has null projected ownership; "
+            f"classic_or_flex_missing={missing_flex}, captain_missing={missing_captain}"
         )
-        SELECT player_id, ownership FROM ranked WHERE version_rank = 1
-        ORDER BY player_id, source
-        """,
-        (request.slate_id, request.site.value, stamp, stamp, stamp, stamp),
-    ).fetchall()
-    grouped: dict[int, list[float]] = defaultdict(list)
-    for row in rows:
-        grouped[int(row["player_id"])].append(float(row["ownership"]))
     values = {
-        player_id: sum(items) / len(items)
-        for player_id, items in grouped.items()
-        if player_id in player_ids
+        player.player_id: float(player.projected_ownership)
+        for player in candidates
+        if player.projected_ownership is not None
     }
-    _require_complete_ownership(values, player_ids, "vendor ownership baseline")
+    _require_complete_ownership(values, player_ids, "frozen scenario projected ownership")
     return "vendor_baseline", None, values
 
 
@@ -384,6 +395,9 @@ def render_simulation_report(report: SimulationReport) -> str:
     output.write("NARRATIVE ALPHA CONTEST SIMULATION\n")
     output.write(f"decision_snapshot_id={report.decision_snapshot_id}\n")
     output.write(f"contest_external_id={report.contest_external_id}\n")
+    output.write(f"contest_id={report.contest_id}\n")
+    output.write(f"contest_field_size={report.contest_field_size}\n")
+    output.write(f"contest_entry_fee_cents={report.contest_entry_fee_cents}\n")
     output.write(f"site={report.site}\n")
     output.write(f"season={report.season}\n")
     output.write(f"week={report.week:02d}\n")
@@ -394,19 +408,47 @@ def render_simulation_report(report: SimulationReport) -> str:
     output.write(f"config_sha256={report.config_sha256}\n")
     output.write("assumption_status=first-season assumptions\n")
     output.write(f"game_factor_loading={report.game_factor_loading:.6f}\n")
-    output.write(f"team_factor_loading={report.team_factor_loading:.6f}\n")
+    if report.team_factor_loading is not None:
+        output.write(f"team_factor_loading={report.team_factor_loading:.6f}\n")
+    for position, loading in report.team_factor_loadings:
+        output.write(f"team_factor_loading_{position.lower()}={loading:.6f}\n")
+    output.write(f"qb_pass_catcher_loading={report.qb_pass_catcher_loading:.6f}\n")
     output.write(
         f"within_position_negative_loading={report.within_position_negative_loading:.6f}\n"
     )
+    output.write(
+        f"implied_qb_wr_same_team_correlation={report.implied_qb_wr_same_team_correlation:.6f}\n"
+    )
+    output.write(
+        f"implied_wr_wr_same_team_correlation={report.implied_wr_wr_same_team_correlation:.6f}\n"
+    )
+    output.write(
+        f"implied_qb_qb_opposing_correlation={report.implied_qb_qb_opposing_correlation:.6f}\n"
+    )
+    output.write(f"implied_cross_game_correlation={report.implied_cross_game_correlation:.6f}\n")
     output.write(f"configured_stack_rate={report.configured_stack_rate:.6f}\n")
     output.write(f"ownership_source={report.ownership_source}\n")
     output.write(f"ownership_scenario_run_id={report.ownership_scenario_run_id or ''}\n")
+    output.write(f"ownership_scenario_id={report.ownership_scenario_id or ''}\n")
     output.write(f"field_lineup_count={report.field_lineup_count}\n")
+    output.write(f"field_replicates={report.field_replicates}\n")
     output.write(f"field_stack_rate={report.field_stack_rate:.6f}\n")
     output.write(f"ownership_tolerance={report.ownership_tolerance:.6f}\n")
+    output.write(f"configured_salary_use={report.configured_salary_use:.6f}\n")
+    output.write(f"salary_use_tolerance={report.salary_use_tolerance:.6f}\n")
+    output.write(f"field_salary_use={report.field_salary_use:.6f}\n")
 
     writer = csv.writer(output, lineterminator="\n")
+    output.write("\nPLAYER DISTRIBUTION PROVENANCE\n")
+    if report.notice is not None:
+        output.write(report.notice + "\n")
+    writer.writerow(("player_id", "player_distribution_id", "source"))
+    for row in report.distribution_rows:
+        writer.writerow((row.player_id, row.player_distribution_id, row.source))
+
     output.write("\nOWNERSHIP MARGINALS\n")
+    if report.notice is not None:
+        output.write(report.notice + "\n")
     writer.writerow(
         (
             "player_id",
@@ -483,10 +525,14 @@ def render_simulation_report(report: SimulationReport) -> str:
     ):
         writer.writerow((lineup.lineup_id, *(f"{value:.6f}" for value in correlations)))
     output.write("\nSIMULATED FIELD SCORE QUANTILES\n")
+    if report.notice is not None:
+        output.write(report.notice + "\n")
     writer.writerow(("quantile", "score"))
     for quantile, score in report.simulated_score_quantiles:
         writer.writerow((f"{quantile:.6f}", f"{score:.6f}"))
     output.write("\nSIMULATED FIELD DUPLICATION DISTRIBUTION\n")
+    if report.notice is not None:
+        output.write(report.notice + "\n")
     writer.writerow(("duplicates_excluding_self", "probability"))
     for duplicates, probability in report.simulated_field_duplication_distribution:
         writer.writerow((duplicates, f"{probability:.6f}"))
@@ -560,30 +606,54 @@ def _report(
     independent: bool,
     ownership_source: Literal["scenario_model", "vendor_baseline"],
     scenario_run_id: str | None,
-    field: FieldGenerationResult,
+    fields: Sequence[FieldGenerationResult],
+    simulation_players: Sequence[PlayerSimulationInput],
     lineup_results: tuple[LineupSimulationResult, ...],
     portfolio_result: PortfolioSimulationResult,
     score_quantiles: tuple[tuple[float, float], ...],
     field_duplication_distribution: tuple[tuple[int, float], ...],
 ) -> SimulationReport:
+    if not fields:
+        raise SimulationRunError("simulation report requires at least one field replicate")
+    first_field = fields[0]
     players = {player.player_id: player for player in request.candidate_player_scenario.players}
+    achieved = {
+        player_id: sum(field.achieved_marginals[player_id] for field in fields) / len(fields)
+        for player_id in first_field.calibrated_targets
+    }
     marginals = tuple(
         OwnershipMarginal(
             player_id=player_id,
             name=players[player_id].name,
             position=players[player_id].position,
-            source_target=field.source_targets[player_id],
+            source_target=first_field.source_targets[player_id],
             calibrated_target=target,
-            achieved=field.achieved_marginals[player_id],
-            absolute_error=abs(field.achieved_marginals[player_id] - target),
+            achieved=achieved[player_id],
+            absolute_error=abs(achieved[player_id] - target),
         )
-        for player_id, target in sorted(field.calibrated_targets.items())
+        for player_id, target in sorted(first_field.calibrated_targets.items())
     )
+    distribution_rows: list[DistributionProvenance] = []
+    for item in simulation_players:
+        if item.player_distribution_id is None or item.distribution_source is None:
+            raise SimulationRunError(
+                f"player {item.player.player_id} is missing distribution-row provenance"
+            )
+        distribution_rows.append(
+            DistributionProvenance(
+                player_id=item.player.player_id,
+                player_distribution_id=item.player_distribution_id,
+                source=item.distribution_source,
+            )
+        )
+    implied = implied_pairwise_correlations(config.dependence, independent=independent)
     return SimulationReport(
         notice=None if config.calibrated_against_real_contest else EXPERIMENTAL_NOTICE,
         decision_snapshot_id=decision_snapshot_id,
         contest_external_id=contest.external_contest_id,
         contest_id=contest.contest_id,
+        contest_field_size=contest.field_size,
+        contest_entry_fee_cents=contest.entry_fee_cents,
         site=request.site.value,
         season=season,
         week=week,
@@ -593,14 +663,25 @@ def _report(
         config_version=config.config_version,
         config_sha256=config.sha256,
         game_factor_loading=config.dependence.game_loading,
-        team_factor_loading=config.dependence.team_loading,
+        team_factor_loadings=tuple(sorted(config.dependence.team_loading_by_position.items())),
+        qb_pass_catcher_loading=config.dependence.qb_pass_catcher_loading,
         within_position_negative_loading=(config.dependence.within_position_negative_loading),
+        implied_qb_wr_same_team_correlation=implied["qb_wr_same_team"],
+        implied_wr_wr_same_team_correlation=implied["wr_wr_same_team"],
+        implied_qb_qb_opposing_correlation=implied["qb_qb_opposing"],
+        implied_cross_game_correlation=implied["cross_game"],
         configured_stack_rate=config.field.stack_rate,
         ownership_source=ownership_source,
         ownership_scenario_run_id=scenario_run_id,
-        field_lineup_count=len(field.lineups),
-        field_stack_rate=field.stack_rate,
+        ownership_scenario_id=request.candidate_player_scenario.scenario_id,
+        field_lineup_count=len(first_field.lineups),
+        field_replicates=len(fields),
+        field_stack_rate=sum(field.stack_rate for field in fields) / len(fields),
         ownership_tolerance=config.field.ownership_tolerance,
+        configured_salary_use=config.field.salary_use,
+        salary_use_tolerance=config.field.salary_use_tolerance,
+        field_salary_use=sum(field.salary_use for field in fields) / len(fields),
+        distribution_rows=tuple(distribution_rows),
         ownership_marginals=marginals,
         lineup_results=lineup_results,
         portfolio_result=portfolio_result,
@@ -683,11 +764,14 @@ def _duplication(values: tuple[tuple[int, float], ...]) -> str:
 
 
 def _field_duplication_distribution(
-    lineups: Sequence[Sequence[int]],
+    replicates: Sequence[Sequence[Sequence[int]]],
 ) -> tuple[tuple[int, float], ...]:
-    from collections import Counter
-
-    counts = Counter(tuple(lineup) for lineup in lineups)
-    frequencies = Counter(counts[tuple(lineup)] - 1 for lineup in lineups)
-    total = len(lineups)
+    frequencies: Counter[int] = Counter()
+    total = 0
+    for lineups in replicates:
+        counts = Counter(tuple(lineup) for lineup in lineups)
+        frequencies.update(counts[tuple(lineup)] - 1 for lineup in lineups)
+        total += len(lineups)
+    if total == 0:
+        raise SimulationRunError("field duplication distribution requires field lineups")
     return tuple((duplicates, count / total) for duplicates, count in sorted(frequencies.items()))

@@ -2913,6 +2913,56 @@ every item below is a numbered finding there.
 > Gates green; never the production database. The EXPERIMENTAL notice stays until a
 > human removes it in the config.
 
+**Implementation status (2026-09-04):** landed. Field draws now carry salary and slot
+feasibility through construction, enforce the configured mean salary-use band, and calibrate
+ownership on 220-player DraftKings-shaped pools whose mean salary is at and above cap/9. Eight
+seeded field realizations feed every payout and duplication metric. Settlement precomputes the
+rank prize vector, scores sparse lineup matrices in draw blocks, and vectorizes ranking and tie
+groups; the measured 1,000-draw × 100,000-entry × 15,000-payout-row benchmark completed in
+6.946 seconds on the development laptop, so the explicit refusal limit is now 100,000 entries.
+The v2 dependence config has position-specific team loadings, a QB/pass-catcher factor, and a
+0.25 within-position contrast; all four implied reference correlations are printed. Unrouted
+ownership comes only from the frozen candidate scenario and refuses nulls. Calibration resolves
+lineup names through the historical salary/alias crosswalk and uses exact or seeded population
+score samples. Contest, ownership, field-replicate, and every player-distribution row/source are
+persisted in both the report and `metrics_json`. The experimental notice remains on every report
+section. Suite 787 → 800.
+
+**Review outcome (2026-09-04): accepted with one modelling fix and two test gaps closed.**
+Checked against measurement, not against the note: the four implied correlations the report
+prints are the ones the sampler actually draws — recovering the latent normals from 400,000
+draws gives QB/WR same team 0.466 against a printed 0.465, WR/WR 0.404 against 0.403,
+QB/QB opposing 0.124 against 0.123, and cross-game 0.001 against 0 — so item 3 is real and
+not merely configured. Salary use lands at 0.965 against a 0.96 target on 220-player pools
+at and above cap/9, tie splitting and duplicate halving are right, and the lane step still
+cannot fail a Sunday.
+
+One finding, and it was the load-bearing one. `MAX_SIMULATED_FIELD_SIZE` was raised to
+100,000 on a settlement-only benchmark (reproduced here at 7.3s against the note's 6.946s),
+but the runner builds eight full field replicates before it settles anything, and field
+generation is roughly twenty-five times settlement. The whole run at 100,000 entries
+measured **429.9 seconds (7.17 minutes)** — fields 373.4s, settlement 56.5s — against a
+five-minute budget, so the shipped limit was not supported by the measurement offered for
+it. Fixed by removing the waste rather than by lowering the limit: every replicate
+calibrates the same pool to the same targets, so only the first discovers the ownership
+correction vector and the rest start from it, differing by seed alone. Replicate one still
+takes three populations (46.1s); replicates two through eight take one (about 16.4s each).
+The same run now measures **218.9 seconds (3.65 minutes)** — fields 162.1s, settlement
+56.7s — and the constant carries that end-to-end number instead of a settlement one. A
+carried vector is a starting point only: the loop still measures what it drew and still
+refuses outside tolerance, and a vector that does not cover the pool is refused.
+
+Two gaps closed. The field-size refusal had no test at all, in this slice or the one that
+introduced it, so the limit could have moved again unnoticed; there is now one that pins
+it and proves the refusal lands before the field is built rather than after. And the
+byte-stability test was switched to `--independent` to satisfy item 8, which left the
+dependent copula — the default path, and the one carrying all of item 3's new loadings —
+with no end-to-end coverage at all; a second run now pins the dependent path's bytes and
+the four correlations it prints. The note's own arithmetic was also off: the suite went
+797 → 814, not 787 → 800. Not changed, noted: `evaluate_contest` silently ignores
+`field_lineups` when `field_replicates` is also passed, which is fine for the one caller
+and a trap for the next.
+
 ### Slice 44 — Showdown slates end to end
 
 **Goal:** Thursday, Monday, and Sunday night slates are showdown. Today the optimizer

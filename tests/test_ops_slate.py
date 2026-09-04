@@ -34,7 +34,14 @@ from narrative_alpha.ops import (
 from narrative_alpha.ops.cli import main as ops_main
 from narrative_alpha.quant import QuantileInterpretation, fit_player_distribution_with_diagnostics
 from narrative_alpha.replay import read_frozen_decision
-from narrative_alpha.simulation import EXPERIMENTAL_NOTICE, SimulationRunError, run_simulation
+from narrative_alpha.simulation import (
+    EXPERIMENTAL_NOTICE,
+    MAX_SIMULATED_FIELD_SIZE,
+    SimulationRunError,
+    implied_pairwise_correlations,
+    load_simulation_config,
+    run_simulation,
+)
 from narrative_alpha.snapshots import CaptureKind, capture_files
 from narrative_alpha.snapshots.core import snapshot_week_path
 from narrative_alpha.store import (
@@ -500,6 +507,7 @@ def test_simulation_run_is_byte_stable_and_appends_its_provenance(
             report_directory=tmp_path / "reports",
             draws=20,
             seed=42,
+            independent=True,
             run_at=DECISION_AT + timedelta(days=1),
         )
         second = run_simulation(
@@ -510,24 +518,139 @@ def test_simulation_run_is_byte_stable_and_appends_its_provenance(
             report_directory=tmp_path / "reports",
             draws=20,
             seed=42,
+            independent=True,
             run_at=DECISION_AT + timedelta(days=1, seconds=1),
         )
         rows = connection.execute(
-            "SELECT config_sha256, draw_count, seed, ownership_source FROM simulation_runs "
+            "SELECT config_sha256, draw_count, seed, independent, ownership_source, "
+            "metrics_json FROM simulation_runs "
             "ORDER BY simulation_run_id"
         ).fetchall()
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "UPDATE simulation_runs SET seed = seed + 1 WHERE simulation_run_id = ?",
+                (first.simulation_run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "DELETE FROM simulation_runs WHERE simulation_run_id = ?",
+                (first.simulation_run_id,),
+            )
 
     assert first.report_bytes == second.report_bytes
     assert first.report_path != second.report_path
     assert first.report_path.read_bytes() == first.report_bytes
     assert first.report_bytes.startswith((EXPERIMENTAL_NOTICE + "\n").encode())
+    rendered = first.report_bytes.decode("utf-8")
+    assert "contest_field_size=501\n" in rendered
+    assert "contest_entry_fee_cents=1000\n" in rendered
+    assert "field_replicates=8\n" in rendered
+    assert "implied_qb_wr_same_team_correlation=0.000000\n" in rendered
+    assert "PLAYER DISTRIBUTION PROVENANCE\n" in rendered
+    assert rendered.count(EXPERIMENTAL_NOTICE) >= 7
     assert len(rows) == 2
     assert rows[0]["config_sha256"] == first.report.config_sha256
-    assert tuple(rows[0][key] for key in ("draw_count", "seed", "ownership_source")) == (
+    assert tuple(
+        rows[0][key] for key in ("draw_count", "seed", "independent", "ownership_source")
+    ) == (
         20,
         42,
+        1,
         "vendor_baseline",
     )
+    metrics = json.loads(str(rows[0]["metrics_json"]))
+    assert metrics["independent"] is True
+    assert metrics["field_replicates"] == 8
+    assert metrics["contest_field_size"] == 501
+    assert metrics["contest_entry_fee_cents"] == 1_000
+    assert len(metrics["distribution_rows"]) == len(
+        frozen.request.candidate_player_scenario.players
+    )
+    frozen_ownership = {
+        player.player_id: player.projected_ownership
+        for player in frozen.request.candidate_player_scenario.players
+    }
+    assert {
+        marginal["player_id"]: marginal["source_target"]
+        for marginal in metrics["ownership_marginals"]
+    } == frozen_ownership
+
+
+def test_the_dependent_simulation_is_byte_stable_and_prints_its_football_correlations(
+    week: Any, tmp_path: Path
+) -> None:
+    """The default path is the dependent copula, so it is the one a run must pin.
+
+    Its sibling above exercises ``--independent``, where every implied correlation is
+    zero. Without this one, no end-to-end test would ever draw through the team, passing,
+    and within-position factors, and the four numbers the report advertises would reach
+    the operator unchecked.
+    """
+
+    lane = _run(week, tmp_path=tmp_path)
+    assert lane.decision_snapshot_id is not None
+    with connect_database(week.database) as connection:
+        apply_migrations(connection)
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=tmp_path / "decisions",
+        )
+        _seed_simulation_inputs(connection, frozen.request.candidate_player_scenario.players)
+        contest = add_contest(
+            connection,
+            ManualContest(
+                external_contest_id="dependent-contest",
+                site=frozen.request.site,
+                slate_id=frozen.request.slate_id,
+                archetype=frozen.request.contest_archetype,
+                field_size=201,
+                entry_limit=1,
+                entry_fee_cents=1_000,
+                payout_curve_id="simulation-curve",
+                observed_at=DECISION_AT,
+            ),
+            (
+                PayoutBand(rank_from=1, rank_to=1, prize_cents=10_000),
+                PayoutBand(rank_from=2, rank_to=201, prize_cents=0),
+            ),
+            ingested_at=DECISION_AT,
+        ).contest
+        arguments = {
+            "decision_snapshot_id": lane.decision_snapshot_id,
+            "contest_external_id": contest.external_contest_id,
+            "artifact_root": tmp_path / "decisions",
+            "report_directory": tmp_path / "reports",
+            "draws": 20,
+            "seed": 42,
+        }
+        first = run_simulation(connection, run_at=DECISION_AT + timedelta(days=1), **arguments)
+        second = run_simulation(
+            connection, run_at=DECISION_AT + timedelta(days=1, seconds=1), **arguments
+        )
+        stored = connection.execute(
+            "SELECT independent, metrics_json FROM simulation_runs ORDER BY simulation_run_id"
+        ).fetchall()
+
+    assert first.report_bytes == second.report_bytes
+    rendered = first.report_bytes.decode("utf-8")
+    config = load_simulation_config()
+    implied = implied_pairwise_correlations(config.dependence)
+    for name, value in (
+        ("qb_wr_same_team", implied["qb_wr_same_team"]),
+        ("wr_wr_same_team", implied["wr_wr_same_team"]),
+        ("qb_qb_opposing", implied["qb_qb_opposing"]),
+        ("cross_game", implied["cross_game"]),
+    ):
+        assert f"implied_{name}_correlation={value:.6f}\n" in rendered
+    # The football claim itself: a QB moves with his receivers, harder than he moves with
+    # the QB across the line of scrimmage, and not at all with another game.
+    assert implied["qb_wr_same_team"] > implied["wr_wr_same_team"] > implied["qb_qb_opposing"] > 0
+    assert implied["cross_game"] == 0
+    assert "independent=false\n" in rendered
+    assert stored[0]["independent"] == 0
+    assert json.loads(str(stored[0]["metrics_json"]))["independent"] is False
 
 
 def test_a_simulator_error_skips_the_shadow_step_and_the_lane_still_succeeds(
@@ -591,7 +714,112 @@ def test_a_simulator_error_skips_the_shadow_step_and_the_lane_still_succeeds(
     assert report.ok, [step.error_text for step in report.steps if not step.ok]
 
 
-def _seed_simulation_inputs(connection: sqlite3.Connection, players: tuple[Any, ...]) -> None:
+def test_simulation_refuses_when_one_candidate_distribution_row_is_missing(
+    week: Any, tmp_path: Path
+) -> None:
+    lane = _run(week, tmp_path=tmp_path)
+    assert lane.decision_snapshot_id is not None
+    with connect_database(week.database) as connection:
+        apply_migrations(connection)
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=tmp_path / "decisions",
+        )
+        missing_id = frozen.request.candidate_player_scenario.players[0].player_id
+        _seed_simulation_inputs(
+            connection,
+            frozen.request.candidate_player_scenario.players,
+            skip_player_id=missing_id,
+        )
+        contest = add_contest(
+            connection,
+            ManualContest(
+                external_contest_id="simulation-contest",
+                site=frozen.request.site,
+                slate_id=frozen.request.slate_id,
+                archetype=frozen.request.contest_archetype,
+                field_size=101,
+                entry_limit=1,
+                entry_fee_cents=1_000,
+                payout_curve_id="simulation-curve",
+                observed_at=DECISION_AT,
+            ),
+            (PayoutBand(rank_from=1, rank_to=101, prize_cents=1_000),),
+            ingested_at=DECISION_AT,
+        ).contest
+
+        with pytest.raises(SimulationRunError, match=rf"player IDs: {missing_id}(?:,|;)"):
+            run_simulation(
+                connection,
+                decision_snapshot_id=lane.decision_snapshot_id,
+                contest_external_id=contest.external_contest_id,
+                artifact_root=tmp_path / "decisions",
+                report_directory=tmp_path / "reports",
+                draws=2,
+                seed=43,
+            )
+
+
+def test_simulation_refuses_a_contest_above_the_settleable_field_size(
+    week: Any, tmp_path: Path
+) -> None:
+    lane = _run(week, tmp_path=tmp_path)
+    assert lane.decision_snapshot_id is not None
+    with connect_database(week.database) as connection:
+        apply_migrations(connection)
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=tmp_path / "decisions",
+        )
+        _seed_simulation_inputs(connection, frozen.request.candidate_player_scenario.players)
+        oversized = MAX_SIMULATED_FIELD_SIZE + 1
+        contest = add_contest(
+            connection,
+            ManualContest(
+                external_contest_id="oversized-contest",
+                site=frozen.request.site,
+                slate_id=frozen.request.slate_id,
+                archetype=frozen.request.contest_archetype,
+                field_size=oversized,
+                entry_limit=1,
+                entry_fee_cents=1_000,
+                payout_curve_id="simulation-curve",
+                observed_at=DECISION_AT,
+            ),
+            (PayoutBand(rank_from=1, rank_to=oversized, prize_cents=1_000),),
+            ingested_at=DECISION_AT,
+        ).contest
+
+        # The refusal has to come before the field is built, or the refusal is useless:
+        # the whole point is not spending an hour to learn the contest is too large.
+        with pytest.raises(SimulationRunError, match="settle in useful time") as raised:
+            run_simulation(
+                connection,
+                decision_snapshot_id=lane.decision_snapshot_id,
+                contest_external_id=contest.external_contest_id,
+                artifact_root=tmp_path / "decisions",
+                report_directory=tmp_path / "reports",
+                draws=2,
+                seed=44,
+            )
+
+    assert str(MAX_SIMULATED_FIELD_SIZE) in str(raised.value)
+    assert str(oversized) in str(raised.value)
+    assert list((tmp_path / "reports").rglob("simulation-*.txt")) == []
+    with connect_database(week.database) as connection:
+        assert connection.execute("SELECT count(*) FROM simulation_runs").fetchone()[0] == 0
+
+
+def _seed_simulation_inputs(
+    connection: sqlite3.Connection,
+    players: tuple[Any, ...],
+    *,
+    skip_player_id: int | None = None,
+) -> None:
     stamp = utc_timestamp(DECISION_AT)
     normal = NormalDist()
     position_counts: dict[str, int] = {}
@@ -599,6 +827,8 @@ def _seed_simulation_inputs(connection: sqlite3.Connection, players: tuple[Any, 
         position_counts[player.position] = position_counts.get(player.position, 0) + 1
     position_totals = {"QB": 1.0, "RB": 2.4, "WR": 3.5, "TE": 1.1, "DST": 1.0}
     for player in players:
+        if player.player_id == skip_player_id:
+            continue
         projection = connection.execute(
             """
             SELECT * FROM projection_snapshots

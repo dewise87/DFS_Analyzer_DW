@@ -6,8 +6,10 @@ import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 
 import numpy as np
+from numpy.typing import NDArray
 
 from narrative_alpha.portfolio import CLASSIC_SITE_RULES, CandidatePlayer, OptimizationRequest
 from narrative_alpha.simulation.config import FieldConfig
@@ -25,6 +27,31 @@ class FieldGenerationResult:
     achieved_marginals: Mapping[int, float]
     stack_rate: float
     maximum_marginal_error: float
+    salary_use: float
+    #: The per-player logit corrections that produced these lineups. They describe the
+    #: gap between the calibrated target and what the sampler draws on this pool, which
+    #: is a property of the pool and not of the seed, so a later replicate can start from
+    #: them instead of rediscovering them.
+    calibration_biases: Mapping[int, float]
+
+
+@dataclass(frozen=True)
+class _SlotCandidates:
+    """Per-slot views that hold still while one population is drawn.
+
+    Gathering a slot's salaries, teams, and targets once per population instead of once
+    per slot per lineup is what lets a 100,000-entry field build in tens of seconds. Every
+    element is the same double the per-lineup gather produced, so a seeded field is
+    unchanged by the batching.
+    """
+
+    indices: NDArray[np.int64]
+    salaries: NDArray[np.int64]
+    teams: NDArray[np.int64]
+    touch: NDArray[np.bool_]
+    targets: NDArray[np.float64]
+    target_counts: NDArray[np.float64]
+    exponential_biases: NDArray[np.float64]
 
 
 def calibrate_ownership_targets(
@@ -125,19 +152,28 @@ def generate_field(
     lineup_count: int,
     rng: np.random.Generator,
     config: FieldConfig,
+    biases: Mapping[int, float] | None = None,
 ) -> FieldGenerationResult:
-    """Generate legal field lineups and fail unless every marginal meets tolerance."""
+    """Generate legal field lineups and fail unless every marginal meets tolerance.
+
+    ``biases`` seeds the ownership-correction loop with a vector a previous field on this
+    same pool and target converged to; every replicate after the first passes one, which
+    is what keeps a 100,000-entry contest inside a Sunday budget. It is a starting point
+    only: the loop still measures what it drew and still refuses outside tolerance, so a
+    stale or wrong vector costs iterations rather than producing an uncalibrated field.
+    """
 
     if lineup_count < 1:
         raise FieldGenerationError("field lineup_count must be positive")
     players = request.candidate_player_scenario.players
+    _validate_targets(players, ownership)
     source_targets = {player.player_id: float(ownership[player.player_id]) for player in players}
     calibrated = calibrate_ownership_targets(players, source_targets, request)
-    biases = {player.player_id: 0.0 for player in players}
-    best: tuple[tuple[tuple[int, ...], ...], dict[int, float], float, float] | None = None
+    biases = _starting_biases(players, biases)
+    best: tuple[tuple[tuple[int, ...], ...], dict[int, float], float, float, float] | None = None
 
     for _ in range(config.calibration_iterations):
-        lineups, stack_rate = _generate_population(
+        lineups, stack_rate, salary_use = _generate_population(
             request,
             calibrated,
             lineup_count=lineup_count,
@@ -150,9 +186,16 @@ def generate_field(
         maximum_error = max(
             abs(achieved[player_id] - target) for player_id, target in calibrated.items()
         )
-        if best is None or maximum_error < best[2]:
-            best = (lineups, achieved, maximum_error, stack_rate)
-        if maximum_error <= config.ownership_tolerance + 1e-12:
+        salary_error = abs(salary_use - config.salary_use)
+        if best is None or (maximum_error, salary_error) < (
+            best[2],
+            abs(best[4] - config.salary_use),
+        ):
+            best = (lineups, achieved, maximum_error, stack_rate, salary_use)
+        if (
+            maximum_error <= config.ownership_tolerance + 1e-12
+            and salary_error <= config.salary_use_tolerance + 1e-12
+        ):
             return FieldGenerationResult(
                 lineups=lineups,
                 source_targets=source_targets,
@@ -160,11 +203,13 @@ def generate_field(
                 achieved_marginals=achieved,
                 stack_rate=stack_rate,
                 maximum_marginal_error=maximum_error,
+                salary_use=salary_use,
+                calibration_biases=dict(biases),
             )
         for player_id, target in calibrated.items():
-            difference = target - achieved[player_id]
-            scale = max(target * (1.0 - target), 0.04)
-            biases[player_id] = max(-12.0, min(12.0, biases[player_id] + 0.75 * difference / scale))
+            smoothing = 0.5 / lineup_count
+            correction = 0.8 * math.log((target + smoothing) / (achieved[player_id] + smoothing))
+            biases[player_id] = max(-12.0, min(12.0, biases[player_id] + correction))
 
     assert best is not None
     worst = sorted(
@@ -180,14 +225,21 @@ def generate_field(
     )
     raise FieldGenerationError(
         f"field ownership calibration failed: maximum error {best[2]:.6f} exceeds "
-        f"tolerance {config.ownership_tolerance:.6f}; {detail}"
+        f"tolerance {config.ownership_tolerance:.6f}; salary_use target="
+        f"{config.salary_use:.6f} achieved={best[4]:.6f} tolerance="
+        f"{config.salary_use_tolerance:.6f}; {detail}"
     )
 
 
-def lineup_is_legal(lineup: Sequence[int], request: OptimizationRequest) -> bool:
+def lineup_is_legal(
+    lineup: Sequence[int],
+    request: OptimizationRequest,
+    *,
+    _players_by_id: Mapping[int, CandidatePlayer] | None = None,
+) -> bool:
     """Validate the site roster, salary, team, and game rules without pydfs."""
 
-    players_by_id = {
+    players_by_id = _players_by_id or {
         player.player_id: player for player in request.candidate_player_scenario.players
     }
     if len(lineup) != len(CLASSIC_SITE_RULES[request.site].slots) or len(set(lineup)) != len(
@@ -224,117 +276,253 @@ def _generate_population(
     rng: np.random.Generator,
     config: FieldConfig,
     biases: Mapping[int, float],
-) -> tuple[tuple[tuple[int, ...], ...], float]:
+) -> tuple[tuple[tuple[int, ...], ...], float, float]:
     players = tuple(
         sorted(request.candidate_player_scenario.players, key=lambda item: item.player_id)
     )
-    counts: Counter[int] = Counter()
+    player_ids = np.asarray([player.player_id for player in players], dtype=np.int64)
+    salaries = np.asarray([player.salary for player in players], dtype=np.int64)
+    team_names = tuple(sorted({player.team for player in players}))
+    team_lookup = {team: index for index, team in enumerate(team_names)}
+    team_indices = np.asarray([team_lookup[player.team] for player in players], dtype=np.int64)
+    touch_players = np.asarray(
+        [_position(player.position) in {"RB", "WR", "TE"} for player in players],
+        dtype=np.bool_,
+    )
+    counts = np.zeros(len(players), dtype=np.int64)
+    target_values = np.asarray([targets[int(player_id)] for player_id in player_ids])
+    bias_values = np.asarray([biases[int(player_id)] for player_id in player_ids])
+    exponential_biases = np.exp(bias_values)
     lineups: list[tuple[int, ...]] = []
     stacked = 0
+    salary_total = 0
+    by_id = {player.player_id: player for player in players}
+    slots = CLASSIC_SITE_RULES[request.site].slots
+    slot_candidates = {
+        slot: _slot_candidates(
+            np.asarray(
+                [index for index, player in enumerate(players) if _eligible(player, slot)],
+                dtype=np.int64,
+            ),
+            salaries=salaries,
+            team_indices=team_indices,
+            touch_players=touch_players,
+            targets=target_values,
+            exponential_biases=exponential_biases,
+            lineup_count=lineup_count,
+        )
+        for slot in set(slots)
+    }
+    salary_bounds = _precomputed_salary_bounds(players, slots)
+    salary_floor, salary_ceiling = _salary_band(request, config)
+    if salary_bounds[0][0] > salary_ceiling or salary_bounds[0][1] < salary_floor:
+        nearest_salary = (
+            salary_bounds[0][0] if salary_bounds[0][0] > salary_ceiling else salary_bounds[0][1]
+        )
+        raise FieldGenerationError(
+            "field salary calibration is infeasible from the candidate pool: "
+            f"salary_use target={config.salary_use:.6f} tolerance="
+            f"{config.salary_use_tolerance:.6f}, achievable coarse range="
+            f"[{salary_bounds[0][0] / request.salary_cap:.6f}, "
+            f"{salary_bounds[0][1] / request.salary_cap:.6f}], achieved="
+            f"{nearest_salary / request.salary_cap:.6f}"
+        )
+    team_slots = int(team_indices.max()) + 1
     for lineup_index in range(lineup_count):
         require_stack = bool(rng.random() < config.stack_rate)
-        lineup = _draw_lineup(
+        lineup, lineup_indices = _draw_lineup(
             request,
-            players,
-            targets,
-            counts,
+            player_ids=player_ids,
+            counts=counts,
             lineup_index=lineup_index,
             lineup_count=lineup_count,
             require_stack=require_stack,
             rng=rng,
             config=config,
-            biases=biases,
+            salary_bounds=salary_bounds,
+            salary_floor=salary_floor,
+            salary_ceiling=salary_ceiling,
+            slot_candidates=slot_candidates,
+            player_count=len(players),
+            team_slots=team_slots,
+            players_by_id=by_id,
         )
-        counts.update(lineup)
+        counts[lineup_indices] += 1
         lineups.append(tuple(sorted(lineup)))
-        if _is_stack(lineup, players):
+        salary_total += int(salaries[lineup_indices].sum())
+        if _is_stack(lineup, by_id):
             stacked += 1
-    return tuple(lineups), stacked / lineup_count
+    return (
+        tuple(lineups),
+        stacked / lineup_count,
+        salary_total / (lineup_count * request.salary_cap),
+    )
 
 
 def _draw_lineup(
     request: OptimizationRequest,
-    players: tuple[CandidatePlayer, ...],
-    targets: Mapping[int, float],
-    counts: Counter[int],
     *,
+    player_ids: NDArray[np.int64],
+    counts: NDArray[np.int64],
     lineup_index: int,
     lineup_count: int,
     require_stack: bool,
     rng: np.random.Generator,
     config: FieldConfig,
-    biases: Mapping[int, float],
-) -> tuple[int, ...]:
+    salary_bounds: tuple[tuple[int, int], ...],
+    salary_floor: int,
+    salary_ceiling: int,
+    slot_candidates: Mapping[str, _SlotCandidates],
+    player_count: int,
+    team_slots: int,
+    players_by_id: Mapping[int, CandidatePlayer],
+) -> tuple[tuple[int, ...], NDArray[np.int64]]:
     slots = CLASSIC_SITE_RULES[request.site].slots
     remaining_lineups = lineup_count - lineup_index
+    closest_salary = 0
     for _ in range(config.lineup_attempts):
         selected: list[int] = []
-        team_counts: Counter[str] = Counter()
-        qb_team: str | None = None
+        selected_mask = np.zeros(player_count, dtype=np.bool_)
+        team_counts = np.zeros(team_slots, dtype=np.int64)
+        qb_team: int | None = None
+        remaining_salary = salary_ceiling
         failed = False
-        for slot in slots:
-            eligible = [
-                player
-                for player in players
-                if player.player_id not in selected
-                and _eligible(player, slot)
-                and (
-                    request.max_players_per_team is None
-                    or team_counts[player.team] < request.max_players_per_team
-                )
-            ]
-            if not eligible:
+        for slot_index, slot in enumerate(slots):
+            remaining_slots = len(slots) - slot_index - 1
+            minimum_completion, maximum_completion = salary_bounds[slot_index + 1]
+            spent = salary_ceiling - remaining_salary
+            available = slot_candidates[slot]
+            candidate_salaries = available.salaries
+            # The minimum-completion term already implies salaries <= remaining_salary.
+            mask = (
+                ~selected_mask[available.indices]
+                & (candidate_salaries + minimum_completion <= remaining_salary)
+                & (spent + candidate_salaries + maximum_completion >= salary_floor)
+            )
+            if request.max_players_per_team is not None:
+                mask &= team_counts[available.teams] < request.max_players_per_team
+            if not require_stack and qb_team is not None:
+                mask &= ~((available.teams == qb_team) & available.touch)
+            eligible = np.flatnonzero(mask)
+            if eligible.size == 0:
                 failed = True
                 break
-            weights: list[float] = []
-            for player in eligible:
-                target = targets[player.player_id]
-                needed = target * lineup_count - counts[player.player_id]
-                desired_now = max(0.01, min(1.0, needed / max(1, remaining_lineups)))
-                odds = desired_now / max(1e-9, 1.0 - desired_now)
-                weight = odds * math.exp(biases[player.player_id])
-                if (
-                    require_stack
-                    and qb_team is not None
-                    and player.team == qb_team
-                    and _position(player.position) in {"RB", "WR", "TE"}
-                ):
-                    weight *= config.stack_weight
-                weights.append(max(weight, 1e-12))
-            chosen = eligible[_weighted_index(weights, rng)]
-            selected.append(chosen.player_id)
-            team_counts[chosen.team] += 1
+            desired_salary = (request.salary_cap * config.salary_use - spent) / (
+                remaining_slots + 1
+            )
+            eligible_salaries = candidate_salaries[eligible]
+            salary_scale = max(1.0, float(eligible_salaries.max() - eligible_salaries.min()))
+            catch_up = (
+                available.target_counts[eligible] - counts[available.indices[eligible]]
+            ) / max(1, remaining_lineups)
+            desired_now = np.clip(0.65 * available.targets[eligible] + 0.35 * catch_up, 0.01, 0.99)
+            weights = desired_now / np.maximum(1e-9, 1.0 - desired_now)
+            weights *= available.exponential_biases[eligible]
+            salary_pull = (eligible_salaries - desired_salary) / salary_scale
+            weights *= np.exp(np.clip(salary_pull, -1.0, 1.0))
+            if require_stack and qb_team is not None:
+                weights *= np.where(
+                    (available.teams[eligible] == qb_team) & available.touch[eligible],
+                    config.stack_weight,
+                    1.0,
+                )
+            position = int(eligible[_weighted_array_index(weights, rng)])
+            chosen = int(available.indices[position])
+            chosen_team = int(available.teams[position])
+            selected.append(chosen)
+            selected_mask[chosen] = True
+            remaining_salary -= int(candidate_salaries[position])
+            team_counts[chosen_team] += 1
             if slot == "QB":
-                qb_team = chosen.team
+                qb_team = chosen_team
         if failed:
             continue
-        lineup = tuple(selected)
-        if _is_stack(lineup, players) != require_stack:
+        indices = np.asarray(selected, dtype=np.int64)
+        lineup = tuple(int(player_ids[index]) for index in indices)
+        salary = salary_ceiling - remaining_salary
+        if abs(salary - request.salary_cap * config.salary_use) < abs(
+            closest_salary - request.salary_cap * config.salary_use
+        ):
+            closest_salary = salary
+        if not salary_floor <= salary <= salary_ceiling:
             continue
-        if lineup_is_legal(lineup, request):
-            return lineup
+        if _is_stack(lineup, players_by_id) != require_stack:
+            continue
+        if lineup_is_legal(lineup, request, _players_by_id=players_by_id):
+            return lineup, indices
     label = " with the configured QB stack" if require_stack else ""
     raise FieldGenerationError(
-        f"could not generate a legal field lineup{label} after {config.lineup_attempts} attempts"
+        f"could not generate a legal field lineup{label} after {config.lineup_attempts} attempts; "
+        f"salary_use target={config.salary_use:.6f} achieved="
+        f"{closest_salary / request.salary_cap:.6f} tolerance="
+        f"{config.salary_use_tolerance:.6f}"
     )
 
 
-def _weighted_index(weights: Sequence[float], rng: np.random.Generator) -> int:
-    total = math.fsum(weights)
+def _salary_band(request: OptimizationRequest, config: FieldConfig) -> tuple[int, int]:
+    """The inclusive spent-salary window the configured salary-use band allows."""
+
+    floor = math.ceil(request.salary_cap * (config.salary_use - config.salary_use_tolerance) - 1e-9)
+    ceiling = min(
+        request.salary_cap,
+        math.floor(request.salary_cap * (config.salary_use + config.salary_use_tolerance) + 1e-9),
+    )
+    return floor, ceiling
+
+
+def _slot_candidates(
+    indices: NDArray[np.int64],
+    *,
+    salaries: NDArray[np.int64],
+    team_indices: NDArray[np.int64],
+    touch_players: NDArray[np.bool_],
+    targets: NDArray[np.float64],
+    exponential_biases: NDArray[np.float64],
+    lineup_count: int,
+) -> _SlotCandidates:
+    slot_targets = targets[indices]
+    return _SlotCandidates(
+        indices=indices,
+        salaries=salaries[indices],
+        teams=team_indices[indices],
+        touch=touch_players[indices],
+        targets=slot_targets,
+        target_counts=slot_targets * lineup_count,
+        exponential_biases=exponential_biases[indices],
+    )
+
+
+def _precomputed_salary_bounds(
+    players: Sequence[CandidatePlayer], slots: Sequence[str]
+) -> tuple[tuple[int, int], ...]:
+    """Conservative min/max completion salary for every remaining slot suffix."""
+
+    per_slot: list[tuple[int, int]] = []
+    for slot in slots:
+        salaries = [player.salary for player in players if _eligible(player, slot)]
+        if not salaries:
+            raise FieldGenerationError(f"candidate pool has no player eligible for {slot}")
+        per_slot.append((min(salaries), max(salaries)))
+    suffix: list[tuple[int, int]] = [(0, 0)] * (len(slots) + 1)
+    for index in range(len(slots) - 1, -1, -1):
+        next_minimum, next_maximum = suffix[index + 1]
+        suffix[index] = (
+            per_slot[index][0] + next_minimum,
+            per_slot[index][1] + next_maximum,
+        )
+    return tuple(suffix)
+
+
+def _weighted_array_index(weights: NDArray[np.float64], rng: np.random.Generator) -> int:
+    cumulative = np.cumsum(weights)
+    total = float(cumulative[-1])
     if not math.isfinite(total) or total <= 0:
         raise FieldGenerationError("field candidate weights are not finite and positive")
-    threshold = float(rng.random()) * total
-    running = 0.0
-    for index, weight in enumerate(weights):
-        running += weight
-        if running >= threshold:
-            return index
-    return len(weights) - 1
+    return min(len(weights) - 1, int(np.searchsorted(cumulative, rng.random() * total)))
 
 
-def _is_stack(lineup: Sequence[int], players: Sequence[CandidatePlayer]) -> bool:
-    by_id = {player.player_id: player for player in players}
-    selected = tuple(by_id[player_id] for player_id in lineup)
+def _is_stack(lineup: Sequence[int], players_by_id: Mapping[int, CandidatePlayer]) -> bool:
+    selected = tuple(players_by_id[player_id] for player_id in lineup)
     quarterback = next((player for player in selected if _position(player.position) == "QB"), None)
     return quarterback is not None and any(
         player.player_id != quarterback.player_id
@@ -345,30 +533,57 @@ def _is_stack(lineup: Sequence[int], players: Sequence[CandidatePlayer]) -> bool
 
 
 def _can_assign_slots(players: Sequence[CandidatePlayer], slots: Sequence[str]) -> bool:
-    ordered_slots = tuple(sorted(slots, key=lambda slot: sum(_eligible(p, slot) for p in players)))
+    # One eligibility pass feeds both the most-constrained-first ordering and the search,
+    # so the backstop costs one pass over the roster rather than one per branch.
+    eligible_by_slot = tuple(
+        tuple(index for index, player in enumerate(players) if _eligible(player, slot))
+        for slot in slots
+    )
+    ordered_slots = tuple(sorted(eligible_by_slot, key=len))
 
-    def assign(index: int, used: set[int]) -> bool:
+    def assign(index: int, used: frozenset[int]) -> bool:
         if index == len(ordered_slots):
             return True
-        slot = ordered_slots[index]
         return any(
-            assign(index + 1, used | {player.player_id})
-            for player in players
-            if player.player_id not in used and _eligible(player, slot)
+            assign(index + 1, used | {candidate})
+            for candidate in ordered_slots[index]
+            if candidate not in used
         )
 
-    return assign(0, set())
+    return assign(0, frozenset())
 
 
 def _eligible(player: CandidatePlayer, slot: str) -> bool:
     normalized = "DST" if slot == "DEF" else slot
-    eligible = {"DST" if value == "DEF" else value for value in player.eligible_roster_slots}
-    return normalized in eligible
+    return normalized in _normalized_slots(player.eligible_roster_slots)
+
+
+@cache
+def _normalized_slots(slots: tuple[str, ...]) -> frozenset[str]:
+    return frozenset("DST" if value == "DEF" else value for value in slots)
 
 
 def _position(value: str) -> str:
     normalized = value.strip().upper()
     return "DST" if normalized in {"D", "DEF"} else normalized
+
+
+def _starting_biases(
+    players: Sequence[CandidatePlayer], carried: Mapping[int, float] | None
+) -> dict[int, float]:
+    if carried is None:
+        return {player.player_id: 0.0 for player in players}
+    expected = {player.player_id for player in players}
+    if set(carried) != expected:
+        missing = sorted(expected - set(carried))
+        extra = sorted(set(carried) - expected)
+        raise FieldGenerationError(
+            f"carried field calibration does not cover this pool; missing={missing}, extra={extra}"
+        )
+    values = {int(player_id): float(value) for player_id, value in carried.items()}
+    if any(not math.isfinite(value) for value in values.values()):
+        raise FieldGenerationError("carried field calibration contains a non-finite bias")
+    return values
 
 
 def _validate_targets(players: Sequence[CandidatePlayer], ownership: Mapping[int, float]) -> None:

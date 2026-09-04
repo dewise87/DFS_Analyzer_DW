@@ -34,6 +34,14 @@ class OwnershipMarginal(BaseModel):
     absolute_error: float = Field(ge=0, le=1, allow_inf_nan=False)
 
 
+class DistributionProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    player_id: int
+    player_distribution_id: int = Field(gt=0)
+    source: str = Field(min_length=1)
+
+
 class MetricSummary(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -64,6 +72,8 @@ class SimulationReport(BaseModel):
     decision_snapshot_id: str
     contest_external_id: str
     contest_id: int = Field(gt=0)
+    contest_field_size: int = Field(default=0, ge=0)
+    contest_entry_fee_cents: int = Field(default=0, ge=0)
     site: str
     season: int = Field(ge=1)
     week: int = Field(ge=1, le=99)
@@ -73,14 +83,27 @@ class SimulationReport(BaseModel):
     config_version: str
     config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     game_factor_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
-    team_factor_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    # ``team_factor_loading`` keeps old simulation_runs readable by calibration.
+    team_factor_loading: float | None = Field(default=None, ge=0, lt=1, allow_inf_nan=False)
+    team_factor_loadings: tuple[tuple[str, float], ...] = ()
+    qb_pass_catcher_loading: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
     within_position_negative_loading: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    implied_qb_wr_same_team_correlation: float = Field(default=0.0, ge=-1, le=1)
+    implied_wr_wr_same_team_correlation: float = Field(default=0.0, ge=-1, le=1)
+    implied_qb_qb_opposing_correlation: float = Field(default=0.0, ge=-1, le=1)
+    implied_cross_game_correlation: float = Field(default=0.0, ge=-1, le=1)
     configured_stack_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     ownership_source: Literal["scenario_model", "vendor_baseline"]
     ownership_scenario_run_id: str | None = None
+    ownership_scenario_id: str | None = None
     field_lineup_count: int = Field(ge=0)
+    field_replicates: int = Field(default=1, ge=1)
     field_stack_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     ownership_tolerance: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    configured_salary_use: float = Field(default=1.0, gt=0, le=1)
+    salary_use_tolerance: float = Field(default=0.01, gt=0, lt=1)
+    field_salary_use: float = Field(default=1.0, gt=0, le=1)
+    distribution_rows: tuple[DistributionProvenance, ...] = ()
     ownership_marginals: tuple[OwnershipMarginal, ...]
     lineup_results: tuple[LineupSimulationResult, ...]
     portfolio_result: PortfolioSimulationResult

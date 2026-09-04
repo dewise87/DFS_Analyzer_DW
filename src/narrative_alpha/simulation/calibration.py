@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import re
 import sqlite3
 from collections import Counter
 from collections.abc import Sequence
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from narrative_alpha.identity.normalization import name_without_suffix, normalize_name
 from narrative_alpha.ingest.results import (
     ContestArchetype,
     ContestMetadata,
@@ -158,7 +160,13 @@ def _calibrate_run(
         for quantile, simulated in report.simulated_score_quantiles
     )
     realized_duplicates = _duplication_distribution(
-        tuple(entry.lineup for entry in standings.entries)
+        _resolve_standings_lineups(
+            connection,
+            tuple(entry.lineup for entry in standings.entries),
+            slate_id=int(run["slate_id"]),
+            source=f"{run['site']}-contest-standings",
+            observed_at=observed_at,
+        )
     )
     content = _render_comparison(
         report,
@@ -237,6 +245,7 @@ def _render_comparison(
     output.write(f"config_version={report.config_version}\n")
     output.write(f"config_sha256={report.config_sha256}\n")
     output.write(f"draws={report.draws}\n")
+    output.write(f"field_replicates={report.field_replicates}\n")
     output.write(f"seed={report.seed}\n")
     output.write(f"ledger_entries={ledger_count}\n")
     output.write(f"standings_sha256={standings_sha256}\n")
@@ -244,6 +253,8 @@ def _render_comparison(
     writer = csv.writer(output, lineterminator="\n")
 
     output.write("\nOWNERSHIP MARGINAL COMPARISON\n")
+    if report.notice is not None:
+        output.write(EXPERIMENTAL_NOTICE + "\n")
     writer.writerow(
         (
             "player_id",
@@ -272,6 +283,8 @@ def _render_comparison(
         )
 
     output.write("\nSCORE DISTRIBUTION QUANTILES\n")
+    if report.notice is not None:
+        output.write(EXPERIMENTAL_NOTICE + "\n")
     writer.writerow(("quantile", "simulated", "realized", "difference"))
     for quantile, simulated, realized in score_comparison:
         writer.writerow(
@@ -284,6 +297,8 @@ def _render_comparison(
         )
 
     output.write("\nDUPLICATION COUNT DISTRIBUTION\n")
+    if report.notice is not None:
+        output.write(EXPERIMENTAL_NOTICE + "\n")
     writer.writerow(("duplicates_excluding_self", "simulated_probability", "realized_probability"))
     simulated_distribution = dict(report.simulated_field_duplication_distribution)
     realized_distribution = dict(realized_duplicates)
@@ -298,13 +313,139 @@ def _render_comparison(
     return output.getvalue()
 
 
-def _duplication_distribution(lineups: Sequence[str]) -> tuple[tuple[int, float], ...]:
-    normalized = tuple(" ".join(lineup.split()) for lineup in lineups)
+def _duplication_distribution(
+    lineups: Sequence[Sequence[int]],
+) -> tuple[tuple[int, float], ...]:
+    normalized = tuple(
+        tuple(sorted({int(player_id) for player_id in lineup})) for lineup in lineups
+    )
     counts = Counter(normalized)
     frequencies = Counter(counts[lineup] - 1 for lineup in normalized)
     return tuple(
         (count, frequency / len(normalized)) for count, frequency in sorted(frequencies.items())
     )
+
+
+_LINEUP_SLOT = re.compile(r"(?:^|\s)(QB|RB|WR|TE|FLEX|DST|D/ST|DEF|CPT|MVP)\s+")
+
+
+def _resolve_standings_lineups(
+    connection: sqlite3.Connection,
+    lineups: Sequence[str],
+    *,
+    slate_id: int,
+    source: str,
+    observed_at: datetime,
+) -> tuple[tuple[int, ...], ...]:
+    """Resolve site lineup names against the same canonical/alias crosswalk as ingestion."""
+
+    stamp = observed_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    rows = connection.execute(
+        """
+        WITH ranked AS (
+            SELECT s.*,
+                   row_number() OVER (
+                       PARTITION BY s.slate_id, s.player_id
+                       ORDER BY rtrim(s.observed_at, 'Z') DESC, s.salary_id DESC
+                   ) AS version_rank
+            FROM salaries AS s
+            WHERE s.slate_id = ?
+              AND rtrim(s.observed_at, 'Z') <= rtrim(?, 'Z')
+              AND rtrim(s.valid_from, 'Z') <= rtrim(?, 'Z')
+              AND (s.valid_to IS NULL OR rtrim(s.valid_to, 'Z') > rtrim(?, 'Z'))
+        )
+        SELECT p.player_id, p.canonical_name, p.position
+        FROM ranked AS s JOIN players AS p ON p.player_id = s.player_id
+        WHERE s.version_rank = 1 ORDER BY p.player_id
+        """,
+        (slate_id, stamp, stamp, stamp),
+    ).fetchall()
+    if not rows:
+        raise SimulationCalibrationError(
+            f"slate {slate_id} has no salary crosswalk at the standings timestamp"
+        )
+    candidates = {
+        int(row["player_id"]): (
+            str(row["canonical_name"]),
+            _position(None if row["position"] is None else str(row["position"])),
+        )
+        for row in rows
+    }
+    aliases = connection.execute(
+        """
+        SELECT player_id, alias FROM player_aliases
+        WHERE source = ?
+          AND (
+              (manual_override = 1 AND valid_to IS NULL)
+              OR (
+                  rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
+                  AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
+              )
+          )
+        ORDER BY manual_override DESC, alias_id DESC
+        """,
+        (source, stamp, stamp),
+    ).fetchall()
+    names: dict[str, set[int]] = {}
+    suffix_names: dict[str, set[int]] = {}
+    for player_id, (name, _) in candidates.items():
+        names.setdefault(normalize_name(name), set()).add(player_id)
+        suffix_names.setdefault(name_without_suffix(name), set()).add(player_id)
+    for row in aliases:
+        player_id = int(row["player_id"])
+        if player_id not in candidates:
+            continue
+        alias = str(row["alias"])
+        names.setdefault(normalize_name(alias), set()).add(player_id)
+        suffix_names.setdefault(name_without_suffix(alias), set()).add(player_id)
+
+    resolved: list[tuple[int, ...]] = []
+    for lineup in lineups:
+        entries = _lineup_entries(lineup)
+        player_ids: list[int] = []
+        for slot, name in entries:
+            possible = names.get(normalize_name(name), set())
+            if not possible:
+                possible = suffix_names.get(name_without_suffix(name), set())
+            eligible = {
+                player_id for player_id in possible if _slot_agrees(slot, candidates[player_id][1])
+            }
+            if len(eligible) != 1:
+                raise SimulationCalibrationError(
+                    f"standings lineup player {name!r} at {slot} did not resolve uniquely "
+                    f"through the slate crosswalk; candidates={sorted(eligible)}"
+                )
+            player_ids.append(next(iter(eligible)))
+        resolved.append(tuple(sorted(set(player_ids))))
+    return tuple(resolved)
+
+
+def _lineup_entries(lineup: str) -> tuple[tuple[str, str], ...]:
+    normalized = " ".join(lineup.split())
+    matches = tuple(_LINEUP_SLOT.finditer(normalized))
+    if not matches or matches[0].start() != 0:
+        raise SimulationCalibrationError(f"cannot parse standings lineup: {lineup!r}")
+    entries: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        name = normalized[match.end() : end].strip()
+        if not name:
+            raise SimulationCalibrationError(f"standings lineup has an empty {match.group(1)}")
+        entries.append((match.group(1), name))
+    return tuple(entries)
+
+
+def _slot_agrees(slot: str, position: str | None) -> bool:
+    if slot in {"FLEX", "CPT", "MVP"}:
+        return True
+    return _position(slot) == position
+
+
+def _position(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    return "DST" if normalized in {"D", "DEF", "D/ST"} else normalized
 
 
 def _lower_quantile(values: np.ndarray[tuple[int], np.dtype[np.float64]], q: float) -> float:

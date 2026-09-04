@@ -29,6 +29,7 @@ from narrative_alpha.simulation.field import (
 )
 from narrative_alpha.simulation.models import (
     EXPERIMENTAL_NOTICE,
+    DistributionProvenance,
     LineupSimulationResult,
     OwnershipMarginal,
     PlayerSimulationInput,
@@ -36,8 +37,13 @@ from narrative_alpha.simulation.models import (
     SimulationReport,
     SimulationRunResult,
 )
-from narrative_alpha.simulation.outcomes import OutcomeSimulationError, draw_player_outcomes
+from narrative_alpha.simulation.outcomes import (
+    OutcomeSimulationError,
+    draw_player_outcomes,
+    implied_pairwise_correlations,
+)
 from narrative_alpha.simulation.runner import (
+    MAX_SIMULATED_FIELD_SIZE,
     SimulationRunError,
     load_contest_for_decision,
     load_ownership_for_decision,
@@ -50,11 +56,13 @@ from narrative_alpha.simulation.runner import (
 __all__ = [
     "DEFAULT_SIMULATION_CONFIG_PATH",
     "EXPERIMENTAL_NOTICE",
+    "MAX_SIMULATED_FIELD_SIZE",
     "CalibrationConfig",
     "CalibrationResult",
     "ContestEvaluation",
     "ContestSimulationError",
     "DependenceConfig",
+    "DistributionProvenance",
     "FieldConfig",
     "FieldGenerationError",
     "FieldGenerationResult",
@@ -74,6 +82,7 @@ __all__ = [
     "draw_player_outcomes",
     "evaluate_contest",
     "generate_field",
+    "implied_pairwise_correlations",
     "lineup_is_legal",
     "load_contest_for_decision",
     "load_ownership_for_decision",
