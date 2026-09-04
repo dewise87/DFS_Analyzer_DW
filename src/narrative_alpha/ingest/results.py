@@ -16,6 +16,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from narrative_alpha.contests import load_contest_payouts
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput
 from narrative_alpha.identity.normalization import name_without_suffix, normalize_name
 from narrative_alpha.ingest.salaries import SalarySite, SalarySlateType
@@ -156,6 +157,18 @@ class ParsedActualOwnership(BaseModel):
         return self
 
 
+class ParsedContestEntry(BaseModel):
+    """One entrant row retained for matching against the frozen-entry ledger."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    row_number: int = Field(ge=2)
+    rank: int = Field(ge=1)
+    entry_id: str = Field(min_length=1)
+    entry_name: str = Field(min_length=1)
+    points: float = Field(allow_inf_nan=False)
+
+
 class RejectedContestRow(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -190,6 +203,7 @@ class ContestStandingsParseResult(BaseModel):
     site: SalarySite
     source_file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     field_size: int = Field(gt=0)
+    entries: tuple[ParsedContestEntry, ...]
     rows: tuple[ParsedActualOwnership, ...]
     parse_report: ContestStandingsParseReport
 
@@ -199,6 +213,11 @@ class ContestLoadReport(BaseModel):
 
     ownership_rows_inserted: int = Field(ge=0)
     result_rows_inserted: int = Field(ge=0)
+    entry_result_rows_inserted: int = Field(default=0, ge=0)
+    entry_result_duplicate_rows: int = Field(default=0, ge=0)
+    settled_entries: int = Field(default=0, ge=0)
+    unsettled_entries: int = Field(default=0, ge=0)
+    unledgered_entries: int = Field(default=0, ge=0)
     duplicate_rows: int = Field(ge=0)
     unresolved_rows: int = Field(ge=0)
     rejected_rows: int = Field(ge=0)
@@ -251,24 +270,43 @@ def parse_contest_standings(
 
     rejected: list[RejectedContestRow] = []
     entry_rows_seen = 0
-    valid_entry_rows = 0
+    parsed_entries: list[ParsedContestEntry] = []
+    entry_ids: set[str] = set()
+    entry_map = {_header(cell): index for index, cell in enumerate(entry_headers)}
     for row_index in range(entry_header_index + 1, athlete_header_index):
         row = rows[row_index]
         if not any(cell.strip() for cell in row):
             continue
         entry_rows_seen += 1
-        if len(row) != len(entry_headers) or not row[_column(entry_headers, "entryid")].strip():
+        try:
+            if len(row) != len(entry_headers):
+                raise ValueError("entry row width does not match header")
+            entry_id = row[entry_map["entryid"]].strip()
+            entry_name = row[entry_map["entryname"]].strip()
+            if not entry_id or not entry_name:
+                raise ValueError("entry ID and entry name are required")
+            if entry_id in entry_ids:
+                raise ValueError("duplicate entry ID")
+            parsed_entries.append(
+                ParsedContestEntry(
+                    row_number=row_index + 1,
+                    rank=int(row[entry_map["rank"]].strip()),
+                    entry_id=entry_id,
+                    entry_name=entry_name,
+                    points=float(row[entry_map[_entry_points_header(metadata.site)]].strip()),
+                )
+            )
+            entry_ids.add(entry_id)
+        except ValueError as error:
             rejected.append(
                 RejectedContestRow(
                     row_number=row_index + 1,
                     section="entries",
-                    reasons=("entry row has wrong width or missing entry ID",),
+                    reasons=(str(error),),
                 )
             )
-        else:
-            valid_entry_rows += 1
 
-    field_size = valid_entry_rows
+    field_size = len(parsed_entries)
     if field_size <= 0:
         raise ContestStandingsError("contest standings contains no parseable entrant rows")
     if metadata.expected_field_size is not None and field_size != metadata.expected_field_size:
@@ -344,6 +382,7 @@ def parse_contest_standings(
         site=metadata.site,
         source_file_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         field_size=field_size,
+        entries=tuple(parsed_entries),
         rows=tuple(parsed),
         parse_report=report,
     )
@@ -371,6 +410,14 @@ def load_contest_standings(
     unresolved_ids: list[int] = []
     errors: list[str] = []
     role_points: dict[int, dict[str, tuple[_SlatePlayer, float, str]]] = {}
+
+    settlement = _settle_ledger_entries(
+        connection,
+        metadata=metadata,
+        parsed=parsed,
+        ingested_at=ingestion_time,
+        run_id=run_id,
+    )
 
     for ownership in parsed.rows:
         candidate = _resolve_slate_player(connection, source, ownership, slate_players)
@@ -491,12 +538,113 @@ def load_contest_standings(
     return ContestLoadReport(
         ownership_rows_inserted=ownership_inserted,
         result_rows_inserted=result_inserted,
+        entry_result_rows_inserted=settlement[0],
+        entry_result_duplicate_rows=settlement[1],
+        settled_entries=settlement[2],
+        unsettled_entries=settlement[3],
+        unledgered_entries=settlement[4],
         duplicate_rows=duplicate_rows,
         unresolved_rows=len(unresolved_ids),
         rejected_rows=parsed.parse_report.rows_rejected,
         unresolved_ids=tuple(unresolved_ids),
         errors=tuple(errors),
     )
+
+
+def _settle_ledger_entries(
+    connection: sqlite3.Connection,
+    *,
+    metadata: ContestMetadata,
+    parsed: ContestStandingsParseResult,
+    ingested_at: datetime,
+    run_id: str | None,
+) -> tuple[int, int, int, int, int]:
+    """Append one receipt for each current ledger entry in this contest export."""
+
+    ledger = connection.execute(
+        """
+        WITH ranked AS (
+            SELECT ce.*, c.external_contest_id,
+                   row_number() OVER (
+                       PARTITION BY c.site, c.external_contest_id, ce.entry_id
+                       ORDER BY rtrim(d.decision_at, 'Z') DESC, ce.contest_entry_id DESC
+                   ) AS assignment_rank
+            FROM contest_entries AS ce
+            JOIN contests AS c ON c.contest_id = ce.contest_id
+            JOIN decision_snapshots AS d
+              ON d.decision_snapshot_id = ce.decision_snapshot_id
+            WHERE c.site = ? AND c.external_contest_id = ? AND c.slate_id = ?
+        )
+        SELECT * FROM ranked WHERE assignment_rank = 1 ORDER BY entry_id
+        """,
+        (metadata.site.value, metadata.contest_id, metadata.slate_id),
+    ).fetchall()
+    if not ledger:
+        return 0, 0, 0, 0, 0
+    if metadata.payout_curve_id is None:
+        raise ContestStandingsError(
+            f"contest {metadata.contest_id} has ledger entries but no payout table; "
+            "add the contest payout curve with `na-contest add`, then rerun `na-ops results`"
+        )
+    payouts = load_contest_payouts(
+        connection, payout_curve_id=metadata.payout_curve_id, as_of=metadata.observed_at
+    )
+    if not payouts:
+        raise ContestStandingsError(
+            f"contest {metadata.contest_id} payout curve {metadata.payout_curve_id!r} has no "
+            "payout table; add it with `na-contest add`, then rerun `na-ops results`"
+        )
+    by_id = {entry.entry_id: entry for entry in parsed.entries}
+    ledger_ids = {str(row["entry_id"]) for row in ledger}
+    our_names = {by_id[entry_id].entry_name for entry_id in ledger_ids if entry_id in by_id}
+    unledgered = sum(
+        entry.entry_name in our_names and entry.entry_id not in ledger_ids
+        for entry in parsed.entries
+    )
+    inserted = duplicates = settled = unsettled = 0
+    stamp = utc_timestamp(metadata.observed_at)
+    source = f"{metadata.site.value}-contest-standings"
+    for ledger_row in ledger:
+        entry = by_id.get(str(ledger_row["entry_id"]))
+        status = "settled" if entry is not None else "unsettled"
+        prize = None
+        reason = None
+        if entry is None:
+            unsettled += 1
+            rank = points = None
+            reason = "ledger entry is absent from the standings export"
+        else:
+            settled += 1
+            rank = entry.rank
+            points = entry.points
+            prize = next(
+                (
+                    payout.prize_cents
+                    for payout in payouts
+                    if payout.rank_from <= entry.rank <= payout.rank_to
+                ),
+                0,
+            )
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO contest_entry_results(
+                contest_entry_id, settlement_status, rank, points, payout_cents,
+                unsettled_reason, source_file_sha256, source, published_at,
+                observed_at, ingested_at, effective_at, valid_from, valid_to,
+                source_version, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                int(ledger_row["contest_entry_id"]), status, rank, points, prize, reason,
+                parsed.source_file_sha256, source, optional_utc_timestamp(metadata.published_at),
+                stamp, utc_timestamp(ingested_at), optional_utc_timestamp(metadata.effective_at),
+                stamp, metadata.source_version, run_id,
+            ),
+        )
+        was_inserted = int(cursor.rowcount == 1)
+        inserted += was_inserted
+        duplicates += 1 - was_inserted
+    return inserted, duplicates, settled, unsettled, unledgered
 
 
 def _derive_game_results(
@@ -685,6 +833,10 @@ def _find_athlete_header(rows: list[list[str]], start: int) -> int:
 
 def _column(headers: tuple[str, ...], canonical: str) -> int:
     return tuple(_header(value) for value in headers).index(canonical)
+
+
+def _entry_points_header(site: SalarySite) -> str:
+    return "points" if site is SalarySite.DRAFTKINGS else "score"
 
 
 def _header(value: str) -> str:

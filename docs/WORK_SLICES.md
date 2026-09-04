@@ -2609,6 +2609,21 @@ risk), Appendix E item 9, §6.4 (lineup decision metrics are contest-level).
 > without a payout table refuses; the report agrees with the rows on a seeded store;
 > re-running settlement inserts nothing new. Gates green; never the production database.
 
+**Implementation status (2026-09-04):** landed as `src/narrative_alpha/entries.py`, migration
+0020 (`contest_entries`, `contest_entry_results`, append-only), `na-ops slate
+--upload-template` (the site's reserved-entry CSV, parsed by `portfolio.parse_upload_entries`,
+validated against `contests` before optimization so an unknown contest refuses with
+`na-contest add`), ledger rows written at `slate_build` and by the fast lane for the entries
+it replaced, settlement inside `results_ingest` against the standings export's rank, points,
+and the contest's payout table (a rank outside the table pays zero; a ledger entry absent
+from the export is `unsettled` with the reason; entries under our name that the ledger does
+not hold are counted), `na-report entries`, a receipts section in the Tuesday report, and
+fees and net to date on `na-ops status`.
+
+**Review outcome (2026-09-04):** accepted; one test added for the path the delivery left
+untested — a re-freeze's assignment supersedes the base decision's for the entries it
+replaced and the receipt counts current assignments, not rows.
+
 ### Slice 41 — Monthly review report (Appendix D's last line)
 
 **Goal:** the monthly checklist item nobody will do by hand: source yield, API cost, model
@@ -2643,6 +2658,22 @@ number the store does not hold.
 > Tests: the report renders on an empty store with every heading present; a seeded month
 > reconciles to the rows (spend to the cent, counts exactly); the CLI refuses a malformed
 > month. Gates green.
+
+**Implementation status (2026-09-04):** landed as `src/narrative_alpha/monthly_report.py`
+and `na-report monthly --month YYYY-MM`, written atomically to `<report dir>/monthly/`, with
+the newest report and its age on `na-ops status`. Every number traces to a store column;
+tokens come from the extraction rows, spend from the same nanos column and month boundary
+as `ops/spend.py`.
+
+**Review outcome (2026-09-04):** three fixes. Every point-in-time predicate compared raw
+timestamp text and skipped the `rtrim(col, 'Z')` normalization the store made binding
+after a real look-ahead leak; all of them now use it. "Retained after dedupe" measured
+purge status, since duplicates never become rows — relabeled "not yet purged". Pooled
+credibility cells could sum fine cells from different grading runs, mixing decay computed
+as of different instants; pooling is now within the newest grading run in the window, as
+`grading/report.py` already does. Also: sources with no activity in the month are omitted
+rather than listed for ever, and an unknown lane step degrades one line rather than the
+report. Suite 733 → 742.
 
 ### Queued, not yet prompted (in order)
 

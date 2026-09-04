@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 from collections import defaultdict
+from pathlib import Path
 
 from narrative_alpha.portfolio.adapter import OptimizerError
 from narrative_alpha.portfolio.models import (
@@ -14,6 +15,56 @@ from narrative_alpha.portfolio.models import (
     LineupPlayer,
     UploadEntry,
 )
+
+
+def parse_upload_entries(path: Path, site: DfsSite) -> tuple[UploadEntry, ...]:
+    """Read reserved-entry metadata from an untouched site upload template."""
+
+    try:
+        rows = list(csv.reader(io.StringIO(path.read_text(encoding="utf-8-sig"), newline="")))
+    except UnicodeDecodeError as error:
+        raise OptimizerError("upload template is not UTF-8") from error
+    if not rows:
+        raise OptimizerError("upload template is empty")
+    normalized = tuple(cell.strip().casefold().replace(" ", "_") for cell in rows[0])
+    expected = (
+        ("entry_id", "contest_name", "contest_id", "entry_fee")
+        if site is DfsSite.DRAFTKINGS
+        else ("entry_id", "contest_id", "contest_name")
+    )
+    if normalized[: len(expected)] != expected:
+        raise OptimizerError(
+            "upload template must begin with the site's reserved-entry columns: "
+            + ",".join(expected)
+        )
+    entries: list[UploadEntry] = []
+    for row_number, row in enumerate(rows[1:], start=2):
+        if not any(cell.strip() for cell in row):
+            continue
+        if len(row) < len(expected):
+            raise OptimizerError(f"upload template row {row_number} is too short")
+        prefix = row[: len(expected)]
+        if site is DfsSite.DRAFTKINGS:
+            entry_id, contest_name, contest_id, entry_fee = prefix
+        else:
+            entry_id, contest_id, contest_name = prefix
+            entry_fee = ""
+        try:
+            entries.append(
+                UploadEntry(
+                    entry_id=entry_id,
+                    contest_id=contest_id,
+                    contest_name=contest_name,
+                    entry_fee=entry_fee,
+                )
+            )
+        except ValueError as error:
+            raise OptimizerError(f"invalid upload template row {row_number}: {error}") from error
+    if not entries:
+        raise OptimizerError("upload template contains no reserved entries")
+    if len({entry.entry_id for entry in entries}) != len(entries):
+        raise OptimizerError("upload template contains duplicate entry IDs")
+    return tuple(entries)
 
 
 def export_upload_csv(

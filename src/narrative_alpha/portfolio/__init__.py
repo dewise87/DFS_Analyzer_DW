@@ -19,7 +19,7 @@ from narrative_alpha.portfolio.contest_policies import (
     load_contest_policies_bytes,
     policy_request_fields,
 )
-from narrative_alpha.portfolio.export import export_upload_csv
+from narrative_alpha.portfolio.export import export_upload_csv, parse_upload_entries
 from narrative_alpha.portfolio.heuristic_report import (
     HEURISTIC_NOTICE,
     HeuristicLineupRow,
@@ -98,6 +98,7 @@ __all__ = [
     "lineup_sha256",
     "load_contest_policies",
     "load_contest_policies_bytes",
+    "parse_upload_entries",
     "policy_request_fields",
     "render_heuristic_report",
     "validate_lineup",

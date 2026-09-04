@@ -17,6 +17,7 @@ from typing import Literal
 
 from narrative_alpha.build import BuildResult
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY, DEFAULT_DATABASE_PATH
+from narrative_alpha.entries import build_entry_receipt_report, render_entry_receipt_report
 from narrative_alpha.evaluation import (
     BaselineEvaluationReport,
     BaselineReportError,
@@ -132,6 +133,42 @@ def build_sources_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_entries_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="na-report entries",
+        description="Render cumulative realized entry fees, winnings, net, and ROI.",
+    )
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--season", type=_positive_int, required=True)
+    parser.add_argument("--week", type=_positive_int, required=True)
+    parser.add_argument("--output", type=Path)
+    return parser
+
+
+def build_monthly_parser() -> argparse.ArgumentParser:
+    """`na-report monthly`: the Appendix D monthly review from immutable store rows."""
+
+    parser = argparse.ArgumentParser(
+        prog="na-report monthly",
+        description="Render the monthly source yield, Stage 1 cost, evaluation, and lane review.",
+    )
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--month", type=_month, required=True, metavar="YYYY-MM")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/ops.toml"),
+        help="operator config supplying the local calendar boundary and Stage 1 budget",
+    )
+    parser.add_argument(
+        "--report-directory",
+        type=Path,
+        default=DEFAULT_REPORT_DIRECTORY,
+        help="directory containing monthly/<YYYY-MM>.txt (default: data/reports)",
+    )
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="na-report",
@@ -181,6 +218,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _signals(build_signals_parser().parse_args(values[1:]))
     if values and values[0] == "sources":
         return _sources(build_sources_parser().parse_args(values[1:]))
+    if values and values[0] == "entries":
+        return _entries(build_entries_parser().parse_args(values[1:]))
+    if values and values[0] == "monthly":
+        return _monthly(build_monthly_parser().parse_args(values[1:]))
     arguments = build_parser().parse_args(values)
     output_path = arguments.output or default_report_path(arguments.decision_snapshot_id)
     try:
@@ -237,6 +278,73 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     sys.stdout.write(bundle)
+    return 0
+
+
+def _monthly(arguments: argparse.Namespace) -> int:
+    """Render one month without running migrations or changing the SQLite store."""
+
+    try:
+        # These imports are intentionally delayed.  The operator package re-exports its
+        # lanes, which themselves reuse this CLI's bundle constants.
+        from narrative_alpha.monthly_report import build_monthly_report, monthly_window
+        from narrative_alpha.ops.config import load_ops_config
+
+        config = load_ops_config(arguments.config)
+        window = monthly_window(arguments.month, timezone=config.timezone)
+        with connect_database(arguments.database) as connection:
+            rendered = build_monthly_report(
+                connection,
+                window=window,
+                budget_nanos=config.monthly_llm_budget_nanos,
+            )
+        output_path = Path(arguments.report_directory) / "monthly" / f"{arguments.month}.txt"
+        write_report_atomic(output_path, rendered)
+    except (
+        OSError,
+        RuntimeError,
+        StoreConfigurationError,
+        ValueError,
+        sqlite3.Error,
+    ) as error:
+        print(
+            json.dumps(
+                {"error": {"code": "monthly_report_failed", "message": str(error)}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(rendered)
+    return 0
+
+
+def _entries(arguments: argparse.Namespace) -> int:
+    try:
+        with connect_database(arguments.database) as connection:
+            apply_migrations(connection)
+            report = build_entry_receipt_report(
+                connection, season=arguments.season, week=arguments.week
+            )
+        rendered = render_entry_receipt_report(report)
+        if arguments.output is not None:
+            write_report_atomic(arguments.output, rendered)
+    except (
+        MigrationError,
+        OSError,
+        StoreConfigurationError,
+        ValueError,
+        sqlite3.Error,
+    ) as error:
+        print(
+            json.dumps(
+                {"error": {"code": "entries_failed", "message": str(error)}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(rendered)
     return 0
 
 
@@ -523,6 +631,21 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be positive")
     return parsed
+
+
+def _month(value: str) -> str:
+    """Argparse adapter that rejects non-canonical calendar-month spellings."""
+
+    try:
+        # The CLI has no timezone until its config loads; UTC only validates the spelling.
+        from zoneinfo import ZoneInfo
+
+        from narrative_alpha.monthly_report import MonthlyReportError, monthly_window
+
+        monthly_window(value, timezone=ZoneInfo("UTC"))
+    except MonthlyReportError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return value
 
 
 if __name__ == "__main__":

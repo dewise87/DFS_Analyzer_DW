@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from narrative_alpha.entries import build_entry_receipt_report
 from narrative_alpha.fast.rules import (
     DEFAULT_FAST_LANE_RULES_PATH,
     FastLaneRuleError,
@@ -49,6 +50,7 @@ from narrative_alpha.store import DecisionSnapshotRow
 
 RECEIPT_DIRECTORY_SUFFIX = ".stage1-receipts"
 COLLECTION_WINDOW = timedelta(days=7)
+DEFAULT_REPORT_DIRECTORY = Path("data/reports")
 
 
 @dataclass(frozen=True)
@@ -210,6 +212,14 @@ class FastLaneRulesStatus:
 
 
 @dataclass(frozen=True)
+class MonthlyReportStatus:
+    """The newest saved monthly review; the report itself remains an external artifact."""
+
+    path: Path
+    written_at: datetime
+
+
+@dataclass(frozen=True)
 class OpsStatus:
     """The whole screen as data, so `--json` and the text render never diverge."""
 
@@ -240,10 +250,13 @@ class OpsStatus:
     grading: ClaimGradingStatus | None
     narrative: NarrativeStatus
     fast_lane_rules: FastLaneRulesStatus | None
+    entry_fees_to_date_usd: str
+    entry_net_to_date_usd: str
     month_to_date_spend_usd: str
     monthly_budget_usd: str
     budget_remaining_usd: str
     warnings: tuple[str, ...]
+    monthly_report: MonthlyReportStatus | None
 
     @property
     def manual_actions(self) -> tuple[str, ...]:
@@ -308,6 +321,7 @@ def collect_ops_status(
     now: datetime | None = None,
     pricing_path: Path = DEFAULT_PRICING_PATH,
     fast_lane_rules_path: Path = DEFAULT_FAST_LANE_RULES_PATH,
+    report_directory: Path = DEFAULT_REPORT_DIRECTORY,
 ) -> OpsStatus:
     """Gather the whole screen. Every section degrades to a stated gap, never a crash."""
 
@@ -395,6 +409,7 @@ def collect_ops_status(
     month_start = month_start_utc(as_of, timezone=config.timezone)
     spent = month_to_date_spend_nanos(connection, since=month_start)
     budget = config.monthly_llm_budget_nanos
+    entry_receipts = build_entry_receipt_report(connection, season=config.season, week=99)
     if spent > budget:
         warnings.append(
             f"Stage 1 month-to-date spend ${_usd(spent)} is already over the "
@@ -429,11 +444,29 @@ def collect_ops_status(
         grading=_claim_grading_status(connection, slate=slate),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
+        entry_fees_to_date_usd=(
+            f"{Decimal(entry_receipts.fees_cents) / Decimal(100):.2f}"
+        ),
+        entry_net_to_date_usd=f"{Decimal(entry_receipts.net_cents) / Decimal(100):.2f}",
         month_to_date_spend_usd=_usd(spent),
         monthly_budget_usd=_usd(budget),
         budget_remaining_usd=_usd(max(budget - spent, 0)),
         warnings=tuple(warnings),
+        monthly_report=_monthly_report_status(report_directory),
     )
+
+
+def _monthly_report_status(report_directory: Path) -> MonthlyReportStatus | None:
+    """Find the newest completed monthly artifact without treating its name as its age."""
+
+    directory = report_directory / "monthly"
+    try:
+        candidates = tuple(path for path in directory.glob("*.txt") if path.is_file())
+        newest = max(candidates, key=lambda path: path.stat().st_mtime)
+        written_at = datetime.fromtimestamp(newest.stat().st_mtime, UTC)
+    except (OSError, ValueError):
+        return None
+    return MonthlyReportStatus(path=newest, written_at=written_at)
 
 
 def _workload_stats_pin(season: int, as_of: datetime) -> WorkloadStatsPinStatus | None:
@@ -948,6 +981,13 @@ def render_status(status: OpsStatus) -> str:
         f"  as of      {utc_timestamp(status.as_of)}",
         f"  database   {status.database}",
         f"  config     {status.config_path}",
+        "  monthly    "
+        + (
+            "none recorded"
+            if status.monthly_report is None
+            else f"{status.monthly_report.path.name} "
+            f"({_humanize(status.as_of - status.monthly_report.written_at)} ago)"
+        ),
         "",
         "BATCH LANE (`na-ops batch`)",
     ]
@@ -1041,6 +1081,8 @@ def render_status(status: OpsStatus) -> str:
         if step.last_failure_at is not None:
             lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
+    lines.append(f"  entry fees to date   ${status.entry_fees_to_date_usd}")
+    lines.append(f"  entry net to date    ${status.entry_net_to_date_usd}")
 
     lines.extend(("", "WORKLOAD STATS PIN"))
     pin = status.workload_stats_pin
@@ -1187,6 +1229,17 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
         "as_of": utc_timestamp(status.as_of),
         "config_path": str(status.config_path),
         "database": str(status.database),
+        "monthly_report": None
+        if status.monthly_report is None
+        else {
+            "path": str(status.monthly_report.path),
+            "written_at": utc_timestamp(status.monthly_report.written_at),
+            "age_seconds": _age_seconds(status.monthly_report.written_at, status.as_of),
+        },
+        "entry_receipts": {
+            "fees_to_date_usd": status.entry_fees_to_date_usd,
+            "net_to_date_usd": status.entry_net_to_date_usd,
+        },
         "steps": [
             {
                 "step": step.step,

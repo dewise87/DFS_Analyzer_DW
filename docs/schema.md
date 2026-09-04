@@ -132,6 +132,23 @@ Stores inclusive rank bands and per-place prizes for manually captured payout cu
 Positive ordered ranks are SQL-checked; overlaps are refused within one observation, while a
 later re-observation of the same curve is a new version — read one version via `as_of`.
 
+## `contest_entries`
+
+Stores the append-only assignment receipt created when `na-ops slate` freezes upload-template
+entries: the exact decision snapshot, stored contest resolved by external contest ID, site entry ID,
+authoritative contest fee, and assigned lineup hash. The Sunday fast lane appends only the entries
+whose lineups it replaces. An entry uploaded outside these paths is deliberately absent rather than
+backfilled. Updates and deletes are forbidden.
+
+## `contest_entry_results`
+
+Stores append-only entry settlement observations tied to the current ledger assignment. A matched
+standings row freezes rank, points, and the prize selected from the contest's inclusive payout band;
+a missing ledger entry is retained as `unsettled` with a reason. Every row carries the immutable
+standings SHA-256 and the full point-in-time provenance block. The `(contest_entry_id,
+source_file_sha256)` identity makes an unchanged results rerun a no-op. Settlement refuses when a
+ledger contest has no payout table; it never guesses winnings.
+
 ## `odds_snapshots`
 
 Stores sportsbook spread, total, and optional American-price observations for a versioned game.  

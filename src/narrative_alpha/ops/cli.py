@@ -56,7 +56,7 @@ from narrative_alpha.ops.slate import (
     run_slate,
 )
 from narrative_alpha.ops.status import collect_ops_status, render_status, status_payload
-from narrative_alpha.portfolio import ContestArchetype
+from narrative_alpha.portfolio import ContestArchetype, DfsSite, parse_upload_entries
 from narrative_alpha.report_cli import DEFAULT_REPORT_DIRECTORY
 from narrative_alpha.store import (
     MigrationError,
@@ -159,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ARTIFACT_DIRECTORY,
     )
     slate.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
+    slate.add_argument(
+        "--upload-template",
+        type=Path,
+        help="site reserved-entry CSV; freezes entry IDs and writes the entry ledger",
+    )
     slate.add_argument("--json", action="store_true", help="print the report as JSON")
 
     results = commands.add_parser(
@@ -211,6 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status", help="one screen: what ran, what failed, what is due")
     status.add_argument("--json", action="store_true")
+    status.add_argument(
+        "--report-directory",
+        type=Path,
+        default=DEFAULT_REPORT_DIRECTORY,
+        help="directory containing monthly reports (default: data/reports)",
+    )
 
     schedule = commands.add_parser("schedule", help="manage the macOS launchd user agents")
     schedule.add_argument("action", choices=("install", "show", "uninstall"))
@@ -307,6 +318,12 @@ def _slate(
     dependencies: SlateDependencies,
 ) -> int:
     database = _database(arguments, config)
+    site = DfsSite.DRAFTKINGS if arguments.site == "dk" else DfsSite.FANDUEL
+    upload_entries = (
+        ()
+        if arguments.upload_template is None
+        else parse_upload_entries(arguments.upload_template, site)
+    )
     with connect_database(database) as connection:
         apply_migrations(connection)
         report = run_slate(
@@ -319,6 +336,7 @@ def _slate(
             decision_at=arguments.decision_at,
             number_of_lineups=arguments.lineups,
             contest_archetype=arguments.contest_archetype,
+            upload_entries=upload_entries,
             slate_id=arguments.slate_id,
             capture=arguments.capture,
             slate_name=arguments.slate_name,
@@ -393,6 +411,7 @@ def _status(arguments: argparse.Namespace, config: OpsConfig) -> int:
             config=config,
             database=database,
             now=datetime.now(UTC),
+            report_directory=arguments.report_directory,
         )
     if arguments.json:
         print(json.dumps(status_payload(status), indent=2, sort_keys=True))

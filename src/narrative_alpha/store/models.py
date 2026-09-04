@@ -651,6 +651,45 @@ class ContestPayoutRow(PointInTimeRow):
         return self
 
 
+class ContestEntryRow(StoreRow):
+    contest_entry_id: int = Field(gt=0)
+    decision_snapshot_id: str
+    contest_id: int = Field(gt=0)
+    entry_id: str = Field(min_length=1)
+    entry_fee_cents: int = Field(ge=0)
+    lineup_id: Sha256
+    recorded_at: datetime
+    source: Literal["slate_build", "fast_refreeze"]
+
+    @field_validator("recorded_at")
+    @classmethod
+    def normalize_recorded_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+class ContestEntryResultRow(PointInTimeRow):
+    contest_entry_result_id: int = Field(gt=0)
+    contest_entry_id: int = Field(gt=0)
+    settlement_status: Literal["settled", "unsettled"]
+    rank: int | None = Field(default=None, ge=1)
+    points: float | None = Field(default=None, allow_inf_nan=False)
+    payout_cents: int | None = Field(default=None, ge=0)
+    unsettled_reason: str | None = None
+    source_file_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_settlement(self) -> Self:
+        values = (self.rank, self.points, self.payout_cents)
+        if self.settlement_status == "settled":
+            if any(value is None for value in values) or self.unsettled_reason is not None:
+                raise ValueError("settled entry requires rank, points, payout, and no reason")
+        elif any(value is not None for value in values) or not (
+            self.unsettled_reason or ""
+        ).strip():
+            raise ValueError("unsettled entry requires only a non-empty reason")
+        return self
+
+
 class SourceRow(PointInTimeRow):
     """One explicitly configured public feed source."""
 

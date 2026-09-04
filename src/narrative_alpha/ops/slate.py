@@ -27,6 +27,11 @@ from narrative_alpha.build import (
 )
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
 from narrative_alpha.candidate_selection import CandidateSelectionError
+from narrative_alpha.entries import (
+    ContestEntryError,
+    record_contest_entries,
+    validate_upload_contests,
+)
 from narrative_alpha.identity import CrosswalkError, PlayerCrosswalk
 from narrative_alpha.ingest.projections import (
     ProjectionIngestError,
@@ -65,7 +70,7 @@ from narrative_alpha.ops.runs import (
     StepOutcome,
     StepRecorder,
 )
-from narrative_alpha.portfolio import ContestArchetype, OptimizerError
+from narrative_alpha.portfolio import ContestArchetype, DfsSite, OptimizerError, UploadEntry
 from narrative_alpha.replay import ReplayError
 from narrative_alpha.report_cli import (
     DEFAULT_REPORT_DIRECTORY,
@@ -133,6 +138,7 @@ SLATE_STEP_ERRORS: tuple[type[BaseException], ...] = (
     StoreConfigurationError,
     ValueError,
     sqlite3.Error,
+    ContestEntryError,
 )
 
 
@@ -173,6 +179,7 @@ def run_slate(
     decision_at: datetime | None = None,
     number_of_lineups: int = 1,
     contest_archetype: ContestArchetype | str = ContestArchetype.CASH,
+    upload_entries: tuple[UploadEntry, ...] = (),
     slate_id: int | None = None,
     capture: Path | None = None,
     slate_name: str | None = None,
@@ -318,6 +325,7 @@ def run_slate(
             artifact_directory=artifact_directory,
             number_of_lineups=number_of_lineups,
             contest_archetype=contest_archetype,
+            upload_entries=upload_entries,
             into=built,
         ),
     )
@@ -717,6 +725,7 @@ def _build_decision(
     artifact_directory: Path,
     number_of_lineups: int,
     contest_archetype: ContestArchetype | str,
+    upload_entries: tuple[UploadEntry, ...],
     into: list[BuildResult],
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     summary: dict[str, object] = {
@@ -740,6 +749,13 @@ def _build_decision(
         as_of=decision_at,
         summary=summary,
     )
+    validate_upload_contests(
+        connection,
+        entries=upload_entries,
+        site=DfsSite(site),
+        slate_id=slate.slate_id,
+        decision_at=decision_at,
+    )
     try:
         result = dependencies.build_decision(
             database,
@@ -749,6 +765,7 @@ def _build_decision(
             artifact_directory=artifact_directory,
             number_of_lineups=number_of_lineups,
             contest_archetype=contest_archetype,
+            upload_entries=upload_entries,
         )
         reused = False
     except BuildDuplicateError as duplicate:
@@ -761,6 +778,14 @@ def _build_decision(
             artifact_root=artifact_directory,
         )
         reused = True
+    ledger_rows = record_contest_entries(
+        connection,
+        decision_snapshot_id=result.snapshot.decision_snapshot_id,
+        decision_at=result.snapshot.decision_at,
+        request=result.request,
+        lineups=result.lineups,
+        source="slate_build",
+    )
     into.append(result)
     routing = result.ownership_routing
     return (
@@ -780,6 +805,7 @@ def _build_decision(
             "artifact_directory": str(result.artifact_directory),
             "replay_verified": result.replay.report.output_matches,
             "reused_existing": reused,
+            "contest_entry_rows_inserted": ledger_rows,
         },
         None,
     )

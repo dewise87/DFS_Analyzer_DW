@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from narrative_alpha.entries import build_entry_receipt_report, render_entry_receipt_report
 from narrative_alpha.evaluation import (
     BaselineEvaluationReport,
     BaselineReportError,
@@ -454,6 +455,15 @@ def _ingest(
         "contests": [contest.contest_id for _, contest, _ in reports],
         "ownership_rows_inserted": sum(r.ownership_rows_inserted for _, _, r in reports),
         "result_rows_inserted": sum(r.result_rows_inserted for _, _, r in reports),
+        "entry_result_rows_inserted": sum(
+            r.entry_result_rows_inserted for _, _, r in reports
+        ),
+        "entry_result_duplicate_rows": sum(
+            r.entry_result_duplicate_rows for _, _, r in reports
+        ),
+        "settled_entries": sum(r.settled_entries for _, _, r in reports),
+        "unsettled_entries": sum(r.unsettled_entries for _, _, r in reports),
+        "unledgered_entries": sum(r.unledgered_entries for _, _, r in reports),
         "duplicate_rows": sum(r.duplicate_rows for _, _, r in reports),
         "unresolved_rows": unresolved,
         "rejected_rows": rejected,
@@ -640,6 +650,8 @@ def _report(
         evaluation_as_of=evaluation_as_of,
     )
     rendered = dependencies.render_baseline_report(report)
+    receipts = build_entry_receipt_report(connection, season=season, week=week)
+    rendered += render_entry_receipt_report(receipts, section=True)
     stamp = evaluation_as_of.strftime("%Y%m%dT%H%M%S%fZ")
     site_slug = "dk" if site == SalarySite.DRAFTKINGS.value else "fd"
     path = report_directory / str(season) / f"week_{week:02d}" / f"results-{site_slug}-{stamp}.txt"

@@ -19,6 +19,7 @@ from uuid import uuid4
 from narrative_alpha import __version__
 from narrative_alpha.build import build_decision
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
+from narrative_alpha.entries import record_contest_entries
 from narrative_alpha.fast.rules import (
     DEFAULT_FAST_LANE_RULES_PATH,
     FastLaneRule,
@@ -326,6 +327,15 @@ def process_official_inactives(
                 # This carries its ownership band, uniqueness, objective, and exposure
                 # limits together, even if the shipped file changes after Saturday.
                 contest_policy=base.contest_policy,
+            )
+            record_contest_entries(
+                connection,
+                decision_snapshot_id=built.snapshot.decision_snapshot_id,
+                decision_at=built.snapshot.decision_at,
+                request=built.request,
+                lineups=built.lineups,
+                source="fast_refreeze",
+                indexes=tuple(range(len(unaffected), len(built.lineups))),
             )
             _mark_run(connection, run_id=run_id, status="succeeded", at=observed_at)
         except Exception as error:

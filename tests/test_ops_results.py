@@ -346,7 +346,9 @@ def test_newest_decision_writes_the_baseline_report_at_lane_cutoff(tmp_path: Pat
     assert report.report_path is not None and report.report_path.is_file()
     assert report.report_path.parent == tmp_path / "reports" / "2026" / "week_01"
     assert report.report_path.name.startswith("results-dk-")
-    assert report.report_path.read_text(encoding="utf-8") == "BASELINE FIXTURE\n"
+    rendered = report.report_path.read_text(encoding="utf-8")
+    assert rendered.startswith("BASELINE FIXTURE\n")
+    assert "ENTRY RECEIPTS — REALIZED, NOT PROJECTED" in rendered
 
 
 def test_cli_runs_the_results_lane_and_returns_step_exit_codes(
