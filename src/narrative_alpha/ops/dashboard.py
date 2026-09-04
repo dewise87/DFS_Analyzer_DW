@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import parse_qs, quote, urlsplit
 
+from narrative_alpha import __version__
 from narrative_alpha.build_cli import DEFAULT_ARTIFACT_DIRECTORY
 from narrative_alpha.identity import CrosswalkError, PlayerCrosswalk
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
@@ -808,39 +809,203 @@ def _positive(raw: str, name: str) -> int:
 # --------------------------------------------------------------------------------------
 
 STYLE = """
-:root { color-scheme: light dark; }
-body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
-       padding: 0 0 3rem; }
-header { padding: 1rem 1.5rem; border-bottom: 2px solid currentColor; }
-h1 { font-size: 1.1rem; margin: 0 0 .35rem; letter-spacing: .06em; }
-nav a { margin-right: 1.25rem; }
-main { padding: 0 1.5rem; max-width: 78rem; }
+/* One stylesheet, inline, no asset of any kind. Light is the default and dark is the
+   reader's stated preference; `color-scheme` hands the form controls the same answer. */
+:root {
+  color-scheme: light dark;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+          monospace;
+  --measure: 68ch;
+  --bg: #fbfbfa; --panel: #ffffff; --sunk: #f4f5f7;
+  --ink: #16181d; --soft: #5b636f;
+  --rule: #d5d8de; --hair: #e7e9ed;
+  --link: #1a49c9;
+  --bad: #a01414; --bad-bg: #fceceb;
+  --run: #79490a; --run-bg: #fcf2df;
+  --good: #14600e; --good-bg: #ecf5ea;
+  --write: #4a30a6; --write-bg: #f4f2fd; --write-ink: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --panel: #1b1e24; --sunk: #21252c;
+    --ink: #e5e8ec; --soft: #98a1b0;
+    --rule: #343a44; --hair: #262b33;
+    --link: #8fb2ff;
+    --bad: #ff9086; --bad-bg: #3a1d1b;
+    --run: #f0bd66; --run-bg: #362810;
+    --good: #8fd47e; --good-bg: #1a2e18;
+    --write: #bcaaff; --write-bg: #232037; --write-ink: #1b1e24;
+  }
+}
+
+/* ---- page frame ---- */
+html { font-size: 16px; }
+body { margin: 0; padding: 0 0 1rem; background: var(--bg); color: var(--ink);
+       font-family: var(--sans); font-size: 1rem; line-height: 1.55;
+       -webkit-text-size-adjust: 100%; }
+header { position: sticky; top: 0; z-index: 2; background: var(--panel);
+         border-bottom: 1px solid var(--rule); padding: .7rem 1.5rem .6rem; }
+h1 { font-family: var(--mono); font-size: .8125rem; font-weight: 700; margin: 0 0 .35rem;
+     letter-spacing: .1em; color: var(--soft); }
+nav { display: flex; flex-wrap: wrap; gap: .25rem .35rem; }
+nav a { padding: .2rem .5rem; border-radius: 4px; text-decoration: none;
+        font-size: .9375rem; }
+nav a:hover { background: var(--sunk); text-decoration: underline; }
+a { color: var(--link); }
+main { padding: 0 1.5rem; max-width: 78rem; min-width: 0; }
 section { margin: 1.75rem 0; }
-h2 { font-size: .95rem; letter-spacing: .08em; text-transform: uppercase;
-     border-bottom: 1px solid currentColor; padding-bottom: .25rem; }
-h3 { font-size: .9rem; margin: 1rem 0 .35rem; }
-table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
-th, td { text-align: left; vertical-align: top; padding: .3rem .6rem .3rem 0;
-         border-bottom: 1px solid rgba(128,128,128,.35); }
-th { font-weight: 600; white-space: nowrap; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1.25rem;
-     margin: .5rem 0; }
-dt { font-weight: 600; }
-dd { margin: 0; }
-pre { white-space: pre-wrap; word-break: break-word; margin: .35rem 0;
-      padding: .6rem .8rem; border: 1px solid rgba(128,128,128,.45); }
-form { margin: .5rem 0; }
-fieldset { border: 1px solid rgba(128,128,128,.55); padding: .75rem 1rem; margin: .75rem 0; }
-legend { font-weight: 600; padding: 0 .35rem; }
-label { display: inline-block; margin-right: 1rem; }
-button { font: inherit; padding: .3rem .9rem; margin-right: .5rem; }
-input, select, textarea { font: inherit; }
-textarea { width: 100%; max-width: 60rem; }
-.none { opacity: .6; }
-.running { font-weight: 600; }
-.failed { font-weight: 600; }
-.card { border: 1px solid rgba(128,128,128,.55); padding: .75rem 1rem; margin: .75rem 0; }
-.note { opacity: .8; margin: .35rem 0; }
+h2 { font-family: var(--mono); font-size: .8125rem; font-weight: 700; letter-spacing: .1em;
+     text-transform: uppercase; color: var(--soft); margin: 0 0 .5rem;
+     border-bottom: 1px solid var(--rule); padding-bottom: .3rem; }
+h3 { font-size: 1rem; margin: 1.1rem 0 .35rem; }
+p { margin: .5rem 0; max-width: var(--measure); }
+ul, ol { max-width: var(--measure); padding-left: 1.35rem; }
+li { margin: .2rem 0; }
+code { font-family: var(--mono); font-size: .875rem; background: var(--sunk);
+       padding: .05rem .3rem; border-radius: 3px; }
+.note { color: var(--soft); font-size: .9375rem; margin: .4rem 0; }
+.none { color: var(--soft); }
+
+/* ---- the strip: whether anything needs a hand, read first instead of last ---- */
+.strip { margin: 1.25rem 0 1.5rem; padding: .7rem .9rem .75rem;
+         border: 1px solid; border-left-width: 5px; border-radius: 6px; }
+.strip ul { max-width: var(--measure); }
+.strip-line { margin: 0; font-weight: 600; max-width: none; }
+.strip-items { margin: .5rem 0 0; font-size: .9375rem; }
+.strip-note { margin: .5rem 0 0; color: var(--soft); font-size: .8125rem; }
+.strip-ok { border-color: var(--good); background: var(--good-bg); color: var(--good); }
+.strip-todo { border-color: var(--run); background: var(--run-bg); color: var(--run); }
+.strip-act { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+.strip-items li { color: var(--ink); }
+
+/* ---- state: colour and a symbol, so it reads in grey as well as in colour ---- */
+.failed, .running, .ok, .neutral { font-weight: 600; white-space: nowrap;
+       border-radius: 4px; padding: .05rem .35rem; }
+.failed { color: var(--bad); background: var(--bad-bg); }
+.running { color: var(--run); background: var(--run-bg); }
+.ok { color: var(--good); background: var(--good-bg); }
+.neutral { color: var(--soft); background: var(--sunk); }
+.mark { font-family: var(--mono); }
+
+/* ---- tables: one shape everywhere; figures right, ids monospace, rows striped ---- */
+.scroll { overflow-x: auto; margin: .5rem 0 .75rem; }
+/* A queue of four hundred rows is the page. It keeps every row and takes a screen. */
+.scroll.tall { overflow: auto; max-height: 78vh;
+               border: 1px solid var(--hair); border-radius: 6px; }
+.scroll.tall thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+.scroll.tall th, .scroll.tall td { padding-left: .7rem; }
+table { border-collapse: collapse; width: 100%; font-size: .9375rem; }
+th, td { text-align: left; vertical-align: top; padding: .35rem .7rem .35rem 0;
+         border-bottom: 1px solid var(--hair); }
+thead th { font-family: var(--mono); font-size: .75rem; font-weight: 700;
+           letter-spacing: .06em; text-transform: uppercase; color: var(--soft);
+           white-space: nowrap; border-bottom: 1px solid var(--rule); }
+tbody th { font-weight: 600; white-space: nowrap; }
+tbody tr:nth-child(even) { background: var(--sunk); }
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+th.num, td.num { text-align: right; font-family: var(--mono);
+                 font-variant-numeric: tabular-nums; white-space: nowrap;
+                 padding-right: 1rem; }
+td.id, td.stamp, .id { font-family: var(--mono); font-size: .875rem; }
+td.id { overflow-wrap: anywhere; }
+td.stamp { white-space: nowrap; }
+
+/* ---- the lane block reads as cards once the columns no longer fit ---- */
+@media (max-width: 46rem) {
+  .lanes, .lanes tbody, .lanes tr, .lanes th, .lanes td { display: block; width: auto; }
+  .lanes thead { display: none; }
+  .lanes tr, .lanes tbody tr:nth-child(even) { background: var(--panel);
+        border: 1px solid var(--rule); border-radius: 6px;
+        padding: .6rem .8rem .7rem; margin: .6rem 0; }
+  .lanes tbody th { font-family: var(--mono); font-size: .9375rem; letter-spacing: .06em;
+        text-transform: uppercase; border: 0; padding: 0 0 .4rem; }
+  .lanes td { border: 0; padding: .3rem 0 0; }
+  .lanes td::before { content: attr(data-label); display: block; font-family: var(--mono);
+        font-size: .6875rem; letter-spacing: .06em; text-transform: uppercase;
+        color: var(--soft); }
+}
+
+/* ---- definition blocks ---- */
+dl { display: grid; grid-template-columns: minmax(7rem, max-content) 1fr;
+     gap: .25rem 1.25rem; margin: .5rem 0; font-size: .9375rem; }
+dt { font-weight: 600; color: var(--soft); }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 34rem) {
+  dl { grid-template-columns: 1fr; gap: 0; }
+  dt { margin-top: .55rem; }
+}
+
+/* ---- long text is folded, never dropped ---- */
+pre { font-family: var(--mono); font-size: .875rem; line-height: 1.45; margin: .4rem 0;
+      padding: .6rem .75rem; background: var(--panel); border: 1px solid var(--rule);
+      border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+details { margin: .4rem 0; }
+summary { cursor: pointer; font-family: var(--mono); font-size: .8125rem;
+          color: var(--soft); padding: .2rem 0; }
+summary:hover, details[open] > summary { color: var(--ink); }
+.count { white-space: nowrap; }
+
+/* ---- writes look like writes; the reads above them do not ---- */
+form { margin: .75rem 0; }
+fieldset { border: 1px solid var(--write); border-left-width: 4px; border-radius: 6px;
+           background: var(--write-bg); padding: .5rem 1.1rem 1rem; margin: 1rem 0;
+           max-width: 54rem; }
+legend { font-weight: 700; color: var(--write); padding: 0 .4rem; font-size: .9375rem; }
+.card { border: 1px solid var(--rule); border-radius: 6px; background: var(--panel);
+        padding: .85rem 1.1rem 1rem; margin: 1rem 0; max-width: 54rem; }
+.card > h3 { margin-top: 0; }
+.card > form { margin: .85rem 0 0; padding: .6rem .9rem .8rem; border-radius: 6px;
+        border: 1px solid var(--write); border-left-width: 4px;
+        background: var(--write-bg); }
+label { display: inline-block; margin: .3rem 1.1rem .3rem 0; font-size: .9375rem; }
+label input[type="checkbox"] { margin-right: .4rem; vertical-align: -1px; }
+input, select, textarea, button { font: inherit; font-size: .9375rem; }
+input[type="number"], input[type="text"], select, textarea {
+        padding: .3rem .45rem; border: 1px solid var(--rule); border-radius: 4px;
+        background: var(--panel); color: var(--ink); }
+textarea { display: block; width: 100%; max-width: 48rem; margin-top: .35rem;
+           font-family: var(--mono); font-size: .875rem; }
+button { padding: .4rem 1rem; border-radius: 5px; border: 1px solid var(--write);
+         background: var(--write); color: var(--write-ink); font-weight: 600;
+         cursor: pointer; }
+button:hover { filter: brightness(1.15); }
+/* The confirmation and the button it guards stay on one line at every width. */
+.confirm { display: flex; flex-wrap: nowrap; align-items: center; gap: .6rem;
+           margin-top: .9rem; padding-top: .75rem; border-top: 1px solid var(--rule); }
+.confirm label { display: inline-flex; align-items: center; margin: 0; min-width: 0;
+                 white-space: nowrap; }
+.confirm button { margin: 0; min-width: 0; }
+
+/* ---- footer: the instant this page was read, and the code that read it ---- */
+footer { margin: 2.5rem 1.5rem 0; padding: .75rem 0 0; border-top: 1px solid var(--rule);
+         color: var(--soft); font-size: .8125rem; display: flex; flex-wrap: wrap;
+         gap: .25rem 1.5rem; }
+.mono { font-family: var(--mono); }
+
+/* ---- the memo is a document: printed, it is only the document ---- */
+@page { margin: 15mm; }
+@media print {
+  :root { --bg: #fff; --panel: #fff; --sunk: #fff; --ink: #000; --soft: #333;
+          --rule: #999; --hair: #ccc; }
+  html { font-size: 11pt; }
+  body { background: #fff; padding: 0; }
+  header { position: static; padding: 0 0 .4rem; border-bottom: 1pt solid #000; }
+  nav, form, .strip-items { display: none; }
+  main { max-width: none; padding: 0; }
+  a { color: #000; text-decoration: none; }
+  h2 { color: #000; }
+  pre { border: 0; padding: 0; background: transparent; font-size: 9pt; }
+  tbody tr:nth-child(even) { background: #fff; }
+  .scroll, .scroll.tall { overflow: visible; max-height: none; border: 0; }
+  footer { margin: 1rem 0 0; }
+  .p-memo section { margin: .75rem 0; }
+  .p-memo dl { grid-template-columns: max-content 1fr; font-size: 9.5pt; }
+  .p-memo pre { orphans: 3; widows: 3; }
+  /* A printed memo is the memo: the link back into the dashboard is not part of it. */
+  .only-screen { display: none; }
+}
 """
 
 NAV = (
@@ -851,35 +1016,60 @@ NAV = (
 )
 
 
-def _page(title: str, body: str, *, refresh_seconds: int | None = None) -> str:
+def _page(
+    title: str,
+    body: str,
+    *,
+    refresh_seconds: int | None = None,
+    rendered_at: datetime | None = None,
+    page: str = "read",
+) -> str:
+    """The frame every page shares: the nav, the stylesheet, and the footer.
+
+    The footer carries the instant the page was read and the code version that read it,
+    on every page, because a screenshot of this dashboard is otherwise undated: a stale
+    tab and a fresh one look the same, and so do two builds. ``rendered_at`` is the
+    caller's own clock where it has one, so the status page's footer and its "as of"
+    section are the same instant rather than two reads a few milliseconds apart.
+    """
+
     refresh = (
         ""
         if refresh_seconds is None
         else f'<meta http-equiv="refresh" content="{refresh_seconds}">'
     )
     links = " ".join(f'<a href="{href}">{escape(label)}</a>' for href, label in NAV)
+    instant = utc_timestamp(ensure_utc(rendered_at or datetime.now(UTC)))
+    footer = (
+        f'<footer><span>as of <span class="mono">{escape(instant)}</span></span>'
+        f'<span>code version <span class="mono">{escape(__version__)}</span></span>'
+        "</footer>"
+    )
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"{refresh}<title>{escape(title)}</title><style>{STYLE}</style></head><body>"
+        f"{refresh}<title>{escape(title)}</title><style>{STYLE}</style></head>"
+        f'<body class="p-{escape(page)}">'
         f"<header><h1>NARRATIVE ALPHA — {escape(title.upper())}</h1>"
-        f"<nav>{links}</nav></header><main>{body}</main></body></html>\n"
+        f"<nav>{links}</nav></header><main>{body}</main>{footer}</body></html>\n"
     )
 
 
 def _status_page(context: DashboardContext) -> str:
+    now = context.clock()
     with connect_database(context.database) as connection:
         status = collect_ops_status(
             connection,
             config=context.config,
             database=context.database,
-            now=context.clock(),
+            now=now,
         )
         recorded = _last_recorded_steps(connection)
     payload = status_payload(status)
     week = status.snapshot_week
     body = [
+        _status_strip(payload),
         _lane_section(context, recorded),
         _actions_section(
             context,
@@ -897,7 +1087,59 @@ def _status_page(context: DashboardContext) -> str:
         "operator status",
         "".join(body),
         refresh_seconds=RUNNING_REFRESH_SECONDS if context.runner.any_running else None,
+        rendered_at=now,
+        page="status",
     )
+
+
+def _status_strip(payload: Mapping[str, object]) -> str:
+    """The line the status page opens with: does anything need a hand, and what.
+
+    Both lists are already in the payload, and already on this page — `warnings` and
+    `manual actions` are its last two sections, because `status_payload` puts them last.
+    Nothing is queried, counted, or judged here that `na-ops status` does not already say;
+    the strip is that same text read first. On a real store the two of them began 22,300
+    pixels down a 22,800-pixel page, which is the whole reason this exists.
+    """
+
+    warnings = _sentences(payload.get("warnings"))
+    actions = _sentences(payload.get("manual_actions"))
+    if not warnings and not actions:
+        return (
+            '<p class="strip strip-ok"><span class="mark">\u2713</span> '
+            "Nothing needs a hand: no warning, and nothing to do by hand.</p>"
+        )
+    counted = " and ".join(
+        part
+        for part in (_counted(len(warnings), "warning"), _counted(len(actions), "manual action"))
+        if part
+    )
+    items = "".join(f"<li>{escape(sentence)}</li>" for sentence in (*warnings, *actions))
+    # Amber for work to do, red once something is actually wrong: a warning is a broken
+    # thing, and a manual action can be a routine one.
+    tone = "strip-act" if warnings else "strip-todo"
+    return (
+        f'<div class="strip {tone}">'
+        f'<p class="strip-line"><span class="mark">\u25b2</span> '
+        f"Needs a hand: {counted}.</p>"
+        f'<ul class="strip-items">{items}</ul>'
+        '<p class="strip-note">Each one again, untrimmed, under \u201cwarnings\u201d and '
+        "\u201cmanual actions\u201d at the foot of this page.</p></div>"
+    )
+
+
+def _sentences(value: object) -> tuple[str, ...]:
+    """A payload list of sentences, tolerant of a payload that one day holds something else."""
+
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _counted(count: int, noun: str) -> str:
+    if count == 0:
+        return ""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _last_recorded_steps(
@@ -929,20 +1171,26 @@ def _lane_section(
     for state in context.runner.states():
         if state.running:
             since = "" if state.started_at is None else utc_timestamp(state.started_at)
-            outcome = f'<span class="running">RUNNING since {escape(since)}</span>'
+            outcome = (
+                '<span class="running"><span class="mark">\u21bb</span> RUNNING since '
+                f"{escape(since)}</span>"
+            )
         elif state.finished_at is None:
             outcome = '<span class="none">not started from this page</span>'
         else:
             word = "all steps ok" if state.ok else "FAILED"
-            css = "" if state.ok else ' class="failed"'
+            css, mark = ("ok", "\u2713") if state.ok else ("failed", "\u2717")
             outcome = (
-                f"<span{css}>{word}</span> at {escape(utc_timestamp(state.finished_at))}"
-                f" — run {escape(state.run_id or 'not recorded')}"
+                f'<span class="{css}"><span class="mark">{mark}</span> {word}</span>'
+                f" at {escape(utc_timestamp(state.finished_at))}"
+                f' — run <span class="id">{escape(state.run_id or "not recorded")}</span>'
             )
-        detail = "" if not state.detail else f"<pre>{escape(state.detail)}</pre>"
+        detail = "" if not state.detail else _text_block(state.detail)
         rows.append(
-            f"<tr><th>{escape(state.lane)}</th><td>{outcome}{detail}</td>"
-            f"<td>{_recorded_cell(recorded.get(state.lane))}</td></tr>"
+            f'<tr><th scope="row">{escape(state.lane)}</th>'
+            f'<td data-label="started from this page">{outcome}{detail}</td>'
+            '<td data-label="last step recorded, however started">'
+            f"{_recorded_cell(recorded.get(state.lane))}</td></tr>"
         )
     header = (
         "<tr><th>lane</th><th>started from this page</th>"
@@ -955,18 +1203,37 @@ def _lane_section(
         "on the run history page.</p>"
     )
     return (
-        f"<section><h2>Lanes</h2><table>{header}{''.join(rows)}</table>{note}</section>"
+        '<section><h2>Lanes</h2><div class="scroll"><table class="lanes">'
+        f"<thead>{header}</thead><tbody>{''.join(rows)}</tbody>"
+        f"</table></div>{note}</section>"
     )
 
 
 def _recorded_cell(run: RecordedRun | None) -> str:
     if run is None:
         return '<span class="none">no step recorded</span>'
-    css = ' class="failed"' if run.status == "failed" else ""
+    css, mark = _status_mark(run.status)
     return (
-        f"{escape(run.step)} <span{css}>{escape(run.status)}</span> at "
-        f"{escape(utc_timestamp(run.finished_at))} — run {escape(run.batch_run_id)}"
+        f'{escape(run.step)} <span class="{css}"><span class="mark">{mark}</span> '
+        f"{escape(run.status)}</span> at {escape(utc_timestamp(run.finished_at))}"
+        f' — run <span class="id">{escape(run.batch_run_id)}</span>'
     )
+
+
+def _status_mark(status: str) -> tuple[str, str]:
+    """The class and the symbol for one recorded status.
+
+    A symbol as well as a colour, so a failed step reads as failed in a grey screenshot,
+    to a colour-blind reader, and on the printed page.
+    """
+
+    if status == "failed":
+        return "failed", "\u2717"
+    if status == "running":
+        return "running", "\u21bb"
+    if status == "succeeded":
+        return "ok", "\u2713"
+    return "neutral", "\u00b7"
 
 
 def _actions_section(
@@ -982,9 +1249,11 @@ def _actions_section(
         what <code>na-ops batch</code> runs, and it may submit items to Stage 1 and spend
         against the monthly budget.</p>
         <label>max items <input type="number" name="max_items" min="1" step="1"
-          placeholder="{escape(str(context.config.batch_max_items_per_run or 'config'))}"></label>
-        <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
-        <button type="submit">Run batch now</button>
+          placeholder="{escape(str(context.config.batch_max_items_per_run or "config"))}"></label>
+        <div class="confirm">
+          <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
+          <button type="submit">Run batch now</button>
+        </div>
       </fieldset>
     </form>
     """
@@ -1016,8 +1285,10 @@ def _actions_section(
         <input type="hidden" name="week" value="{week}">
         <label>site <select name="site">{sites}</select></label>
         <label>lineups <input type="number" name="lineups" min="1" step="1" value="1"></label>
-        <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
-        <button type="submit">Run slate now</button>
+        <div class="confirm">
+          <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
+          <button type="submit">Run slate now</button>
+        </div>
       </fieldset>
     </form>
     """
@@ -1041,8 +1312,10 @@ def _actions_section(
         <label>standings files<br>
           <textarea name="standings_files" rows="4" cols="80"
             placeholder="/absolute/path/to/contest-standings.csv"></textarea></label>
-        <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
-        <button type="submit">Run results now</button>
+        <div class="confirm">
+          <label><input type="checkbox" name="confirm" value="yes"> yes, run it</label>
+          <button type="submit">Run results now</button>
+        </div>
       </fieldset>
     </form>
     """
@@ -1068,7 +1341,12 @@ def _queues_page(context: DashboardContext) -> str:
         "</p></section>",
         _unresolved_section(unresolved, player_rows=player_rows),
     ]
-    return _page("review queues", "".join(sections))
+    return _page(
+        "review queues",
+        "".join(sections),
+        rendered_at=context.clock(),
+        page="queues",
+    )
 
 
 def _unresolved_section(
@@ -1124,7 +1402,7 @@ def _unresolved_card(row: UnresolvedPlayerMatchRow, *, player_rows: int) -> str:
     <div class="card">
       <h3>{escape(row.name_raw)} — {escape(row.team)} {escape(row.position or "?")}</h3>
       <dl>
-        <dt>unresolved id</dt><dd>{row.unresolved_id}</dd>
+        <dt>unresolved id</dt><dd class="mono">{row.unresolved_id}</dd>
         <dt>source</dt><dd>{escape(row.source)}{site}</dd>
         <dt>seen</dt><dd>{seen}</dd>
       </dl>
@@ -1134,9 +1412,11 @@ def _unresolved_card(row: UnresolvedPlayerMatchRow, *, player_rows: int) -> str:
         <label>or player id <input type="number" name="other_player_id" min="1" step="1"
           placeholder="not listed"></label>
         <label>note <input type="text" name="note" maxlength="200"></label>
-        <label><input type="checkbox" name="confirm" value="yes"> yes, record it</label>
-        <button type="submit" name="decision" value="resolve">Resolve</button>
-        <button type="submit" name="decision" value="ignore">Ignore</button>
+        <div class="confirm">
+          <label><input type="checkbox" name="confirm" value="yes"> yes, record it</label>
+          <button type="submit" name="decision" value="resolve">Resolve</button>
+          <button type="submit" name="decision" value="ignore">Ignore</button>
+        </div>
       </form>
     </div>
     """
@@ -1163,7 +1443,7 @@ def _runs_page(context: DashboardContext) -> str:
             "Run <code>na-ops batch</code> or <code>na-ops slate</code>, from the status "
             "page or a terminal.</p></section>"
         )
-        return _page("run history", body)
+        return _page("run history", body, rendered_at=context.clock(), page="runs")
     rows = "".join(_run_row(run) for run in runs)
     header = (
         "<tr><th>started</th><th>step</th><th>status</th><th>seconds</th>"
@@ -1175,26 +1455,29 @@ def _runs_page(context: DashboardContext) -> str:
     )
     return _page(
         "run history",
-        f"<section><h2>Run history</h2>{note}<table>{header}{rows}</table></section>",
+        f"<section><h2>Run history</h2>{note}"
+        f'<div class="scroll"><table><thead>{header}</thead>'
+        f"<tbody>{rows}</tbody></table></div></section>",
         refresh_seconds=RUNNING_REFRESH_SECONDS if context.runner.any_running else None,
+        rendered_at=context.clock(),
+        page="runs",
     )
 
 
 def _run_row(run: RecordedRun) -> str:
     seconds = (run.finished_at - run.started_at).total_seconds()
-    css = ' class="failed"' if run.status == "failed" else ""
-    detail = "" if run.error_text is None else f"<pre>{escape(run.error_text)}</pre>"
+    css, mark = _status_mark(run.status)
+    detail = "" if run.error_text is None else _text_block(run.error_text)
     summary = (
-        ""
-        if not run.summary
-        else f"<pre>{escape(json.dumps(run.summary, indent=2, sort_keys=True))}</pre>"
+        "" if not run.summary else _text_block(json.dumps(run.summary, indent=2, sort_keys=True))
     )
     return (
-        f"<tr><td>{escape(utc_timestamp(run.started_at))}</td>"
+        f'<tr><td class="stamp">{escape(utc_timestamp(run.started_at))}</td>'
         f"<td>{escape(run.step)}</td>"
-        f"<td{css}>{escape(run.status)}</td>"
-        f"<td>{seconds:.1f}</td>"
-        f"<td>{escape(run.batch_run_id)}</td>"
+        f'<td><span class="{css}"><span class="mark">{mark}</span> '
+        f"{escape(run.status)}</span></td>"
+        f'<td class="num">{seconds:.1f}</td>'
+        f'<td class="id">{escape(run.batch_run_id)}</td>'
         f"<td>{detail}{summary}</td></tr>"
     )
 
@@ -1208,6 +1491,8 @@ def _memo_page(context: DashboardContext) -> str:
             "<section><h2>Latest slate memo</h2><p>No memo has been written. "
             "<code>na-ops slate</code> writes one as its last step, and it has not "
             "succeeded yet.</p></section>",
+            rendered_at=context.clock(),
+            page="memo",
         )
     raw_path = run.summary.get("memo_path")
     if not isinstance(raw_path, str) or not raw_path:
@@ -1216,6 +1501,8 @@ def _memo_page(context: DashboardContext) -> str:
             "<section><h2>Latest slate memo</h2><p>The last successful memo step recorded "
             f"no path in its summary (run <code>{escape(run.batch_run_id)}</code>). "
             "Nothing here can point at a file it was never told about.</p></section>",
+            rendered_at=context.clock(),
+            page="memo",
         )
     path = Path(raw_path)
     try:
@@ -1227,29 +1514,33 @@ def _memo_page(context: DashboardContext) -> str:
             f"<p>The memo was written to <code>{escape(str(path))}</code> at "
             f"{escape(utc_timestamp(run.finished_at))}, and it cannot be read now: "
             f"{escape(str(error))}</p></section>",
+            rendered_at=context.clock(),
+            page="memo",
         )
     decision = run.summary.get("decision_snapshot_id")
     head = (
         "<dl>"
-        f"<dt>written</dt><dd>{escape(utc_timestamp(run.finished_at))}</dd>"
-        f"<dt>decision</dt><dd>{escape(str(decision or 'not recorded'))}</dd>"
-        f"<dt>file</dt><dd>{escape(str(path))}</dd>"
+        f'<dt>written</dt><dd class="mono">{escape(utc_timestamp(run.finished_at))}</dd>'
+        f"<dt>decision</dt>"
+        f'<dd class="mono">{escape(str(decision or "not recorded"))}</dd>'
+        f'<dt>file</dt><dd class="mono">{escape(str(path))}</dd>'
         "</dl>"
     )
     audit_link = (
         ""
         if not isinstance(decision, str) or not decision
         else (
-            "<p><a href=\"/audit?decision="
-            f"{escape(quote(decision, safe=''))}\">signal and evidence audit for this "
+            '<p class="only-screen"><a href="/audit?decision='
+            f'{escape(quote(decision, safe=""))}">signal and evidence audit for this '
             "decision</a> — every episode, claim, and excerpt behind one player's "
             "ownership number.</p>"
         )
     )
     return _page(
         "latest memo",
-        f"<section><h2>Latest slate memo</h2>{head}{audit_link}"
-        f"<pre>{escape(text)}</pre></section>",
+        f"<section><h2>Latest slate memo</h2>{head}{audit_link}<pre>{escape(text)}</pre></section>",
+        rendered_at=context.clock(),
+        page="memo",
     )
 
 
@@ -1275,11 +1566,18 @@ def _audit_page(context: DashboardContext, query: Mapping[str, list[str]]) -> st
                 "no memo step has recorded one. Open this page from the "
                 '<a href="/memo">latest memo</a>, or add '
                 "<code>?decision=&lt;decision_snapshot_id&gt;</code>.</p></section>",
+                rendered_at=context.clock(),
+                page="audit",
             )
         selector = _query_value(query, "player")
         if selector is None:
             try:
-                return _page("signal audit", _audit_player_index(connection, decision))
+                return _page(
+                    "signal audit",
+                    _audit_player_index(connection, decision),
+                    rendered_at=context.clock(),
+                    page="audit",
+                )
             except AuditError as error:
                 if named_by_caller:
                     raise
@@ -1291,6 +1589,8 @@ def _audit_page(context: DashboardContext, query: Mapping[str, list[str]]) -> st
                     f"decision <code>{escape(decision)}</code>, and the store cannot audit "
                     f"it: {escape(str(error))}. Add <code>?decision=&lt;id&gt;</code> to "
                     "audit another.</p></section>",
+                    rendered_at=context.clock(),
+                    page="audit",
                 )
         # An unknown decision or player, or an ambiguous name, is the caller's error and
         # is answered as one: `do_GET` turns an AuditError into a 400 problem page.
@@ -1305,8 +1605,8 @@ def _audit_page(context: DashboardContext, query: Mapping[str, list[str]]) -> st
         "<dl>"
         f"<dt>player</dt><dd>{escape(audit.player_name)} "
         f"(id {audit.player_id})</dd>"
-        f"<dt>decision</dt><dd>{escape(audit.decision_snapshot_id)}</dd>"
-        f"<dt>as of</dt><dd>{escape(utc_timestamp(audit.decision_at))}</dd>"
+        f'<dt>decision</dt><dd class="mono">{escape(audit.decision_snapshot_id)}</dd>'
+        f'<dt>as of</dt><dd class="mono">{escape(utc_timestamp(audit.decision_at))}</dd>'
         f"<dt>slate</dt><dd>{audit.slate_id} {escape(audit.site)} "
         f"{escape(audit.slate_type)} {audit.season} week {audit.week:02d}</dd>"
         "<dt>ownership source</dt><dd>"
@@ -1327,6 +1627,8 @@ def _audit_page(context: DashboardContext, query: Mapping[str, list[str]]) -> st
         f'<p><a href="/audit?decision={escape(quote(audit.decision_snapshot_id, safe=""))}">'
         "another player on this decision</a> · "
         '<a href="/memo">back to the memo</a></p></section>' + sections,
+        rendered_at=context.clock(),
+        page="audit",
     )
 
 
@@ -1369,6 +1671,7 @@ def _not_found_page(path: str) -> str:
         f"The dashboard has these pages:</p><ul>{links}"
         '<li><a href="/audit">signal and evidence audit</a> — reached from a memo, for '
         "one player at one decision</li></ul></section>",
+        page="notfound",
     )
 
 
@@ -1377,12 +1680,27 @@ def _problem_page(title: str, detail: str) -> str:
         "refused",
         f"<section><h2>{escape(title)}</h2><pre>{escape(detail)}</pre>"
         '<p><a href="/">back to the status page</a></p></section>',
+        page="problem",
     )
 
 
 # --------------------------------------------------------------------------------------
 # Generic rendering of the status payload
 # --------------------------------------------------------------------------------------
+
+
+# A recorded failure text is as long as the failure was: the `extract` step writes one
+# clause per submitted item, and on a real store that is a single twenty-thousand-character
+# line. Rendered flat it becomes the page — it held the `steps` section open for 17,478 of
+# the status page's 22,821 pixels and pushed `warnings` and `manual actions` off the end of
+# it. Past these bounds the same text is folded into a <details> the reader opens: an
+# element, not a script, and nothing is summarized away or truncated inside it.
+FOLD_TEXT_LINES = 3
+FOLD_TEXT_CHARACTERS = 240
+FOLD_SUMMARY_CHARACTERS = 96
+
+# Rows past which a table is given a height of its own and scrolls inside it.
+TALL_TABLE_ROWS = 25
 
 
 def _label(key: str) -> str:
@@ -1401,7 +1719,32 @@ def _render(value: object) -> str:
     if isinstance(value, list):
         return _render_list(value)
     text = str(value)
-    return f"<pre>{escape(text)}</pre>" if "\n" in text else escape(text)
+    if "\n" in text or len(text) > FOLD_TEXT_CHARACTERS:
+        return _text_block(text)
+    return escape(text)
+
+
+def _text_block(text: str) -> str:
+    """A <pre>, and around it a <details> when the text is long enough to bury the page."""
+
+    lines = text.splitlines()
+    if len(lines) <= FOLD_TEXT_LINES and len(text) <= FOLD_TEXT_CHARACTERS:
+        return f"<pre>{escape(text)}</pre>"
+    head = (lines[0] if lines else text).strip()
+    if len(head) > FOLD_SUMMARY_CHARACTERS:
+        head = f"{head[:FOLD_SUMMARY_CHARACTERS].rstrip()}\u2026"
+    return (
+        f"<details><summary>{escape(head)} "
+        f'<span class="count">[{_measure(text, len(lines))}]</span></summary>'
+        f"<pre>{escape(text)}</pre></details>"
+    )
+
+
+def _measure(text: str, lines: int) -> str:
+    """What the reader is deciding whether to open."""
+
+    characters = f"{len(text):,} characters"
+    return characters if lines <= 1 else f"{lines:,} lines, {characters}"
 
 
 def _render_mapping(value: Mapping[str, object]) -> str:
@@ -1422,18 +1765,66 @@ def _render_list(value: list[object]) -> str:
     return f"<ul>{items}</ul>"
 
 
+# Column names that hold an identifier rather than a word: rendered in the monospace face
+# so a hash can be compared down the column and a wrong character is visible.
+IDENTIFIER_COLUMN_WORDS = frozenset(
+    {"id", "ids", "sha256", "hash", "key", "version", "path", "file", "batch"}
+)
+
+# Column names that hold an instant. Kept whole on one line: `2026-09-04T09:56:17.890820Z`
+# broken across two lines by a narrow column cannot be compared with the one above it.
+INSTANT_COLUMN_WORDS = frozenset({"at", "time", "timestamp", "date"})
+
+
 def _render_table(rows: list[dict[str, object]]) -> str:
     columns: list[str] = []
     for row in rows:
         columns.extend(key for key in row if key not in columns)
-    header = "".join(f"<th>{escape(_label(column))}</th>" for column in columns)
+    kinds = {column: _column_kind(column, rows) for column in columns}
+    header = "".join(
+        f"<th{_kind(kinds[column])}>{escape(_label(column))}</th>" for column in columns
+    )
     body = "".join(
         "<tr>"
         + "".join(
-            f"<td>{_render(row[column]) if column in row else '<span class=\"none\">—</span>'}</td>"
+            f"<td{_kind(kinds[column])}>"
+            + (_render(row[column]) if column in row else '<span class="none">—</span>')
+            + "</td>"
             for column in columns
         )
         + "</tr>"
         for row in rows
     )
-    return f"<table><tr>{header}</tr>{body}</table>"
+    # Wide tables scroll inside their own box; the page itself never scrolls sideways.
+    # A long one is given a height as well, so four hundred in-flight attempts stay four
+    # hundred in-flight attempts without becoming the whole queues page.
+    tall = " tall" if len(rows) > TALL_TABLE_ROWS else ""
+    return (
+        f'<div class="scroll{tall}"><table>'
+        f"<thead><tr>{header}</tr></thead><tbody>{body}</tbody>"
+        "</table></div>"
+    )
+
+
+def _column_kind(column: str, rows: list[dict[str, object]]) -> str:
+    """Whether a column holds figures, identifiers, or prose — read from the values.
+
+    A judgement about the data, not a new field: the payload is unchanged, and a column
+    that stops being numeric stops being right-aligned on the same page view.
+    """
+
+    values = [row[column] for row in rows if row.get(column) is not None]
+    if values and all(
+        isinstance(value, int | float) and not isinstance(value, bool) for value in values
+    ):
+        return "num"
+    words = column.split("_")
+    if INSTANT_COLUMN_WORDS.intersection(words):
+        return "stamp"
+    if IDENTIFIER_COLUMN_WORDS.intersection(words):
+        return "id"
+    return ""
+
+
+def _kind(kind: str) -> str:
+    return f' class="{kind}"' if kind else ""

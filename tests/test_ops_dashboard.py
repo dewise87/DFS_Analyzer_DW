@@ -12,12 +12,14 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import pytest
 
+from narrative_alpha import __version__
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.ops import (
@@ -33,6 +35,7 @@ from narrative_alpha.ops.batch import BatchReport
 from narrative_alpha.ops.results import ResultsReport
 from narrative_alpha.ops.runs import StepOutcome, recent_runs
 from narrative_alpha.ops.slate import SlateReport
+from narrative_alpha.ops.status import collect_ops_status, status_payload
 from narrative_alpha.snapshots import CaptureKind, capture_files
 from narrative_alpha.store import apply_migrations, connect_database
 
@@ -1112,9 +1115,7 @@ def test_the_results_action_runs_the_lane_and_records_its_steps(
     assert lane.calls[0]["standings_files"] == (standings.resolve(),)
     with connect_database(seeded.database) as connection:
         steps = [
-            run.step
-            for run in recent_runs(connection)
-            if run.batch_run_id == "results-dashboard"
+            run.step for run in recent_runs(connection) if run.batch_run_id == "results-dashboard"
         ]
     assert sorted(steps) == ["results_capture", "results_ingest"]
 
@@ -1221,3 +1222,94 @@ def test_the_lanes_block_shows_a_run_this_page_did_not_start(seeded: Any) -> Non
         # And the sentence still says which column is which.
         assert "The middle column is only what this page started" in lanes
         break
+
+
+# --------------------------------------------------------------------------------------
+# The status strip, and the two rules the page is held to: no script, no asset
+# --------------------------------------------------------------------------------------
+
+
+def _strip(body: str) -> str:
+    """The strip, which is everything the page says before its first heading."""
+
+    return body[body.index("</header>") : body.index("<h2>Lanes</h2>")]
+
+
+def test_the_status_strip_says_nothing_needs_a_hand_when_nothing_does() -> None:
+    """The quiet branch, on a payload with both lists empty.
+
+    It is called with a payload rather than driven through a store, because no store this
+    tool can build has nothing to do: `manual_actions` is non-empty until an nflverse
+    workload pin exists, and that pin is a module constant the dashboard cannot inject.
+    The seeded half of this pair drives the real server, so the wiring is covered there.
+    """
+
+    from narrative_alpha.ops.dashboard import _status_strip
+
+    strip = _status_strip({"warnings": [], "manual_actions": []})
+
+    assert "Nothing needs a hand" in strip
+    assert "strip-ok" in strip
+    # No list, no count, and nothing for an operator to open: one line is the whole strip.
+    assert "<li>" not in strip
+
+
+def test_the_status_strip_names_what_needs_a_hand_before_anything_else(
+    empty: Any,
+    empty_client: _Client,
+) -> None:
+    """The seeded branch: the same sentences the page's last two sections carry, first."""
+
+    with connect_database(empty.database) as connection:
+        status = collect_ops_status(connection, config=empty, database=empty.database, now=NOW)
+    payload = status_payload(status)
+    assert payload["warnings"], "the fixture must have something to warn about"
+    assert payload["manual_actions"], "the fixture must have something to do by hand"
+
+    _, body = empty_client.get("/")
+    strip = _strip(body)
+
+    assert "Nothing needs a hand" not in strip
+    assert "Needs a hand" in strip
+    assert f"{len(payload['manual_actions'])} manual action" in strip
+    for sentence in (*payload["warnings"], *payload["manual_actions"]):
+        assert escape(sentence) in strip, f"the strip does not name: {sentence}"
+    # A warning is a broken thing; the strip says so in the loud colour, not the amber one.
+    assert "strip-act" in strip
+    # And it is above the fold in the literal sense: before every section of the page.
+    assert body.index("Needs a hand") < body.index("<h2>Lanes</h2>")
+    assert body.index("Needs a hand") < body.index("<h2>manual actions</h2>")
+
+
+@pytest.mark.parametrize("path", PAGES)
+def test_no_page_runs_a_script_and_no_stylesheet_fetches_anything(
+    seeded_client: _Client,
+    path: str,
+) -> None:
+    """The two rules the whole design is built inside, checked on every page.
+
+    `url(` is the only way CSS reaches off the page for a font, an image, or an import;
+    `<script` is the only way the page runs anything. Neither appears, so the dashboard
+    stays a document a loopback server can serve with nothing else on the machine.
+    """
+
+    _, body = seeded_client.get(path)
+    stylesheet = body[body.index("<style>") + len("<style>") : body.index("</style>")]
+
+    assert "url(" not in stylesheet
+    assert "@import" not in stylesheet
+    assert "<script" not in body.casefold()
+    assert "<style>" in body and body.count("<style>") == 1
+
+
+def test_every_page_carries_the_instant_and_the_code_version(seeded_client: _Client) -> None:
+    """A screenshot of this page is dated, and says which build drew it."""
+
+    for path in PAGES:
+        _, body = seeded_client.get(path)
+        assert "<footer>" in body, path
+        assert f'code version <span class="mono">{__version__}</span>' in body, path
+    # The status page's footer is the same instant as its own `as of` section, not a
+    # second read of the clock a few milliseconds later.
+    _, status = seeded_client.get("/")
+    assert status.count(utc_timestamp(NOW)) >= 2
