@@ -1365,9 +1365,10 @@ Suite 505 → 526.
 the golden DK export). One major: team defense rows went to the unresolved queue — 32 by-hand
 resolutions a week and a blocked build — and now resolve to one canonical `dst:<code>` player
 per franchise. Minor: the README put `--database` before the subcommand, which the parser
-rejects. Open, carried from Phase 0: real DK showdown exports may carry separate CPT and FLEX
-rows per player, which `salaries`' one-row-per-player key cannot hold; verify against the first
-real showdown export (Thursday 2026-09-10). Suite 526 → 527.
+rejects. The Phase 0 risk that real DK showdown exports may carry separate CPT and FLEX rows
+per player is closed by Slice 44: the pair is validated and stored at its FLEX/base salary with
+both eligible roles. The first real showdown export (Thursday 2026-09-10) remains the
+operational format check. Suite 526 → 527.
 
 ### Slice 23 — Slate lane (`na-ops slate`) end to end
 
@@ -2817,6 +2818,101 @@ dependence model and the duplication model are where a plausible-looking simulat
 > for the same seed; the lane step skips with the reason on an empty store. Gates green;
 > never the production database.
 
+**Implementation status (2026-09-04):** landed as `src/narrative_alpha/simulation/` and
+`na-simulate`. Outcome draws use frozen point-in-time distributions and the versioned, hashed
+first-season Gaussian-copula assumptions in `config/simulation.toml`; `--independent` removes
+those loadings. The internal field sampler enforces site rules directly, calibrates to the
+frozen routing source and roster total, and refuses a marginal outside tolerance. Contest
+settlement splits ties and duplicate shares. Reports and append-only `simulation_runs` records
+carry config/draw/seed/ownership provenance and the experimental notice. Calibration remains a
+comparison-only command. `na-ops slate --simulate` is an optional recorded post-memo step and
+states why distributions or a contest are absent.
+
+**Review outcome (2026-09-04): scaffolding accepted, modeling core sent back.** What is
+right: point-in-time reads that refuse rather than impute, a copula construction that
+preserves the marginals exactly with a true `--independent` switch, correct tie splitting
+and duplicate halving, determinism from one seed sequence, a clean migration, and a lane
+step that writes no decision input. What is not usable yet, in the reviewer's measurements:
+(1) the field generator draws on ownership need alone and checks salary afterwards, so on a
+realistic pool (mean salary at or above cap/9) it exhausts its attempts and refuses, and
+the fields it does produce under-spend the cap, which inflates every GPP metric; (2)
+settlement is a Python loop over entries and payout bands per draw and the field is sized
+to the real contest, so a 100k-entry GPP is hours to a day; (3) at the shipped loadings
+the implied QB-to-receiver correlation is +0.03 against a real +0.5 while teammates are
+penalized about five times too hard, and the negative loading consumes so much variance
+that realistic game loadings cannot coexist with it; (4) the vendor-baseline ownership is
+recomputed by averaging `ownership_baselines` across sources instead of read from the
+frozen scenario's `projected_ownership`, so a classic decision is simulated against
+numbers it never saw; (5) the calibration hook counts realized duplicates from lineup
+strings and simulated ones from player-id sets; (6) the "duplication distribution" is one
+field realization; (7) field score quantiles are a head-of-list subsample in generation
+order; (8) the distribution rows used never reach the report. Done here, so the slice can
+merge without harm: the shadow step now skips with the reason on any simulator error and
+can never fail the lane; a decision with more lineups than the contest's entry limit and a
+contest above 10,000 entries are refused with the reason; the experimental notice is on
+every section. Everything else is Slice 43b below. Suite 786 → 787.
+
+### Slice 43b — Simulator revision: field, settlement, dependence
+
+**Goal:** make the shadow simulator describe a real contest: a field generator that hits
+salary use and ownership targets on a real pool, a settlement that finishes on a Sunday
+for a 100k-entry contest, a dependence model with football's correlations in the right
+place, and the ownership the decision actually saw.
+
+**Design doc:** §6.6, §6.4, §1.5 rule 5. Read the Slice 43 review outcome above first;
+every item below is a numbered finding there.
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro**. Frontier.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read the Slice 43 review outcome in
+> `docs/WORK_SLICES.md` and then `src/narrative_alpha/simulation/` in full, `tests/
+> test_simulation.py`, and the simulation parts of `ops/slate.py`. Do not touch the
+> point-in-time reads, the copula's marginal preservation, the tie splitting, the
+> determinism, or the migration: those were accepted. Change these, in order, each with
+> a test that would have caught the finding:
+>
+> 1. **Field generator.** Carry remaining salary and remaining slots through the draw;
+>    restrict each pick to players that leave a feasible completion (precomputed per-slot
+>    salary bounds); add a `salary_use` target to `[field]` (mean fraction of cap used,
+>    with a tolerance) beside the ownership marginals; keep `lineup_is_legal` as the
+>    backstop. Prove it on a DraftKings-shaped pool of 200+ players with mean salary at
+>    cap/9 and above: it converges, hits the ownership marginals and the salary target
+>    within tolerance, and fails loudly with the achieved numbers when it cannot.
+> 2. **Settlement.** Precompute `prize_by_rank` once from the bands; rank each draw with
+>    `argsort`, group ties with `np.unique(return_inverse=True)`, split with
+>    `np.add.reduceat`; score all draws in blocks. Target: 1,000 draws against a
+>    100,000-entry field with 15,000 payout rows in under five minutes on this laptop,
+>    stated as a measured number in the PR. Raise `MAX_SIMULATED_FIELD_SIZE` to what that
+>    measurement supports, and keep the refusal above it.
+> 3. **Dependence.** Position-differentiated loadings on the team factor with an explicit
+>    positive QB-to-pass-catcher term, and a within-position negative loading small enough
+>    (0.2–0.3) that realistic game loadings (0.3–0.4) fit the variance budget. Report the
+>    implied pairwise correlations for QB/WR same team, WR/WR same team, QB/QB opposing,
+>    and cross-game in the report header so the assumption is visible on every run; a
+>    test pins each of the four to a stated band.
+> 4. **Ownership.** For an unrouted decision read `projected_ownership` (and the captain
+>    value on showdown) from the frozen scenario, never from `ownership_baselines`;
+>    refuse on `None`. The routed path stays as it is.
+> 5. **Field replicates.** Draw K field realizations (config, default 8) from the same
+>    seed sequence; every metric is over replicate × draw; the duplication distribution
+>    is a real distribution; the report says K.
+> 6. **Calibration.** Resolve standings lineup strings to sorted player-id sets through
+>    the crosswalk before counting duplicates, so simulated and realized duplicates are
+>    the same object; use exact quantiles over all field scores, or a seeded random
+>    subsample, never a head-of-list one.
+> 7. **Provenance.** Every distribution row id and source used, the contest's field size
+>    and fee, and the ownership source reach the report and `simulation_runs.metrics_json`.
+> 8. Tests for the gaps the review listed: the ownership-calibration failure branch, a
+>    missing distribution row, both ownership sources, `--independent` end to end into
+>    `simulation_runs`, the calibration command, `simulation_runs` immutability, the stack
+>    knob moving the achieved rate, tie splitting with a nonzero second prize and a band
+>    spanning several ranks.
+>
+> Gates green; never the production database. The EXPERIMENTAL notice stays until a
+> human removes it in the config.
+
 ### Slice 44 — Showdown slates end to end
 
 **Goal:** Thursday, Monday, and Sunday night slates are showdown. Today the optimizer
@@ -2871,6 +2967,28 @@ multiplier and the roster rules are known, not estimated.
 > byte-identity; a classic decision's request bytes unchanged; routing per role with the
 > showdown caps; the dual-row salary export; a captain standings row's points. Gates
 > green; never the production database.
+
+**Implementation status (2026-09-04):** landed end to end. `SHOWDOWN_SITE_RULES` drives native
+DraftKings captain mode and FanDuel single-game mode, including each site's salary and scoring
+multiplier. Frozen candidates carry captain ownership (excluded from classic JSON) beside flex
+ownership, both selected from point-in-time baselines. Stage 4 requires complete captain and
+flex scenario roles, re-applies the wider showdown caps per row, holds unsupported material
+moves per role, and hashes both role sets. Upload, validation, replay, memo, red-team,
+`na-ops slate`, and the fast-inactives re-freeze all preserve captain identity. Native dual-row
+DK salary exports are validated and coalesced losslessly; standings retain role ownership and
+grade captain points against the 1.5× FLEX/base value. The classic request canonical bytes
+remain unchanged.
+
+**Review outcome (2026-09-04):** accepted as delivered. Checked: a classic decision's
+request bytes are unchanged (the captain field is excluded when None, and the golden's
+decision id did not move; only the policy artifact changed because the shipped policy
+gained a showdown table); captain-mode optimization goes through pydfs's own showdown
+sites with the published multipliers applied in the adapter and in the frozen-decision
+reader alike; per-role ownership is read as-of the decision and a missing role refuses;
+routing runs per role under the showdown caps and hashes both roles' rows, with captain
+provenance mapped onto the flex feature rows as the ownership model already does; the
+dual CPT/FLEX salary export collapses losslessly into one two-role player and refuses an
+ambiguous pair; the fast lane pins and replaces showdown lineups by (player, slot).
 
 ### Slice 45 — Dashboard design pass
 

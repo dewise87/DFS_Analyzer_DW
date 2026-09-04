@@ -26,6 +26,19 @@ class ClassicSiteRules:
     default_min_games: int | None
 
 
+@dataclass(frozen=True)
+class ShowdownSiteRules:
+    slots: tuple[str, ...]
+    default_salary_cap: int
+    default_max_players_per_team: int
+    default_min_teams: int
+    default_min_games: int | None
+    captain_slot: str
+    flex_slot: str
+    captain_points_multiplier: float
+    captain_salary_multiplier: float
+
+
 CLASSIC_SITE_RULES = {
     DfsSite.DRAFTKINGS: ClassicSiteRules(
         slots=("QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"),
@@ -40,6 +53,32 @@ CLASSIC_SITE_RULES = {
         default_max_players_per_team=4,
         default_min_teams=3,
         default_min_games=None,
+    ),
+}
+
+
+SHOWDOWN_SITE_RULES = {
+    DfsSite.DRAFTKINGS: ShowdownSiteRules(
+        slots=("CPT", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"),
+        default_salary_cap=50_000,
+        default_max_players_per_team=5,
+        default_min_teams=2,
+        default_min_games=None,
+        captain_slot="CPT",
+        flex_slot="FLEX",
+        captain_points_multiplier=1.5,
+        captain_salary_multiplier=1.5,
+    ),
+    DfsSite.FANDUEL: ShowdownSiteRules(
+        slots=("MVP", "FLEX", "FLEX", "FLEX", "FLEX"),
+        default_salary_cap=60_000,
+        default_max_players_per_team=4,
+        default_min_teams=2,
+        default_min_games=None,
+        captain_slot="MVP",
+        flex_slot="FLEX",
+        captain_points_multiplier=1.5,
+        captain_salary_multiplier=1.0,
     ),
 }
 
@@ -73,6 +112,12 @@ class CandidatePlayer(BaseModel):
     salary: int = Field(gt=0)
     projection: float = Field(ge=0)
     projected_ownership: float | None = Field(default=None, ge=0, le=1)
+    projected_ownership_captain: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        exclude_if=lambda value: value is None,
+    )
     game_id: str
     game_start: datetime | None = None
     is_injured: bool = False
@@ -115,7 +160,7 @@ class CandidatePlayerScenario(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scenario_id: str
-    players: tuple[CandidatePlayer, ...] = Field(min_length=9)
+    players: tuple[CandidatePlayer, ...] = Field(min_length=5)
     projection_source_versions: tuple[str, ...] = Field(min_length=1)
 
     @field_validator("scenario_id")
@@ -275,7 +320,16 @@ class OptimizationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_references(self) -> Self:
+        if (self.slate_type is SlateType.SHOWDOWN) != (
+            self.contest_archetype is ContestArchetype.SHOWDOWN
+        ):
+            raise ValueError("showdown slate type and contest archetype must be used together")
         scenario_ids = {player.player_id for player in self.candidate_player_scenario.players}
+        if self.slate_type is SlateType.CLASSIC and any(
+            player.projected_ownership_captain is not None
+            for player in self.candidate_player_scenario.players
+        ):
+            raise ValueError("projected_ownership_captain must be None on classic slates")
         exposure_ids = [exposure.player_id for exposure in self.player_exposure_ranges]
         if len(exposure_ids) != len(set(exposure_ids)):
             raise ValueError("player exposure ranges contain duplicate player IDs")
@@ -284,7 +338,13 @@ class OptimizationRequest(BaseModel):
             raise ValueError(f"player exposure ranges reference unknown IDs: {sorted(unknown_ids)}")
         if self.upload_entries and len(self.upload_entries) != self.number_of_lineups:
             raise ValueError("upload_entries must have exactly one row per requested lineup")
-        roster_size = len(CLASSIC_SITE_RULES[self.site].slots)
+        rules = site_rules(self.site, self.slate_type)
+        roster_size = len(rules.slots)
+        if len(scenario_ids) < roster_size:
+            raise ValueError(
+                f"candidate scenario must contain at least {roster_size} players for "
+                f"{self.site.value} {self.slate_type.value}"
+            )
         excluded = self.excluded_lineup_player_ids
         if len(excluded) != len({tuple(sorted(lineup)) for lineup in excluded}):
             raise ValueError("excluded lineups contain duplicates")
@@ -301,9 +361,7 @@ class OptimizationRequest(BaseModel):
         pinned = self.pinned_lineups
         if len(pinned) > self.number_of_lineups:
             raise ValueError("pinned_lineups cannot exceed number_of_lineups")
-        pinned_keys = [
-            tuple(sorted(player.player_id for player in lineup.players)) for lineup in pinned
-        ]
+        pinned_keys = [_lineup_uniqueness_key(lineup, self.slate_type) for lineup in pinned]
         if len(pinned_keys) != len(set(pinned_keys)):
             raise ValueError("pinned lineups contain duplicates")
         if set(pinned_keys) & {tuple(sorted(lineup)) for lineup in excluded}:
@@ -334,6 +392,12 @@ class LineupPlayer(BaseModel):
     salary: int = Field(gt=0)
     projection: float = Field(ge=0)
     projected_ownership: float | None = Field(default=None, ge=0, le=1)
+    projected_ownership_captain: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        exclude_if=lambda value: value is None,
+    )
     game_id: str
 
     @field_validator("slot", "team", "opponent", "position")
@@ -354,7 +418,12 @@ class Lineup(BaseModel):
 
     @model_validator(mode="after")
     def validate_totals_and_identity(self) -> Self:
-        roster_size = len(CLASSIC_SITE_RULES[self.site].slots)
+        slate_type = (
+            SlateType.SHOWDOWN
+            if any(player.slot in {"CPT", "MVP"} for player in self.players)
+            else SlateType.CLASSIC
+        )
+        roster_size = len(site_rules(self.site, slate_type).slots)
         if len(self.players) != roster_size:
             raise ValueError(
                 f"lineup must contain exactly {roster_size} players for {self.site.value}"
@@ -368,6 +437,20 @@ class Lineup(BaseModel):
         if self.lineup_id != expected_id:
             raise ValueError("lineup_id does not match lineup contents")
         return self
+
+
+def site_rules(site: DfsSite, slate_type: SlateType) -> ClassicSiteRules | ShowdownSiteRules:
+    """Return the published roster and salary rules for one site/slate pair."""
+
+    return (
+        CLASSIC_SITE_RULES[site] if slate_type is SlateType.CLASSIC else SHOWDOWN_SITE_RULES[site]
+    )
+
+
+def _lineup_uniqueness_key(lineup: Lineup, slate_type: SlateType) -> tuple[object, ...]:
+    if slate_type is SlateType.CLASSIC:
+        return tuple(sorted(player.player_id for player in lineup.players))
+    return tuple(sorted((player.player_id, player.slot) for player in lineup.players))
 
 
 class ValidationIssue(BaseModel):

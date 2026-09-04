@@ -34,6 +34,7 @@ _SUPPORTED_ARCHETYPES = frozenset(
         ContestArchetype.THREE_MAX.value,
         ContestArchetype.TWENTY_MAX.value,
         ContestArchetype.MASS_MULTI_ENTRY.value,
+        ContestArchetype.SHOWDOWN.value,
     }
 )
 

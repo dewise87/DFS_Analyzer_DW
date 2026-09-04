@@ -34,6 +34,7 @@ na-report = "narrative_alpha.report_cli:main"
 na-slate = "narrative_alpha.slate_cli:main"
 na-replay = "narrative_alpha.replay_cli:main"
 na-snapshot = "narrative_alpha.snapshots.cli:main"
+na-simulate = "narrative_alpha.simulation.cli:main"
 
 [dependency-groups]
 dev = [

@@ -37,7 +37,6 @@ from narrative_alpha.ownership_routing import (
     select_routed_candidate_scenario,
 )
 from narrative_alpha.portfolio import (
-    CLASSIC_SITE_RULES,
     CONTEST_POLICY_ARTIFACT_KIND,
     DEFAULT_CONTEST_POLICIES_PATH,
     CandidatePlayerScenario,
@@ -53,6 +52,7 @@ from narrative_alpha.portfolio import (
     UploadEntry,
     load_contest_policies,
     policy_request_fields,
+    site_rules,
 )
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -357,7 +357,7 @@ def _build_in_transaction(
         slate_id=slate_id,
         slate_type=SlateType(slate.slate_type),
         contest_archetype=contest_archetype,
-        salary_cap=CLASSIC_SITE_RULES[site].default_salary_cap,
+        salary_cap=site_rules(site, SlateType(slate.slate_type)).default_salary_cap,
         candidate_player_scenario=scenario,
         number_of_lineups=number_of_lineups,
         excluded_lineup_player_ids=excluded_lineup_player_ids,

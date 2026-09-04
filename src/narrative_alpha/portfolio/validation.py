@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections import Counter
 
 from narrative_alpha.portfolio.models import (
-    CLASSIC_SITE_RULES,
     CandidatePlayer,
     DfsSite,
     Lineup,
     OptimizationRequest,
+    SlateType,
     ValidationIssue,
     ValidationResult,
+    site_rules,
 )
 
 
@@ -19,7 +20,7 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
     """Double-check roster, position, salary, team, game, and site rules."""
 
     errors: list[ValidationIssue] = []
-    rules = CLASSIC_SITE_RULES[request.site]
+    rules = site_rules(request.site, request.slate_type)
     if lineup.site is not request.site or lineup.slate_id != request.slate_id:
         errors.append(_issue("wrong_slate", "lineup site/slate does not match request"))
 
@@ -50,7 +51,7 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
             errors.append(
                 _issue("site_player_id", f"site ID mismatch for player {candidate.player_id}")
             )
-        if not eligible_for_slot(candidate, lineup_player.slot, request.site):
+        if not eligible_for_slot(candidate, lineup_player.slot, request.site, request.slate_type):
             errors.append(
                 _issue(
                     "position",
@@ -81,7 +82,12 @@ def validate_lineup(lineup: Lineup, request: OptimizationRequest) -> ValidationR
         errors.append(_issue("min_games", f"lineup uses fewer than {min_games} games"))
 
     if request.ownership_sum_range is not None:
-        ownership = [player.projected_ownership for player in lineup.players]
+        ownership = [
+            player.projected_ownership_captain
+            if request.slate_type is SlateType.SHOWDOWN and player.slot in {"CPT", "MVP"}
+            else player.projected_ownership
+            for player in lineup.players
+        ]
         if any(value is None for value in ownership):
             errors.append(_issue("ownership_missing", "ownership bound requires every player"))
         else:
@@ -108,11 +114,13 @@ def validate_portfolio(
             _issue(f"lineup_{index}_{issue.code}", issue.message) for issue in result.errors
         )
 
-    max_overlap = len(CLASSIC_SITE_RULES[request.site].slots) - request.lineup_uniqueness
+    max_overlap = (
+        len(site_rules(request.site, request.slate_type).slots) - request.lineup_uniqueness
+    )
     for first_index, first in enumerate(lineups):
-        first_ids = {player.player_id for player in first.players}
+        first_ids = _lineup_entries(first, request.slate_type)
         for second_index, second in enumerate(lineups[first_index + 1 :], start=first_index + 1):
-            overlap = len(first_ids & {player.player_id for player in second.players})
+            overlap = len(first_ids & _lineup_entries(second, request.slate_type))
             if overlap > max_overlap:
                 errors.append(
                     _issue(
@@ -136,16 +144,29 @@ def validate_portfolio(
     return ValidationResult(valid=not errors, errors=tuple(errors))
 
 
-def eligible_for_slot(player: CandidatePlayer, slot: str, site: DfsSite) -> bool:
+def eligible_for_slot(
+    player: CandidatePlayer,
+    slot: str,
+    site: DfsSite,
+    slate_type: SlateType = SlateType.CLASSIC,
+) -> bool:
     """Report whether the independent site rules allow ``player`` in ``slot``."""
 
     slot = slot.upper()
     position = player.position.upper()
+    if slate_type is SlateType.SHOWDOWN:
+        return slot in player.eligible_roster_slots
     if slot == "FLEX":
         return position in {"RB", "WR", "TE"} and "FLEX" in player.eligible_roster_slots
     if site is DfsSite.FANDUEL and slot == "DEF":
         return position in {"D", "DEF", "DST"}
     return position == slot and slot in player.eligible_roster_slots
+
+
+def _lineup_entries(lineup: Lineup, slate_type: SlateType) -> set[object]:
+    if slate_type is SlateType.CLASSIC:
+        return {player.player_id for player in lineup.players}
+    return {(player.player_id, player.slot) for player in lineup.players}
 
 
 def _issue(code: str, message: str) -> ValidationIssue:

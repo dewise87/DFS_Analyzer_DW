@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from narrative_alpha.build import canonical_json_bytes
 from narrative_alpha.portfolio import (
     CandidatePlayer,
     CandidatePlayerScenario,
@@ -76,9 +78,7 @@ def _optimization_requests(draw: st.DrawFn) -> OptimizationRequest:
                     eligible_roster_slots=slots,
                     salary=draw(st.integers(min_value=3_000, max_value=max_salary)),
                     projection=draw(
-                        st.floats(
-                            min_value=0, max_value=40, allow_nan=False, allow_infinity=False
-                        )
+                        st.floats(min_value=0, max_value=40, allow_nan=False, allow_infinity=False)
                     ),
                     projected_ownership=draw(
                         st.floats(
@@ -117,8 +117,60 @@ def test_generated_lineups_pass_independent_validation_across_randomized_pools(
     for lineup in lineups:
         assert validate_lineup(lineup, optimization_request).valid
     assert validate_portfolio(lineups, optimization_request).valid
-    assert len({lineup.lineup_id for lineup in lineups}) == (
-        optimization_request.number_of_lineups
+    assert len({lineup.lineup_id for lineup in lineups}) == (optimization_request.number_of_lineups)
+
+
+@pytest.mark.parametrize(
+    ("site", "captain_slot", "roster_size", "salary_multiplier"),
+    (
+        (DfsSite.DRAFTKINGS, "CPT", 6, 1.5),
+        (DfsSite.FANDUEL, "MVP", 5, 1.0),
+    ),
+)
+def test_showdown_build_uses_native_captain_mode_and_site_multipliers(
+    site: DfsSite,
+    captain_slot: str,
+    roster_size: int,
+    salary_multiplier: float,
+) -> None:
+    request = _showdown_request(site)
+
+    lineup = PydfsAdapter().build_lineups(request)[0]
+    captain = next(player for player in lineup.players if player.slot == captain_slot)
+    candidate = next(
+        player
+        for player in request.candidate_player_scenario.players
+        if player.player_id == captain.player_id
+    )
+    upload = PydfsAdapter().export_upload_csv((lineup,), site).decode("utf-8")
+
+    assert len(lineup.players) == roster_size
+    assert captain.salary == round(candidate.salary * salary_multiplier)
+    assert captain.projection == pytest.approx(candidate.projection * 1.5)
+    assert upload.splitlines()[0].split(",")[0] == captain_slot
+    assert validate_lineup(lineup, request).valid
+
+
+def test_classic_request_bytes_do_not_gain_the_captain_ownership_field() -> None:
+    content = canonical_json_bytes(_request(DfsSite.DRAFTKINGS))
+
+    assert b"projected_ownership_captain" not in content
+    assert hashlib.sha256(content).hexdigest() == (
+        "35a33540c26574519b31f1331deea44034ca27eb4608daa8614d2892b7a35871"
+    )
+
+
+def test_showdown_pinned_lineup_is_preserved_byte_for_byte() -> None:
+    adapter = PydfsAdapter()
+    request = _showdown_request(DfsSite.DRAFTKINGS)
+    lineup = adapter.build_lineups(request)[0]
+    pinned_request = request.model_copy(update={"pinned_lineups": (lineup,)})
+
+    rebuilt = adapter.build_lineups(pinned_request)
+
+    assert rebuilt == (lineup,)
+    assert adapter.export_upload_csv(rebuilt, request.site) == adapter.export_upload_csv(
+        (lineup,), request.site
     )
 
 
@@ -176,9 +228,7 @@ def test_ownership_sum_range_outside_unit_average_is_rejected() -> None:
 def test_player_exposure_ranges_are_rejected_explicitly() -> None:
     request = _request(DfsSite.DRAFTKINGS, number_of_lineups=2).model_copy(
         update={
-            "player_exposure_ranges": (
-                PlayerExposureRange(player_id=1, minimum=0.5, maximum=1.0),
-            )
+            "player_exposure_ranges": (PlayerExposureRange(player_id=1, minimum=0.5, maximum=1.0),)
         }
     )
 
@@ -200,8 +250,7 @@ def test_pool_with_no_flex_rb_is_rejected_explicitly() -> None:
         PydfsAdapter().build_lineups(request)
 
     assert any(
-        players[index].name in feature and "FLEX" in feature
-        for feature in raised.value.features
+        players[index].name in feature and "FLEX" in feature for feature in raised.value.features
     )
 
 
@@ -217,9 +266,7 @@ def test_game_info_teams_are_deterministic_regardless_of_candidate_order() -> No
             reverse[game_id].home_team,
             reverse[game_id].away_team,
         )
-        assert [game.home_team, game.away_team] == sorted(
-            [game.home_team, game.away_team]
-        )
+        assert [game.home_team, game.away_team] == sorted([game.home_team, game.away_team])
         assert game.home_team != game.away_team
 
 
@@ -336,9 +383,7 @@ def test_upload_csv_contains_site_template_metadata_and_roster_ids(site: DfsSite
         (DfsSite.FANDUEL, "fanduel_upload.csv"),
     ),
 )
-def test_upload_csv_is_byte_stable_against_golden_file(
-    site: DfsSite, golden_filename: str
-) -> None:
+def test_upload_csv_is_byte_stable_against_golden_file(site: DfsSite, golden_filename: str) -> None:
     candidates = {player.player_id: player for player in _player_pool(site, 0, 0)}
     player_slots = zip(
         (1, 5, 6, 13, 14, 15, 23, 7, 27),
@@ -424,6 +469,44 @@ def _request(
             if number_of_lineups == 1
             else ()
         ),
+    )
+
+
+def _showdown_request(site: DfsSite) -> OptimizationRequest:
+    positions = ("QB", "RB", "WR", "TE", "K", "DST")
+    players = tuple(
+        CandidatePlayer(
+            player_id=index,
+            site_player_id=str(20_000 + index),
+            name=f"Showdown Player {index}",
+            team="AAA" if index % 2 else "BBB",
+            opponent="BBB" if index % 2 else "AAA",
+            position=position,
+            eligible_roster_slots=("CPT", "FLEX")
+            if site is DfsSite.DRAFTKINGS
+            else ("MVP", "FLEX"),
+            salary=(6_200 if site is DfsSite.DRAFTKINGS else 9_000) + index * 100,
+            projection=round(24.0 - index, 4),
+            projected_ownership=5 / 6,
+            projected_ownership_captain=1 / 6,
+            game_id="game-1",
+            game_start=datetime(2026, 9, 13, 17, tzinfo=UTC),
+        )
+        for index, position in enumerate(positions, start=1)
+    )
+    return OptimizationRequest(
+        site=site,
+        slate_id=2,
+        slate_type=SlateType.SHOWDOWN,
+        contest_archetype=ContestArchetype.SHOWDOWN,
+        salary_cap=50_000 if site is DfsSite.DRAFTKINGS else 60_000,
+        candidate_player_scenario=CandidatePlayerScenario(
+            scenario_id="showdown-fixture-scenario",
+            players=players,
+            projection_source_versions=("fixture-projection-v1",),
+        ),
+        lineup_uniqueness=1,
+        number_of_lineups=1,
     )
 
 

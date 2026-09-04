@@ -152,13 +152,37 @@ which no later replay could reconstruct.
 uv run na-ops slate --season 2026 --week 1 --site dk --lineups 20
 ```
 
-One command from captured files to an upload CSV. Six isolated steps, each recorded in
+One command from captured files to an upload CSV. Six required isolated steps, each recorded in
 `ops_runs` exactly as the batch lane records its own: ingest the newest salary capture →
 ingest every projection and ownership capture of the week that has a registered vendor
 adapter → build Stage 2 episodes → build Stage 3 features for the slate → freeze the
 decision snapshot with its upload CSV → write the memo. It prints the memo path, the upload
 CSV path, the decision snapshot id, and the one-line `na-replay` command that reproduces
 the bytes.
+
+Showdown slates use the same command and fast-inactives workflow. The lane selects the
+showdown contest policy from the ingested slate, reads separate captain and flex ownership
+baselines as of the decision, and writes the site's captain-first upload template. DraftKings
+uses one CPT at 1.5× salary and points plus five FLEX slots; FanDuel uses one MVP at 1.5×
+points and unchanged salary plus four FLEX slots. A DraftKings salary export that lists one
+player on separate CPT and FLEX rows is validated and stored as one base player with both
+roles.
+
+After distributions and a contest payout curve have been captured, run the shadow simulator
+against the frozen decision (it never changes that decision or calls the lineup optimizer):
+
+```bash
+uv run na-simulate --decision-snapshot <id> --contest <external-id> --draws 1000
+```
+
+`--independent` turns off the first-season copula assumptions for a visible comparison. Every
+successful run writes `data/reports/<season>/week_NN/simulation-<decision>-<stamp>.txt` and an
+append-only `simulation_runs` row. Reports remain labeled experimental until a human changes the
+versioned `config/simulation.toml` calibration decision. After standings are ingested, run
+`uv run na-simulate calibrate --season N --week N`; it writes comparisons beside saved reports
+without changing that decision. `na-ops slate --simulate [--simulation-contest <external-id>]`
+adds the optional post-memo `slate_simulate` step and records an explicit skip when its inputs are
+absent.
 
 `--decision-at` is the single cutoff handed to the episode build, the feature build, and
 the decision build, and it is written into every step's summary, so the whole run replays

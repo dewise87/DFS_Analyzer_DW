@@ -18,14 +18,16 @@ from narrative_alpha.portfolio import (
 )
 
 
-def test_shipped_policy_is_byte_hashed_and_refuses_uncovered_archetypes() -> None:
+def test_shipped_policy_is_byte_hashed_and_covers_showdown() -> None:
     policy = load_contest_policies()
 
-    assert policy.policy_version == "contest-policy-v1"
+    assert policy.policy_version == "contest-policy-v2"
     assert len(policy.sha256) == 64
     assert policy.sha256 == hashlib.sha256(policy.raw_bytes).hexdigest()
-    with pytest.raises(ContestPolicyError, match="showdown"):
-        policy.for_archetype(ContestArchetype.SHOWDOWN)
+    showdown = policy.for_archetype(ContestArchetype.SHOWDOWN)
+    assert showdown.ownership_sum_points is None
+    assert showdown.lineup_uniqueness == 1
+    assert showdown.max_player_exposure == 1.0
 
 
 def test_policy_loader_forbids_unknown_fields_and_archetypes(tmp_path: Path) -> None:
@@ -70,9 +72,7 @@ def test_every_classic_archetype_builds_through_real_adapter(
     policies = load_contest_policies()
     base = _request(DfsSite.DRAFTKINGS, number_of_lineups=lineup_count)
     fields = policy_request_fields(policies, archetype, base.candidate_player_scenario)
-    request = base.model_copy(
-        update={"contest_archetype": archetype, **fields.as_update()}
-    )
+    request = base.model_copy(update={"contest_archetype": archetype, **fields.as_update()})
 
     lineups = PydfsAdapter().build_lineups(request)
 

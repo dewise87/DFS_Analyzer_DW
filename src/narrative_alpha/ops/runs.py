@@ -27,6 +27,7 @@ OpsSlateStep = Literal[
     "slate_features",
     "slate_build",
     "slate_memo",
+    "slate_simulate",
 ]
 OpsResultsStep = Literal[
     "results_capture",

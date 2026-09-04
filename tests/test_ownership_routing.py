@@ -21,6 +21,7 @@ from narrative_alpha import ownership_routing
 from narrative_alpha.build import BuildRoutingError, build_decision
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.interface import build_slate_memo, render_slate_memo
+from narrative_alpha.interface.red_team import _do_nothing
 from narrative_alpha.narrative import (
     build_episodes,
     build_features,
@@ -44,11 +45,14 @@ from narrative_alpha.ownership import (
 from narrative_alpha.ownership_routing import (
     NO_PINNED_ROUTING,
     ROUTING_SLATE_KIND,
+    SHOWDOWN_ROUTING_SLATE_KIND,
+    AppliedOwnershipDelta,
     material_delta,
     pinned_routing_from_manifest,
     routing_config,
+    select_ownership_routing,
 )
-from narrative_alpha.portfolio import CandidatePlayer, PydfsAdapter
+from narrative_alpha.portfolio import CandidatePlayer, DfsSite, PydfsAdapter
 from narrative_alpha.replay import replay_decision
 from narrative_alpha.report_cli import load_build_result
 from narrative_alpha.store import apply_migrations, connect_database
@@ -67,12 +71,30 @@ SECOND_DECISION_AT = FIRST_DECISION_AT + timedelta(minutes=15)
 # person names. The claim names one of them exactly, so the crosswalk resolves it and the
 # build's fail-closed identity gate stays satisfied.
 CANDIDATE_NAMES = (
-    "Adrian Ashby", "Bennett Cole", "Curtis Dane", "Desmond Ellis",
-    "Elliot Frost", "Franklin Gale", "Gordon Hale", "Hollis Irving",
-    "Ivan Jarrett", "Jonah Keller", "Keegan Lowry", "Lucas Mercer",
-    "Marcus Bell", "Nolan Ortiz", "Oscar Pike", "Preston Quinn",
-    "Quentin Rowe", "Rowan Sayer", "Silas Thorne", "Trevor Upton",
-    "Ulysses Vance", "Victor Whitlock", "Wesley Yates", "Xavier Zane",
+    "Adrian Ashby",
+    "Bennett Cole",
+    "Curtis Dane",
+    "Desmond Ellis",
+    "Elliot Frost",
+    "Franklin Gale",
+    "Gordon Hale",
+    "Hollis Irving",
+    "Ivan Jarrett",
+    "Jonah Keller",
+    "Keegan Lowry",
+    "Lucas Mercer",
+    "Marcus Bell",
+    "Nolan Ortiz",
+    "Oscar Pike",
+    "Preston Quinn",
+    "Quentin Rowe",
+    "Rowan Sayer",
+    "Silas Thorne",
+    "Trevor Upton",
+    "Ulysses Vance",
+    "Victor Whitlock",
+    "Wesley Yates",
+    "Xavier Zane",
 )
 NARRATIVE_PLAYER_NAME = CANDIDATE_NAMES[12]
 
@@ -123,6 +145,151 @@ def test_routing_threshold_and_caps_come_from_the_config_files_bytes() -> None:
         assert cap is not None, status
         assert cap.maximum_delta == pytest.approx(float(values["maximum_points"]) / 100.0), status
         assert cap.multiplier == pytest.approx(float(values["multiplier"])), status
+    for status, values in parsed["caps"][SHOWDOWN_ROUTING_SLATE_KIND].items():
+        cap = routing_config().cap_for(SHOWDOWN_ROUTING_SLATE_KIND, status)
+        assert cap is not None, status
+        assert cap.maximum_delta == pytest.approx(float(values["maximum_points"]) / 100.0), status
+        assert cap.multiplier == pytest.approx(float(values["multiplier"])), status
+
+
+class _ShowdownRoutingSession:
+    """Small point-in-time fixture that makes both role reads independently visible."""
+
+    def __init__(
+        self,
+        *,
+        captain_delta: float = 0.08,
+        flex_delta: float = 0.01,
+        omit_flex_player: int | None = None,
+    ) -> None:
+        self.captain_delta = captain_delta
+        self.flex_delta = flex_delta
+        self.omit_flex_player = omit_flex_player
+
+    def query(
+        self,
+        sql: str,
+        parameters: dict[str, object] | None = None,
+        *,
+        as_of: datetime | None,
+    ) -> tuple[dict[str, object], ...]:
+        del as_of
+        values = parameters or {}
+        if "SELECT DISTINCT os.run_id" in sql:
+            shared = {
+                "run_id": "showdown-scenarios-1",
+                "decision_snapshot_id": "showdown-decision-1",
+                "contest_archetype": "showdown",
+                "governance_status": "TESTING",
+                "status_multiplier": 0.5,
+                "model_run_id": "showdown-model-1",
+                "model_version": "showdown-model-v1",
+                "config_sha256": routing_config().config_sha256,
+                "feature_version": "feature-v1",
+                "source": "ownership-map-laplace",
+                "observed_at": utc_timestamp(SCENARIOS_AT),
+            }
+            return tuple({**shared, "role": role} for role in ("captain", "flex"))
+        if "FROM model_evals" in sql:
+            return ({"model_eval_id": "showdown-eval-1", "beat_baseline": 1},)
+        if "FROM decision_snapshots" in sql:
+            return ({"decision_at": utc_timestamp(FIRST_DECISION_AT)},)
+        if "FROM ownership_scenarios" in sql:
+            role = str(values["role"])
+            baseline = 0.10 if role == "captain" else 0.70
+            delta = self.captain_delta if role == "captain" else self.flex_delta
+            player_ids = tuple(
+                player_id
+                for player_id in range(1, 7)
+                if role != "flex" or player_id != self.omit_flex_player
+            )
+            return tuple(
+                {
+                    "player_id": player_id,
+                    "role": role,
+                    "position": "WR",
+                    "baseline_ownership": baseline,
+                    "applied_ownership": baseline + delta,
+                    "ownership_p10": baseline + delta - 0.01,
+                    "ownership_p50": baseline + delta,
+                    "ownership_p90": baseline + delta + 0.01,
+                    "delta_p50": delta,
+                    "prob_delta_positive": 0.9,
+                }
+                for player_id in player_ids
+            )
+        if "FROM narrative_features" in sql:
+            return tuple(
+                {
+                    "player_id": player_id,
+                    "feature_id": f"feature-{player_id}",
+                    "episode_ids_json": "[]",
+                }
+                for player_id in range(1, 7)
+            )
+        raise AssertionError(f"unexpected point-in-time query: {sql}")
+
+
+def test_showdown_routing_reads_both_roles_uses_showdown_cap_and_hashes_every_row() -> None:
+    common = {
+        "slate_id": 1,
+        "site": DfsSite.DRAFTKINGS,
+        "slate_type": "showdown",
+        "contest_archetype": "showdown",
+        "as_of": SECOND_DECISION_AT,
+        "candidate_player_ids": frozenset(range(1, 7)),
+    }
+
+    routed = select_ownership_routing(_ShowdownRoutingSession(), **common)  # type: ignore[arg-type]
+    changed_flex = select_ownership_routing(
+        _ShowdownRoutingSession(flex_delta=0.015),
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert routed.applied
+    assert routed.role == "captain+flex"
+    assert [(delta.role, delta.player_id) for delta in routed.deltas] == [
+        *(("captain", player_id) for player_id in range(1, 7)),
+        *(("flex", player_id) for player_id in range(1, 7)),
+    ]
+    assert len(routed.held_deltas) == 6
+    assert {delta.role for delta in routed.held_deltas} == {"captain"}
+    assert routed.sha256 != changed_flex.sha256
+
+    missing_role = select_ownership_routing(
+        _ShowdownRoutingSession(omit_flex_player=6),
+        **common,  # type: ignore[arg-type]
+    )
+    assert not missing_role.applied
+    assert "flex role" in missing_role.reason
+    assert "missing 6" in missing_role.reason
+
+    with pytest.raises(ownership_routing.OwnershipRoutingError, match="showdown"):
+        select_ownership_routing(
+            _ShowdownRoutingSession(captain_delta=0.11),
+            **common,  # type: ignore[arg-type]
+        )
+
+
+def test_showdown_red_team_do_nothing_case_names_the_captain_swap() -> None:
+    delta = AppliedOwnershipDelta(
+        player_id=1,
+        role="captain",
+        position="QB",
+        baseline_ownership=0.20,
+        applied_ownership=0.25,
+        ownership_p10=0.23,
+        ownership_p50=0.25,
+        ownership_p90=0.27,
+        delta_p50=0.05,
+        prob_delta_positive=0.9,
+        feature_id="feature-1",
+        episode_ids=("episode-1",),
+        evidence_refs=(),
+    )
+
+    assert "captain swap would stay unchanged" in _do_nothing(delta, 1, False)
+    assert "could change the captain swap" in _do_nothing(delta, 1, True)
 
 
 def test_a_routed_decision_replays_under_the_configuration_it_froze(
@@ -237,8 +404,7 @@ def test_build_falls_back_to_the_vendor_baseline_without_a_winning_evaluation(
     assert not lost.ownership_routing.applied
     assert "did not beat the untouched vendor baseline" in lost.ownership_routing.reason
     assert all(
-        item.artifact_kind != "ownership_scenarios"
-        for item in lost.snapshot.manifest_hashes_json
+        item.artifact_kind != "ownership_scenarios" for item in lost.snapshot.manifest_hashes_json
     )
     with connect_database(fixture.database) as connection:
         memo = build_slate_memo(lost, connection)
@@ -992,9 +1158,7 @@ def _insert_baseline(
     )
 
 
-def _baselines(
-    connection: sqlite3.Connection, fixture: RoutingFixture
-) -> dict[int, float]:
+def _baselines(connection: sqlite3.Connection, fixture: RoutingFixture) -> dict[int, float]:
     """The vendor baseline each feature row cites, which a scenario set must start from."""
 
     rows = connection.execute(

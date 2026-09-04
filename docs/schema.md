@@ -149,6 +149,14 @@ standings SHA-256 and the full point-in-time provenance block. The `(contest_ent
 source_file_sha256)` identity makes an unchanged results rerun a no-op. Settlement refuses when a
 ledger contest has no payout table; it never guesses winnings.
 
+## `simulation_runs`
+
+Stores one append-only record per experimental contest simulation: the frozen decision and
+point-in-time contest, report path and SHA-256, versioned simulation-config hash, draw count,
+seed, independent/copula mode, and the ownership source named by the decision's routing record.
+The deterministic structured report is retained in `metrics_json` for calibration comparisons.
+Updates and deletes are forbidden.
+
 ## `odds_snapshots`
 
 Stores sportsbook spread, total, and optional American-price observations for a versioned game.  

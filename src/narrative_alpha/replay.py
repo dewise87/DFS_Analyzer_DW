@@ -35,8 +35,8 @@ from narrative_alpha.ownership_routing import (
     verify_pinned_routing,
 )
 from narrative_alpha.portfolio import (
-    CLASSIC_SITE_RULES,
     CONTEST_POLICY_ARTIFACT_KIND,
+    SHOWDOWN_SITE_RULES,
     CandidatePlayerScenario,
     ContestArchetype,
     ContestPolicies,
@@ -46,10 +46,12 @@ from narrative_alpha.portfolio import (
     LineupPlayer,
     OptimizationRequest,
     OptimizerAdapter,
+    SlateType,
     export_upload_csv,
     lineup_sha256,
     load_contest_policies_bytes,
     policy_request_fields,
+    site_rules,
 )
 from narrative_alpha.store import DecisionManifestHash, DecisionSnapshotRow, SlateRow
 
@@ -409,7 +411,7 @@ def read_frozen_decision(
 
 
 def _lineups_from_upload(request: OptimizationRequest, upload_bytes: bytes) -> tuple[Lineup, ...]:
-    slots = CLASSIC_SITE_RULES[request.site].slots
+    slots = site_rules(request.site, request.slate_type).slots
     by_site_id = {
         player.site_player_id: player for player in request.candidate_player_scenario.players
     }
@@ -440,6 +442,13 @@ def _lineups_from_upload(request: OptimizationRequest, upload_bytes: bytes) -> t
                     f"generated_lineups.csv names site player {site_player_id!r}, which the "
                     "frozen request's candidates do not contain"
                 )
+            captain = request.slate_type is SlateType.SHOWDOWN and slot in {"CPT", "MVP"}
+            points_multiplier = (
+                SHOWDOWN_SITE_RULES[request.site].captain_points_multiplier if captain else 1.0
+            )
+            salary_multiplier = (
+                SHOWDOWN_SITE_RULES[request.site].captain_salary_multiplier if captain else 1.0
+            )
             players.append(
                 LineupPlayer(
                     slot=slot,
@@ -449,9 +458,10 @@ def _lineups_from_upload(request: OptimizationRequest, upload_bytes: bytes) -> t
                     team=candidate.team,
                     opponent=candidate.opponent,
                     position=candidate.position,
-                    salary=candidate.salary,
-                    projection=candidate.projection,
+                    salary=round(candidate.salary * salary_multiplier),
+                    projection=round(candidate.projection * points_multiplier, 6),
                     projected_ownership=candidate.projected_ownership,
+                    projected_ownership_captain=candidate.projected_ownership_captain,
                     game_id=candidate.game_id,
                 )
             )

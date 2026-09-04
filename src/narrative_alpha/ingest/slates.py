@@ -270,9 +270,7 @@ def load_salary_capture(
         except SlateIngestError as error:
             errors.append(f"{file_record.path}: {error}")
             continue
-        groups[group.external_slate_id] = _merge_group(
-            groups.get(group.external_slate_id), group
-        )
+        groups[group.external_slate_id] = _merge_group(groups.get(group.external_slate_id), group)
 
     slates: list[SlateLoadResult] = []
     for external_slate_id in sorted(groups):
@@ -417,7 +415,9 @@ def _load_slate_group(
     changes: list[SalaryChange] = []
     unresolved: list[UnresolvedSalaryPlayer] = []
 
-    for parsed_row, file_sha256, observed_at in group.rows:
+    salary_rows, merge_errors = _coalesce_draftkings_showdown_rows(group.rows)
+    errors.extend(merge_errors)
+    for parsed_row, file_sha256, observed_at in salary_rows:
         for code in (parsed_row.team, parsed_row.opponent):
             canonical = normalize_team_code(code)
             if canonical in teams:
@@ -540,6 +540,74 @@ def _load_slate_group(
         matchups_without_kickoff=tuple(sorted(matchups_without_kickoff)),
         source_files=tuple(sorted(set(group.source_files))),
     )
+
+
+def _coalesce_draftkings_showdown_rows(
+    rows: tuple[tuple[ParsedSalaryRow, str, datetime], ...],
+) -> tuple[
+    tuple[tuple[ParsedSalaryRow, str, datetime], ...],
+    tuple[str, ...],
+]:
+    """Collapse native DK CPT/FLEX variants into one base player salary row.
+
+    DraftKings can export a player twice: a 1.5x-priced CPT row and a base-priced
+    FLEX row. The store intentionally has one salary observation per player, so the
+    two losslessly become one row with both eligible roles and the FLEX salary.
+    """
+
+    grouped: dict[tuple[str, str, str], list[tuple[ParsedSalaryRow, str, datetime]]] = {}
+    passthrough: list[tuple[ParsedSalaryRow, str, datetime]] = []
+    for item in rows:
+        row, file_sha256, observed_at = item
+        if row.site is not SalarySite.DRAFTKINGS or row.slate_type is not SalarySlateType.SHOWDOWN:
+            passthrough.append(item)
+            continue
+        key = (file_sha256, utc_timestamp(observed_at), row.site_player_id)
+        grouped.setdefault(key, []).append(item)
+
+    merged: list[tuple[ParsedSalaryRow, str, datetime]] = []
+    errors: list[str] = []
+    for items in grouped.values():
+        if len(items) == 1:
+            merged.append(items[0])
+            continue
+        captain = [item for item in items if item[0].eligible_roster_slots == ("CPT",)]
+        flex = [item for item in items if item[0].eligible_roster_slots == ("FLEX",)]
+        if len(items) != 2 or len(captain) != 1 or len(flex) != 1:
+            errors.append(
+                f"DraftKings showdown player {items[0][0].site_player_id} has ambiguous "
+                "CPT/FLEX salary rows; expected exactly one of each"
+            )
+            continue
+        captain_row = captain[0][0]
+        flex_row = flex[0][0]
+        captain_identity = captain_row.model_dump(
+            mode="python", exclude={"eligible_roster_slots", "salary"}
+        )
+        flex_identity = flex_row.model_dump(
+            mode="python", exclude={"eligible_roster_slots", "salary"}
+        )
+        if captain_identity != flex_identity:
+            errors.append(
+                f"DraftKings showdown player {flex_row.site_player_id} has conflicting "
+                "identity or game data between CPT and FLEX rows"
+            )
+            continue
+        expected_captain_salary = round(flex_row.salary * 1.5)
+        if captain_row.salary != expected_captain_salary:
+            errors.append(
+                f"DraftKings showdown player {flex_row.site_player_id} CPT salary "
+                f"{captain_row.salary} is not 1.5x FLEX salary {flex_row.salary}"
+            )
+            continue
+        merged.append(
+            (
+                flex_row.model_copy(update={"eligible_roster_slots": ("CPT", "FLEX")}),
+                flex[0][1],
+                flex[0][2],
+            )
+        )
+    return tuple((*passthrough, *merged)), tuple(errors)
 
 
 def _resolve_slate(
@@ -750,12 +818,8 @@ def _resolve_game(
     external_game_id = f"{season}:w{week:02d}:{first}-{second}"
     observed_text = utc_timestamp(observed_at)
     kickoff_text = utc_timestamp(parsed_row.game_time)
-    home = normalize_team_code(
-        parsed_row.team if parsed_row.is_home else parsed_row.opponent
-    )
-    away = normalize_team_code(
-        parsed_row.opponent if parsed_row.is_home else parsed_row.team
-    )
+    home = normalize_team_code(parsed_row.team if parsed_row.is_home else parsed_row.opponent)
+    away = normalize_team_code(parsed_row.opponent if parsed_row.is_home else parsed_row.team)
     row = connection.execute(
         """
         SELECT game_id, kickoff_at FROM games
@@ -830,9 +894,7 @@ def _insert_salary(
     run_id: str | None,
 ) -> _InsertOutcome:
     observed_text = utc_timestamp(observed_at)
-    roster_positions = json.dumps(
-        list(parsed_row.eligible_roster_slots), separators=(",", ":")
-    )
+    roster_positions = json.dumps(list(parsed_row.eligible_roster_slots), separators=(",", ":"))
     content = (
         game_id,
         team_id,
@@ -1016,8 +1078,7 @@ def render_slates(summaries: tuple[SlateSummary, ...], *, season: int, week: int
     header = f"SLATES — {season} week {week:02d}"
     if not summaries:
         return (
-            f"{header}\n  none ingested — run `na-slate ingest` on this week's "
-            "salaries capture\n"
+            f"{header}\n  none ingested — run `na-slate ingest` on this week's salaries capture\n"
         )
 
     lines = [

@@ -683,9 +683,9 @@ class ContestEntryResultRow(PointInTimeRow):
         if self.settlement_status == "settled":
             if any(value is None for value in values) or self.unsettled_reason is not None:
                 raise ValueError("settled entry requires rank, points, payout, and no reason")
-        elif any(value is not None for value in values) or not (
-            self.unsettled_reason or ""
-        ).strip():
+        elif (
+            any(value is not None for value in values) or not (self.unsettled_reason or "").strip()
+        ):
             raise ValueError("unsettled entry requires only a non-empty reason")
         return self
 
@@ -1850,6 +1850,7 @@ class OpsRunRow(StoreRow):
         "slate_features",
         "slate_build",
         "slate_memo",
+        "slate_simulate",
         # Results lane (`na-ops results`), Tuesday.
         "results_capture",
         "results_ingest",
@@ -1885,4 +1886,40 @@ class OpsRunRow(StoreRow):
                 raise ValueError("a succeeded ops run carries no error text")
         elif not (self.error_text or "").strip():
             raise ValueError(f"a {self.status} ops run must explain itself in error_text")
+        return self
+
+
+class SimulationRunRow(StoreRow):
+    """One immutable simulator invocation and its deterministic report payload."""
+
+    simulation_run_id: int = Field(gt=0)
+    decision_snapshot_id: str = Field(min_length=1)
+    contest_id: int = Field(gt=0)
+    created_at: datetime
+    report_path: str = Field(min_length=1)
+    report_sha256: Sha256
+    config_version: str = Field(min_length=1)
+    config_sha256: Sha256
+    draw_count: int = Field(gt=0)
+    seed: int = Field(ge=0)
+    independent: bool
+    ownership_source: Literal["scenario_model", "vendor_baseline"]
+    ownership_scenario_run_id: str | None
+    metrics_json: dict[str, object]
+
+    @field_validator("created_at")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("metrics_json", mode="before")
+    @classmethod
+    def decode_metrics(cls, value: object) -> object:
+        return _decode_json(value)
+
+    @model_validator(mode="after")
+    def validate_ownership_source(self) -> Self:
+        routed = self.ownership_source == "scenario_model"
+        if routed != (self.ownership_scenario_run_id is not None):
+            raise ValueError("scenario ownership source and scenario run id must agree")
         return self

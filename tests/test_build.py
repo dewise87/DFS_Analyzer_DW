@@ -10,11 +10,17 @@ import pytest
 
 import narrative_alpha.build as build_module
 import narrative_alpha.replay as replay_module
-from narrative_alpha.build import BuildSelfVerificationError, build_decision
+from narrative_alpha.build import BuildDataError, BuildSelfVerificationError, build_decision
 from narrative_alpha.identity import CrosswalkError
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.interface import build_slate_memo, render_slate_memo
 from narrative_alpha.ops.backup import create_backup, restore_backup
-from narrative_alpha.portfolio import CandidatePlayer, DfsSite, PydfsAdapter
+from narrative_alpha.portfolio import (
+    CandidatePlayer,
+    ContestArchetype,
+    DfsSite,
+    PydfsAdapter,
+)
 from narrative_alpha.replay import replay_decision
 from narrative_alpha.store import (
     DecisionSnapshotRow,
@@ -91,6 +97,76 @@ def test_build_then_replay_is_byte_identical_and_commits_run(tmp_path: Path) -> 
     )
     assert replayed.report.output_matches
     assert replayed.output_bytes == built.replay.output_bytes
+
+
+def test_showdown_build_uses_both_ownership_roles_and_replays_identically(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "showdown.sqlite3"
+    artifacts = tmp_path / "artifacts"
+    _seed_showdown_database(database)
+
+    built = build_decision(
+        database,
+        slate_id=1,
+        site=DfsSite.DRAFTKINGS,
+        decision_at=DECISION_AT,
+        artifact_directory=artifacts,
+        contest_archetype=ContestArchetype.SHOWDOWN,
+    )
+
+    assert built.replay.report.output_matches
+    assert built.generated_lineups_path.read_bytes() == built.replay.output_bytes
+    assert (
+        built.generated_lineups_path.read_text(encoding="utf-8").splitlines()[0].split(",")[0]
+        == "CPT"
+    )
+    assert all(
+        player.projected_ownership == pytest.approx(5 / 6)
+        and player.projected_ownership_captain == pytest.approx(1 / 6)
+        for player in built.request.candidate_player_scenario.players
+    )
+    captain = next(player for player in built.lineups[0].players if player.slot == "CPT")
+    candidate = next(
+        player
+        for player in built.request.candidate_player_scenario.players
+        if player.player_id == captain.player_id
+    )
+    assert captain.salary == round(candidate.salary * 1.5)
+    assert captain.projection == pytest.approx(candidate.projection * 1.5)
+
+    with connect_database(database) as connection:
+        replayed = replay_decision(
+            connection,
+            decision_snapshot_id=built.snapshot.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=artifacts,
+            adapter=PydfsAdapter(),
+        )
+        memo = render_slate_memo(build_slate_memo(built, connection))
+
+    assert replayed.output_bytes == built.generated_lineups_path.read_bytes()
+    assert "CAPTAIN CHOICES\n" in memo
+    assert ",0.833333,0.166667\n" in memo
+
+
+def test_showdown_build_refuses_a_missing_ownership_role(tmp_path: Path) -> None:
+    database = tmp_path / "showdown.sqlite3"
+    _seed_showdown_database(database)
+    with connect_database(database) as connection:
+        connection.execute(
+            "DELETE FROM ownership_baselines WHERE player_id = 6 AND role = 'captain'"
+        )
+
+    with pytest.raises(BuildDataError, match=r"player 6 captain"):
+        build_decision(
+            database,
+            slate_id=1,
+            site=DfsSite.DRAFTKINGS,
+            decision_at=DECISION_AT,
+            artifact_directory=tmp_path / "artifacts",
+            contest_archetype=ContestArchetype.SHOWDOWN,
+        )
 
 
 def test_backup_restore_drill_replays_decision_byte_identically(tmp_path: Path) -> None:
@@ -227,6 +303,55 @@ def _seed_database(database: Path) -> None:
         _seed_candidate_pool(connection, _players())
 
 
+def _seed_showdown_database(database: Path, *, player_count: int = 6) -> None:
+    players = _showdown_players(player_count=player_count)
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        _seed_candidate_pool(connection, players)
+        connection.execute(
+            "UPDATE slates SET slate_type = 'showdown', name = 'AAA at BBB Showdown' "
+            "WHERE slate_id = 1"
+        )
+        for player in players:
+            for role, ownership in (("captain", 1 / 6), ("flex", 5 / 6)):
+                _insert(
+                    connection,
+                    "ownership_baselines",
+                    {
+                        "slate_id": 1,
+                        "player_id": player.player_id,
+                        "site": "draftkings",
+                        "role": role,
+                        "ownership": ownership,
+                        "source_file_sha256": (
+                            f"{player.player_id:02x}{'c' if role == 'captain' else 'f'}"
+                        ).ljust(64, "0"),
+                        **_pit("fixture-ownership", source_version="ownership-v1"),
+                    },
+                )
+
+
+def _showdown_players(*, player_count: int = 6) -> tuple[CandidatePlayer, ...]:
+    positions = ("QB", "RB", "WR", "TE", "K", "DST", "WR", "RB")[:player_count]
+    return tuple(
+        CandidatePlayer(
+            player_id=index,
+            site_player_id=str(20_000 + index),
+            name=f"Showdown Player {index}",
+            team="AAA" if index % 2 else "BBB",
+            opponent="BBB" if index % 2 else "AAA",
+            position=position,
+            eligible_roster_slots=("CPT", "FLEX"),
+            salary=5_900 + index * 100,
+            projection=round(24.0 - index, 4),
+            projected_ownership=0.01,
+            game_id="game-1",
+            game_start=datetime(2026, 9, 13, 17, tzinfo=UTC),
+        )
+        for index, position in enumerate(positions, start=1)
+    )
+
+
 def _players() -> tuple[CandidatePlayer, ...]:
     position_counts = (("QB", 3), ("RB", 6), ("WR", 8), ("TE", 4), ("DST", 3))
     salaries = {"QB": 6000, "RB": 4800, "WR": 4400, "TE": 3600, "DST": 2800}
@@ -250,9 +375,7 @@ def _players() -> tuple[CandidatePlayer, ...]:
                     projection=round(30 - player_id * 0.3, 4),
                     projected_ownership=0.05 + (index % 4) * 0.02,
                     game_id=f"game-{team_index // 2 + 1}",
-                    game_start=datetime(
-                        2026, 9, 13, 17 + team_index // 2, tzinfo=UTC
-                    ),
+                    game_start=datetime(2026, 9, 13, 17 + team_index // 2, tzinfo=UTC),
                 )
             )
             player_id += 1
@@ -288,9 +411,7 @@ def _seed_candidate_pool(
                 "external_game_id": f"game-{game_index + 1}",
                 "season": 2026,
                 "week": 1,
-                "kickoff_at": utc_timestamp(
-                    datetime(2026, 9, 13, 17 + game_index, tzinfo=UTC)
-                ),
+                "kickoff_at": utc_timestamp(datetime(2026, 9, 13, 17 + game_index, tzinfo=UTC)),
                 "home_team_id": team_ids[home],
                 "away_team_id": team_ids[away],
                 "stadium_name": "Fixture Stadium",

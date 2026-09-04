@@ -32,8 +32,10 @@ from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.ownership_routing import pinned_routing_from_manifest
 from narrative_alpha.portfolio import (
     Lineup,
+    LineupPlayer,
     OptimizerAdapter,
     PydfsAdapter,
+    SlateType,
     UploadEntry,
     ValidationResult,
 )
@@ -133,9 +135,13 @@ class _CappedAdapter:
         # inactive player keeps the projection he was frozen with, since today's pool no
         # longer prices him); the comparison is then the swap alone, not projection drift.
         scenario = request.candidate_player_scenario  # type: ignore[attr-defined]
+        slate_type = request.slate_type  # type: ignore[attr-defined]
         today = {player.player_id: float(player.projection) for player in scenario.players}
         prior_mean = fmean(
-            sum(today.get(player.player_id, player.projection) for player in lineup.players)
+            sum(
+                _current_projection(player, today, slate_type=slate_type)
+                for player in lineup.players
+            )
             for lineup in self.prior_lineups
         )
         replacements = lineups[self.pinned_count :]
@@ -317,9 +323,7 @@ def process_official_inactives(
                 # The base decision's own Stage 4 routing — its scenario set, or the
                 # vendor baseline — never a set that landed between Saturday and now:
                 # pinned lineups and replacements must be priced from one ownership.
-                ownership_routing=pinned_routing_from_manifest(
-                    base.snapshot.manifest_hashes_json
-                ),
+                ownership_routing=pinned_routing_from_manifest(base.snapshot.manifest_hashes_json),
                 ownership_config=ownership_config_from_manifest(
                     base.snapshot.manifest_hashes_json, artifact_directory
                 ),
@@ -722,8 +726,9 @@ def _lineup_diffs(
 ) -> tuple[LineupDiff, ...]:
     diffs: list[LineupDiff] = []
     for old, new in zip(prior, replacement, strict=True):
-        old_names = {player.name for player in old.players}
-        new_names = {player.name for player in new.players}
+        showdown = any(player.slot in {"CPT", "MVP"} for player in (*old.players, *new.players))
+        old_names = _lineup_entries(old, include_role=showdown)
+        new_names = _lineup_entries(new, include_role=showdown)
         diffs.append(
             LineupDiff(
                 prior_lineup_id=old.lineup_id,
@@ -733,6 +738,27 @@ def _lineup_diffs(
             )
         )
     return tuple(diffs)
+
+
+def _current_projection(
+    player: LineupPlayer,
+    today: Mapping[int, float],
+    *,
+    slate_type: SlateType,
+) -> float:
+    current = today.get(player.player_id)
+    if current is None:
+        return float(player.projection)
+    captain_multiplier = (
+        1.5 if slate_type is SlateType.SHOWDOWN and player.slot in {"CPT", "MVP"} else 1.0
+    )
+    return current * captain_multiplier
+
+
+def _lineup_entries(lineup: Lineup, *, include_role: bool) -> set[str]:
+    if not include_role:
+        return {player.name for player in lineup.players}
+    return {f"{player.slot} {player.name}" for player in lineup.players}
 
 
 def _insert(

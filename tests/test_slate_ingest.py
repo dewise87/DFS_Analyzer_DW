@@ -136,9 +136,7 @@ def test_draftkings_classic_capture_writes_slate_salaries_teams_and_games(
             str(row[0])
             for row in connection.execute("SELECT abbreviation FROM teams ORDER BY abbreviation")
         )
-        games = connection.execute(
-            "SELECT external_game_id, kickoff_at FROM games"
-        ).fetchall()
+        games = connection.execute("SELECT external_game_id, kickoff_at FROM games").fetchall()
 
     assert report.ok
     assert report.salary_rows_inserted == 3
@@ -209,9 +207,7 @@ def test_fanduel_export_without_kickoff_refuses_until_starts_at_is_given(
     with connect_database(_store(tmp_path)) as connection:
         apply_migrations(connection)
         _seed_players(connection, FANDUEL_ROSTER)
-        refused = load_salary_capture(
-            connection, capture, season=2026, week=1, site="fd"
-        )
+        refused = load_salary_capture(connection, capture, season=2026, week=1, site="fd")
         assert refused.slates == ()
         assert any("--starts-at" in error for error in refused.errors)
         assert connection.execute("SELECT count(*) FROM slates").fetchone()[0] == 0
@@ -254,6 +250,38 @@ def test_showdown_export_produces_a_showdown_slate(tmp_path: Path) -> None:
     assert slate.slate_type == "showdown"
     assert slate.external_slate_id == "draftkings:2026:w02:showdown:20260918T001500Z"
     assert slate.salary_rows_inserted == 3
+
+
+def test_draftkings_dual_captain_and_flex_rows_become_one_two_role_player(
+    tmp_path: Path,
+) -> None:
+    header = (
+        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame\n"
+    )
+    rows = (
+        "QB,Example Quarterback (2001),Example Quarterback,2001,CPT,16200,"
+        "BUF@MIA 09/17/2026 08:15PM ET,BUF,22.7\n"
+        "QB,Example Quarterback (2001),Example Quarterback,2001,FLEX,10800,"
+        "BUF@MIA 09/17/2026 08:15PM ET,BUF,22.7\n"
+    )
+    capture = _capture(
+        tmp_path,
+        "draftkings_dual_showdown.csv",
+        week=2,
+        text=header + rows,
+    )
+
+    with connect_database(_store(tmp_path)) as connection:
+        apply_migrations(connection)
+        _seed_players(connection, (SHOWDOWN_ROSTER[0],))
+        report = load_salary_capture(connection, capture, season=2026, week=2, site="dk")
+        salary = connection.execute("SELECT salary, roster_positions_json FROM salaries").fetchone()
+
+    assert report.ok
+    assert report.files_seen == 1
+    assert report.salary_rows_inserted == 1
+    assert report.slates[0].rows_parsed == 2
+    assert tuple(salary) == (10_800, '["CPT","FLEX"]')
 
 
 def test_unresolved_player_is_queued_and_named_but_the_slate_is_written(
@@ -322,8 +350,10 @@ def test_reloading_the_same_capture_inserts_nothing_and_says_so(tmp_path: Path) 
 def test_a_later_capture_versions_salaries_and_reports_the_change(tmp_path: Path) -> None:
     snapshots = tmp_path / "snapshots"
     saturday = _capture(tmp_path, "draftkings_classic.csv", root=snapshots)
-    sunday_text = (GOLDEN_PATH / "draftkings_classic.csv").read_text(encoding="utf-8").replace(
-        ",6400,", ",6100,"
+    sunday_text = (
+        (GOLDEN_PATH / "draftkings_classic.csv")
+        .read_text(encoding="utf-8")
+        .replace(",6400,", ",6100,")
     )
     sunday = _capture(
         tmp_path,

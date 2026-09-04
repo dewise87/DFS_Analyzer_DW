@@ -3,7 +3,7 @@
 # Every semantic change requires a new policy_version; decision manifests hash these
 # exact bytes so a replay cannot silently pick up later policy numbers.
 
-policy_version = "contest-policy-v1"
+policy_version = "contest-policy-v2"
 
 [archetypes.cash]
 lineup_uniqueness = 1
@@ -32,4 +32,9 @@ objective = "projection"
 ownership_sum_points = { min = 60.0, max = 120.0 }
 lineup_uniqueness = 3
 max_player_exposure = 0.40
+objective = "projection"
+
+[archetypes.showdown]
+lineup_uniqueness = 1
+max_player_exposure = 1.0
 objective = "projection"

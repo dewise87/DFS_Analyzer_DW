@@ -67,6 +67,7 @@ def select_candidate_scenario(
     slate_id: int,
     site: DfsSite,
     as_of: datetime,
+    slate_type: str = "classic",
     salary_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     projection_artifacts: frozenset[SelectedSourceArtifact] | None = None,
     availability_artifacts: frozenset[SelectedSourceArtifact] | None = None,
@@ -224,7 +225,37 @@ def select_candidate_scenario(
     for row in rows:
         grouped[int(row["player_id"])].append(row)
 
-    players = tuple(_candidate_from_rows(grouped[player_id]) for player_id in sorted(grouped))
+    showdown_ownership = (
+        _showdown_ownership_by_role(
+            session,
+            slate_id=slate_id,
+            site=site,
+            as_of=as_of,
+        )
+        if slate_type == "showdown"
+        else {}
+    )
+    if slate_type == "showdown":
+        missing = tuple(
+            (player_id, role)
+            for player_id in sorted(grouped)
+            for role in ("captain", "flex")
+            if role not in showdown_ownership.get(player_id, {})
+        )
+        if missing:
+            detail = ", ".join(f"player {player_id} {role}" for player_id, role in missing[:10])
+            suffix = "" if len(missing) <= 10 else f", +{len(missing) - 10} more"
+            raise CandidateSelectionError(
+                "showdown candidate selection requires as-of ownership_baselines for "
+                f"both captain and flex roles; missing {detail}{suffix}"
+            )
+    players = tuple(
+        _candidate_from_rows(
+            grouped[player_id],
+            showdown_ownership=showdown_ownership.get(player_id),
+        )
+        for player_id in sorted(grouped)
+    )
     selected_salary_artifacts = tuple(
         sorted(
             {
@@ -278,7 +309,11 @@ def select_candidate_scenario(
     )
 
 
-def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
+def _candidate_from_rows(
+    rows: list[sqlite3.Row],
+    *,
+    showdown_ownership: Mapping[str, float] | None = None,
+) -> CandidatePlayer:
     first = rows[0]
     try:
         slots = json.loads(str(first["roster_positions_json"]))
@@ -294,7 +329,9 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
         if row["ownership_projection"] is not None
     ]
     projected_ownership = (
-        None if not ownership_values else math.fsum(ownership_values) / len(ownership_values)
+        showdown_ownership.get("flex")
+        if showdown_ownership is not None
+        else (None if not ownership_values else math.fsum(ownership_values) / len(ownership_values))
     )
     position = str(first["position"] or slots[0]).upper()
     return CandidatePlayer(
@@ -308,10 +345,52 @@ def _candidate_from_rows(rows: list[sqlite3.Row]) -> CandidatePlayer:
         salary=int(first["salary"]),
         projection=projection,
         projected_ownership=projected_ownership,
+        projected_ownership_captain=(
+            None if showdown_ownership is None else showdown_ownership.get("captain")
+        ),
         game_id=str(first["external_game_id"]),
         game_start=first["kickoff_at"],
         is_injured=str(first["availability_status"] or "") == "unavailable",
     )
+
+
+def _showdown_ownership_by_role(
+    session: PointInTimeQuery,
+    *,
+    slate_id: int,
+    site: DfsSite,
+    as_of: datetime,
+) -> dict[int, dict[str, float]]:
+    rows = session.query(
+        """
+        WITH ranked AS (
+            SELECT ob.*,
+                   row_number() OVER (
+                       PARTITION BY ob.player_id, ob.role
+                       ORDER BY rtrim(ob.observed_at, 'Z') DESC,
+                                rtrim(ob.ingested_at, 'Z') DESC,
+                                ob.ownership_baseline_id DESC
+                   ) AS baseline_rank
+            FROM ownership_baselines AS ob
+            WHERE ob.slate_id = :slate_id AND ob.site = :site
+              AND ob.role IN ('captain', 'flex')
+              AND rtrim(ob.observed_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(ob.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
+              AND rtrim(ob.valid_from, 'Z') <= rtrim(:as_of, 'Z')
+              AND (ob.valid_to IS NULL OR rtrim(ob.valid_to, 'Z') > rtrim(:as_of, 'Z'))
+        )
+        SELECT player_id, role, ownership
+        FROM ranked
+        WHERE baseline_rank = 1
+        ORDER BY player_id, role
+        """,
+        {"slate_id": slate_id, "site": site.value},
+        as_of=as_of,
+    )
+    ownership: dict[int, dict[str, float]] = defaultdict(dict)
+    for row in rows:
+        ownership[int(row["player_id"])][str(row["role"])] = float(row["ownership"])
+    return dict(ownership)
 
 
 def _artifact_filter(

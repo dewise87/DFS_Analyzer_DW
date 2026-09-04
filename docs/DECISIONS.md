@@ -305,6 +305,22 @@ Standing technical decisions. Newest first. Each entry: date, decision, why, rev
   backlog is unknown and why. The whole screen renders in under a second against the
   3,852-item store.
 
+## 2026-09-04 — Slices 43–44 review outcomes
+
+- **A shadow component may never fail a lane.** The simulator's step skips with the
+  reason on any simulator error; a Sunday must not read "one or more steps FAILED" for a
+  field that could not be generated. The same rule applies to any future experimental step.
+- **An experimental simulator ships behind its own refusals.** It refuses a contest whose
+  field it cannot settle in useful time and a portfolio larger than the contest's entry
+  limit, rather than simulating something smaller and calling it the contest. The modeling
+  findings (field generation, settlement cost, dependence loadings, ownership source,
+  duplication, calibration) go back as Slice 43b; the scaffolding merges now because it
+  writes no decision input.
+- **Showdown is a slate type, not a special case.** Captain and flex are roles on one
+  player: two ownership values on the candidate, a captain field excluded from classic
+  request bytes, provenance shared with the flex feature row, and the site's multipliers
+  applied in exactly two places that a test keeps equal.
+
 ## 2026-09-04 — Slice 36 review outcomes
 
 - **Governance configuration is frozen with the decision it governed.** A routed decision

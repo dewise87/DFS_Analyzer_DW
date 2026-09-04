@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 import pytest
 
 from narrative_alpha.build import BuildResult
+from narrative_alpha.contests import ManualContest, PayoutBand, add_contest
 from narrative_alpha.ingest import (
     OwnershipParseResult,
     ParsedOwnership,
@@ -29,9 +32,18 @@ from narrative_alpha.ops import (
     status_payload,
 )
 from narrative_alpha.ops.cli import main as ops_main
+from narrative_alpha.quant import QuantileInterpretation, fit_player_distribution_with_diagnostics
+from narrative_alpha.replay import read_frozen_decision
+from narrative_alpha.simulation import EXPERIMENTAL_NOTICE, SimulationRunError, run_simulation
 from narrative_alpha.snapshots import CaptureKind, capture_files
 from narrative_alpha.snapshots.core import snapshot_week_path
-from narrative_alpha.store import apply_migrations, connect_database
+from narrative_alpha.store import (
+    PlayerDistributionSourceRef,
+    apply_migrations,
+    canonical_distribution_source_set,
+    connect_database,
+    distribution_source_set_sha256,
+)
 
 SEASON = 2026
 WEEK = 1
@@ -89,7 +101,7 @@ class FixtureVendor:
                     team=row["team"],
                     position=row["position"],
                     external_player_id=row["player_id"],
-                    role="classic",
+                    role=row.get("role", "classic"),
                     ownership=float(row["ownership"]),
                     source_version="fixture-csv-v1",
                 )
@@ -110,8 +122,7 @@ def _rows(path: Path) -> list[dict[str, str]]:
 
 def _salary_csv() -> str:
     lines = [
-        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,"
-        "AvgPointsPerGame"
+        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame"
     ]
     for index, (name, team, position) in enumerate(ROSTER):
         away, home = next(game for game in GAMES if team in game)
@@ -143,6 +154,44 @@ def _vendor_csv(*, unknown: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _showdown_roster() -> tuple[tuple[str, int, str, str], ...]:
+    players = tuple(
+        (name, 1000 + index, team, position)
+        for index, (name, team, position) in enumerate(ROSTER)
+        if team == "GB"
+    )
+    return (*players, ("CHI Defense", 2000, "CHI", "DST"))
+
+
+def _showdown_salary_csv() -> str:
+    lines = [
+        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame"
+    ]
+    for index, (name, site_id, team, position) in enumerate(_showdown_roster()):
+        lines.append(
+            f"{position},{name} ({site_id}),{name},{site_id},CPT/FLEX,"
+            f"{SALARIES[position] + index * 25},"
+            f"GB@CHI 09/13/2026 01:00PM ET,{team},12.5"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _showdown_projection_csv() -> str:
+    lines = ["name,player_id,team,position,mean,ownership"]
+    for index, (name, site_id, team, position) in enumerate(_showdown_roster()):
+        lines.append(f"{name},{site_id},{team},{position},{20 - index * 0.3},0.10")
+    return "\n".join(lines) + "\n"
+
+
+def _showdown_ownership_csv() -> str:
+    lines = ["name,player_id,team,position,mean,ownership,role"]
+    roster = _showdown_roster()
+    for role, ownership in (("captain", 1 / len(roster)), ("flex", 5 / len(roster))):
+        for name, site_id, team, position in roster:
+            lines.append(f"{name},{site_id},{team},{position},0,{ownership:.12f},{role}")
+    return "\n".join(lines) + "\n"
+
+
 def _capture(
     snapshots: Path,
     tmp_path: Path,
@@ -156,9 +205,7 @@ def _capture(
     staged = tmp_path / "staged" / f"{observed_at:%Y%m%d%H%M%S%f}-{filename}"
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_text(text, encoding="utf-8")
-    return capture_files(
-        snapshots, SEASON, WEEK, kind, source, [staged], observed_at=observed_at
-    )
+    return capture_files(snapshots, SEASON, WEEK, kind, source, [staged], observed_at=observed_at)
 
 
 DEFENCES: tuple[tuple[str, str, str], ...] = tuple(
@@ -354,6 +401,290 @@ def test_lane_goes_from_captures_to_upload_csv_and_memo(week: Any, tmp_path: Pat
     }
     assert len(snapshots) == 1
     assert str(snapshots[0]["decision_at"]) == utc_timestamp(DECISION_AT)
+
+
+def test_lane_builds_showdown_without_new_operator_flags(tmp_path: Path) -> None:
+    config = load_ops_config(_write_config(tmp_path))
+    _capture(
+        config.snapshot_root,
+        tmp_path,
+        kind=CaptureKind.SALARIES,
+        source="draftkings",
+        filename="DKSalariesShowdown.csv",
+        text=_showdown_salary_csv(),
+    )
+    _capture(
+        config.snapshot_root,
+        tmp_path,
+        kind=CaptureKind.PROJECTIONS,
+        source="fixture-vendor",
+        filename="showdown-projections.csv",
+        text=_showdown_projection_csv(),
+        observed_at=CAPTURED_AT + timedelta(minutes=1),
+    )
+    _capture(
+        config.snapshot_root,
+        tmp_path,
+        kind=CaptureKind.OWNERSHIP,
+        source="fixture-vendor",
+        filename="showdown-ownership.csv",
+        text=_showdown_ownership_csv(),
+        observed_at=CAPTURED_AT + timedelta(minutes=2),
+    )
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_players(connection)
+
+    report = _run(config, tmp_path=tmp_path)
+
+    assert report.ok, [step.error_text for step in report.steps if not step.ok]
+    assert report.upload_csv_path is not None
+    assert report.upload_csv_path.read_text(encoding="utf-8").startswith("CPT,FLEX")
+    assert report.memo_path is not None
+    memo = report.memo_path.read_text(encoding="utf-8")
+    assert "slate_type=showdown" in memo
+    assert "contest_archetype=showdown" in memo
+    assert "CAPTAIN CHOICES\n" in memo
+
+
+def test_optional_simulation_step_skips_when_distributions_are_absent(
+    week: Any, tmp_path: Path
+) -> None:
+    report = _run(week, tmp_path=tmp_path, simulate=True)
+
+    step = report.step("slate_simulate")
+    assert step is not None
+    assert step.status == "skipped"
+    assert "no player_distributions" in str(step.error_text)
+    assert report.simulation_path is None
+
+
+def test_simulation_run_is_byte_stable_and_appends_its_provenance(
+    week: Any, tmp_path: Path
+) -> None:
+    lane = _run(week, tmp_path=tmp_path)
+    assert lane.decision_snapshot_id is not None
+    with connect_database(week.database) as connection:
+        apply_migrations(connection)
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=tmp_path / "decisions",
+        )
+        _seed_simulation_inputs(connection, frozen.request.candidate_player_scenario.players)
+        contest = add_contest(
+            connection,
+            ManualContest(
+                external_contest_id="simulation-contest",
+                site=frozen.request.site,
+                slate_id=frozen.request.slate_id,
+                archetype=frozen.request.contest_archetype,
+                field_size=501,
+                entry_limit=1,
+                entry_fee_cents=1_000,
+                payout_curve_id="simulation-curve",
+                observed_at=DECISION_AT,
+            ),
+            (
+                PayoutBand(rank_from=1, rank_to=1, prize_cents=10_000),
+                PayoutBand(rank_from=2, rank_to=501, prize_cents=0),
+            ),
+            ingested_at=DECISION_AT,
+        ).contest
+        first = run_simulation(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            contest_external_id=contest.external_contest_id,
+            artifact_root=tmp_path / "decisions",
+            report_directory=tmp_path / "reports",
+            draws=20,
+            seed=42,
+            run_at=DECISION_AT + timedelta(days=1),
+        )
+        second = run_simulation(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            contest_external_id=contest.external_contest_id,
+            artifact_root=tmp_path / "decisions",
+            report_directory=tmp_path / "reports",
+            draws=20,
+            seed=42,
+            run_at=DECISION_AT + timedelta(days=1, seconds=1),
+        )
+        rows = connection.execute(
+            "SELECT config_sha256, draw_count, seed, ownership_source FROM simulation_runs "
+            "ORDER BY simulation_run_id"
+        ).fetchall()
+
+    assert first.report_bytes == second.report_bytes
+    assert first.report_path != second.report_path
+    assert first.report_path.read_bytes() == first.report_bytes
+    assert first.report_bytes.startswith((EXPERIMENTAL_NOTICE + "\n").encode())
+    assert len(rows) == 2
+    assert rows[0]["config_sha256"] == first.report.config_sha256
+    assert tuple(rows[0][key] for key in ("draw_count", "seed", "ownership_source")) == (
+        20,
+        42,
+        "vendor_baseline",
+    )
+
+
+def test_a_simulator_error_skips_the_shadow_step_and_the_lane_still_succeeds(
+    week: Any, tmp_path: Path
+) -> None:
+    """The simulator is experimental: an unlucky field or a bad store is a stated gap on
+    the shadow step, never "one or more steps FAILED" on a Sunday."""
+
+    lane = _run(week, tmp_path=tmp_path)
+    assert lane.decision_snapshot_id is not None
+    with connect_database(week.database) as connection:
+        apply_migrations(connection)
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=lane.decision_snapshot_id,
+            decision_at=DECISION_AT,
+            artifact_root=tmp_path / "decisions",
+        )
+        _seed_simulation_inputs(connection, frozen.request.candidate_player_scenario.players)
+        add_contest(
+            connection,
+            ManualContest(
+                external_contest_id="simulation-contest",
+                site=frozen.request.site,
+                slate_id=frozen.request.slate_id,
+                archetype=frozen.request.contest_archetype,
+                field_size=501,
+                entry_limit=1,
+                entry_fee_cents=1_000,
+                payout_curve_id="simulation-curve",
+                observed_at=DECISION_AT,
+            ),
+            (
+                PayoutBand(rank_from=1, rank_to=1, prize_cents=10_000),
+                PayoutBand(rank_from=2, rank_to=501, prize_cents=0),
+            ),
+            ingested_at=DECISION_AT,
+        )
+        connection.commit()
+
+    def unlucky_field(*args: Any, **kwargs: Any) -> Any:
+        raise SimulationRunError("could not generate a legal field lineup after 300 attempts")
+
+    # A later instant: the seeded inputs make this a new decision, not a rebuild of the
+    # first one, so the only thing under test is the shadow step's behaviour.
+    report = _run(
+        week,
+        tmp_path=tmp_path,
+        simulate=True,
+        decision_at=DECISION_AT + timedelta(minutes=5),
+        dependencies=SlateDependencies(
+            source_formats=(FixtureVendor(),), run_simulation=unlucky_field
+        ),
+    )
+
+    step = report.step("slate_simulate")
+    assert step is not None
+    assert step.status == "skipped"
+    assert "shadow simulation did not run" in str(step.error_text)
+    assert "300 attempts" in str(step.error_text)
+    assert report.ok, [step.error_text for step in report.steps if not step.ok]
+
+
+def _seed_simulation_inputs(connection: sqlite3.Connection, players: tuple[Any, ...]) -> None:
+    stamp = utc_timestamp(DECISION_AT)
+    normal = NormalDist()
+    position_counts: dict[str, int] = {}
+    for player in players:
+        position_counts[player.position] = position_counts.get(player.position, 0) + 1
+    position_totals = {"QB": 1.0, "RB": 2.4, "WR": 3.5, "TE": 1.1, "DST": 1.0}
+    for player in players:
+        projection = connection.execute(
+            """
+            SELECT * FROM projection_snapshots
+            WHERE slate_id = ? AND player_id = ?
+            ORDER BY projection_snapshot_id DESC LIMIT 1
+            """,
+            (1, player.player_id),
+        ).fetchone()
+        assert projection is not None
+        source = str(projection["source"])
+        reference = PlayerDistributionSourceRef(
+            projection_snapshot_id=int(projection["projection_snapshot_id"]),
+            source=source,
+            source_file_sha256=str(projection["source_file_sha256"]),
+        )
+        source_set = (reference,)
+        mean = float(player.projection)
+        shape = 0.35
+        scale = mean * math.exp(-0.5 * shape**2)
+        floor = scale * math.exp(shape * normal.inv_cdf(0.25))
+        ceiling = scale * math.exp(shape * normal.inv_cdf(0.75))
+        fit = fit_player_distribution_with_diagnostics(
+            source=source,
+            position=player.position,
+            mean=mean,
+            floor=floor,
+            ceiling=ceiling,
+            p_active=1,
+            p_full_role_given_active=1,
+            quantile_configuration={(source, player.position): QuantileInterpretation(0.25, 0.75)},
+        )
+        distribution = fit.distribution
+        connection.execute(
+            """
+            INSERT INTO player_distributions(
+                slate_id, player_id, position, source_set_json, source_set_sha256,
+                as_of_at, distribution_family, p_active, p_full_role_given_active,
+                conditional_location, conditional_scale, conditional_shape, input_mean,
+                input_floor, input_ceiling, floor_quantile, ceiling_quantile,
+                fit_tolerance, fit_max_relative_error, fit_config_sha256, fitter_version,
+                source, published_at, observed_at, ingested_at, effective_at, valid_from,
+                valid_to, source_version, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      NULL, ?, ?, NULL, ?, NULL, ?, NULL)
+            """,
+            (
+                1,
+                player.player_id,
+                player.position,
+                canonical_distribution_source_set(source_set),
+                distribution_source_set_sha256(source_set),
+                stamp,
+                distribution.distribution_family,
+                distribution.p_active,
+                distribution.p_full_role_given_active,
+                distribution.conditional_location,
+                distribution.conditional_scale,
+                distribution.conditional_shape,
+                fit.input_mean,
+                fit.input_floor,
+                fit.input_ceiling,
+                fit.floor_quantile,
+                fit.ceiling_quantile,
+                fit.fit_tolerance,
+                fit.fit_max_relative_error,
+                fit.fit_config_sha256,
+                fit.fitter_version,
+                source,
+                stamp,
+                stamp,
+                stamp,
+                fit.fitter_version,
+            ),
+        )
+        ownership = position_totals[player.position] / position_counts[player.position]
+        connection.execute(
+            """
+            INSERT INTO ownership_baselines(
+                slate_id, player_id, site, role, ownership, source_file_sha256,
+                source, published_at, observed_at, ingested_at, effective_at,
+                valid_from, valid_to, source_version, run_id
+            ) VALUES (1, ?, 'draftkings', 'classic', ?, ?, 'fixture-vendor', NULL,
+                      ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+            """,
+            (player.player_id, ownership, "c" * 64, stamp, stamp, stamp),
+        )
 
 
 def test_one_decision_instant_reaches_every_stage(week: Any, tmp_path: Path) -> None:
@@ -639,9 +970,7 @@ def test_status_renders_the_slate_section_on_an_empty_store(tmp_path: Path) -> N
     config = load_ops_config(_write_config(tmp_path))
     with connect_database(config.database) as connection:
         apply_migrations(connection)
-        status = collect_ops_status(
-            connection, config=config, database=config.database, now=NOW
-        )
+        status = collect_ops_status(connection, config=config, database=config.database, now=NOW)
     rendered = render_status(status)
     payload = status_payload(status)
 
@@ -657,6 +986,7 @@ def test_status_renders_the_slate_section_on_an_empty_store(tmp_path: Path) -> N
         "slate_features",
         "slate_build",
         "slate_memo",
+        "slate_simulate",
     ]
 
 
@@ -667,9 +997,7 @@ def test_status_shows_captures_ingested_features_and_the_decision(
     assert report.ok, [step.error_text for step in report.steps if not step.ok]
 
     with connect_database(week.database) as connection:
-        status = collect_ops_status(
-            connection, config=week, database=week.database, now=NOW
-        )
+        status = collect_ops_status(connection, config=week, database=week.database, now=NOW)
     rendered = render_status(status)
     payload = status_payload(status)
 
@@ -685,16 +1013,16 @@ def test_status_shows_captures_ingested_features_and_the_decision(
     slate = status.slate.slates[0]
     assert slate.slate_id == report.slate_id
     assert slate.decision_snapshot_id == report.decision_snapshot_id
-    assert slate.contest_policy_version == "contest-policy-v1"
+    assert slate.contest_policy_version == "contest-policy-v2"
     assert slate.feature_rows_at_decision > 0
     assert slate.unresolved_count == 0
     assert f"{SEASON} week {WEEK:02d}" in rendered
     assert "1 of 1 file(s) ingested" in rendered
     assert "none captured" in rendered
     assert str(report.decision_snapshot_id) in rendered
-    assert "policy contest-policy-v1" in rendered
+    assert "policy contest-policy-v2" in rendered
     assert payload["slate"] is not None
-    assert payload["slate"]["slates"][0]["contest_policy_version"] == "contest-policy-v1"  # type: ignore[index]
+    assert payload["slate"]["slates"][0]["contest_policy_version"] == "contest-policy-v2"  # type: ignore[index]
 
 
 def test_cli_runs_the_lane_and_prints_the_paths(

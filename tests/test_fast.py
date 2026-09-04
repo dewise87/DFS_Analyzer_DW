@@ -4,7 +4,14 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from test_build import DATA_AT, DECISION_AT, _players, _seed_database
+from test_build import (
+    DATA_AT,
+    DECISION_AT,
+    _players,
+    _seed_database,
+    _seed_showdown_database,
+    _showdown_players,
+)
 from test_extraction import (
     PRICING_PATH,
     RUN_TIME,
@@ -131,6 +138,70 @@ def test_inactives_refreeze_only_affected_lineups_and_replay_byte_identically(
     assert projection_count == len(_players())
 
 
+def test_showdown_inactives_pin_unaffected_lineups_and_replace_the_rest(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "fast-showdown.sqlite3"
+    artifacts = tmp_path / "decisions"
+    _seed_fast_showdown_build(database)
+    base = build_decision(
+        database,
+        slate_id=1,
+        site="draftkings",
+        decision_at=DECISION_AT,
+        artifact_directory=artifacts,
+        number_of_lineups=3,
+        contest_archetype="showdown",
+    )
+    inactive = min(base.lineups[0].players, key=lambda player: player.projection)
+    unaffected = tuple(
+        lineup
+        for lineup in base.lineups
+        if inactive.player_id not in {player.player_id for player in lineup.players}
+    )
+
+    report = process_official_inactives(
+        database,
+        season=2026,
+        week=1,
+        site="dk",
+        snapshot_root=tmp_path / "snapshots",
+        text=f"{inactive.team}: {inactive.name}\n",
+        artifact_directory=artifacts,
+        now=DECISION_AT + timedelta(minutes=5),
+    )
+
+    with connect_database(database) as connection:
+        frozen = read_frozen_decision(
+            connection,
+            decision_snapshot_id=report.decision_snapshot_id,
+            decision_at=DECISION_AT + timedelta(minutes=5),
+            artifact_root=artifacts,
+        )
+        replayed = replay_decision(
+            connection,
+            decision_snapshot_id=report.decision_snapshot_id,
+            decision_at=DECISION_AT + timedelta(minutes=5),
+            artifact_root=artifacts,
+            adapter=PydfsAdapter(),
+        )
+
+    assert frozen.request.contest_archetype.value == "showdown"
+    assert frozen.lineups[: len(unaffected)] == unaffected
+    assert report.affected_lineups == len(base.lineups) - len(unaffected)
+    assert all(
+        inactive.player_id not in {player.player_id for player in lineup.players}
+        for lineup in frozen.lineups
+    )
+    assert replayed.report.output_matches
+    assert report.upload_csv_path.read_bytes() == replayed.output_bytes
+    assert any(
+        entry.startswith(("CPT ", "FLEX "))
+        for diff in report.diffs
+        for entry in (*diff.out, *diff.in_)
+    )
+
+
 def test_unresolved_inactive_refuses_whole_command_and_names_queue(tmp_path: Path) -> None:
     database = tmp_path / "fast.sqlite3"
     artifacts = tmp_path / "decisions"
@@ -143,9 +214,7 @@ def test_unresolved_inactive_refuses_whole_command_and_names_queue(tmp_path: Pat
         artifact_directory=artifacts,
     )
 
-    with pytest.raises(
-        FastInactivesError, match=r"(?s)unresolved queue.*na-crosswalk resolve"
-    ):
+    with pytest.raises(FastInactivesError, match=r"(?s)unresolved queue.*na-crosswalk resolve"):
         process_official_inactives(
             database,
             season=2026,
@@ -419,6 +488,21 @@ def _seed_fast_build(database: Path) -> None:
     with connect_database(database) as connection:
         for player in _players():
             stamp = DATA_AT.isoformat(timespec="microseconds").replace("+00:00", "Z")
+            connection.execute(
+                "INSERT INTO player_team_history(player_id, team, position, roster_status, "
+                "season, week, source, published_at, observed_at, ingested_at, effective_at, "
+                "valid_from, valid_to, source_version, run_id) "
+                "VALUES (?, ?, ?, 'ACT', 2026, 1, 'fixture', NULL, ?, ?, NULL, ?, NULL, "
+                "'fixture-v1', NULL)",
+                (player.player_id, player.team, player.position, stamp, stamp, stamp),
+            )
+
+
+def _seed_fast_showdown_build(database: Path) -> None:
+    _seed_showdown_database(database, player_count=8)
+    with connect_database(database) as connection:
+        stamp = DATA_AT.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        for player in _showdown_players(player_count=8):
             connection.execute(
                 "INSERT INTO player_team_history(player_id, team, position, roster_status, "
                 "season, week, source, published_at, observed_at, ingested_at, effective_at, "

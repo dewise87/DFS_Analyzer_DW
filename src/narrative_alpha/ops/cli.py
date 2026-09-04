@@ -167,6 +167,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slate.add_argument("--report-directory", type=Path, default=DEFAULT_REPORT_DIRECTORY)
     slate.add_argument(
+        "--simulate",
+        action="store_true",
+        help="run the optional experimental contest simulation after the memo",
+    )
+    slate.add_argument(
+        "--simulation-contest",
+        help="external contest id (required only when more than one contest is available)",
+    )
+    slate.add_argument("--simulation-draws", type=_positive_int)
+    slate.add_argument("--simulation-seed", type=_non_negative_int)
+    slate.add_argument("--simulation-independent", action="store_true")
+    slate.add_argument(
+        "--simulation-config",
+        type=Path,
+        default=Path("config/simulation.toml"),
+    )
+    slate.add_argument(
         "--upload-template",
         type=Path,
         help="site reserved-entry CSV; freezes entry IDs and writes the entry ledger",
@@ -305,9 +322,7 @@ def main(
     except OpsConfigError as error:
         if arguments.command == "doctor":
             print("NARRATIVE ALPHA — DOCTOR (read-only)")
-            print(
-                f"FAIL  config ops.toml  {error}; repair {arguments.config} and rerun doctor"
-            )
+            print(f"FAIL  config ops.toml  {error}; repair {arguments.config} and rerun doctor")
             return EXIT_STEP_FAILED
         print(f"error: {error}", file=sys.stderr)
         return EXIT_ERROR
@@ -402,6 +417,12 @@ def _slate(
             starts_at=arguments.starts_at,
             artifact_directory=arguments.artifact_directory,
             report_directory=arguments.report_directory,
+            simulate=arguments.simulate or arguments.simulation_contest is not None,
+            simulation_contest_external_id=arguments.simulation_contest,
+            simulation_draws=arguments.simulation_draws,
+            simulation_seed=arguments.simulation_seed,
+            simulation_independent=arguments.simulation_independent,
+            simulation_config_path=arguments.simulation_config,
             dependencies=dependencies,
         )
     if arguments.json:
@@ -638,6 +659,7 @@ def _render_slate(report: SlateReport) -> str:
     lines.append(f"  decision         {_or_none(report.decision_snapshot_id)}")
     lines.append(f"  upload CSV       {_or_none(report.upload_csv_path)}")
     lines.append(f"  memo             {_or_none(report.memo_path)}")
+    lines.append(f"  simulation       {_or_none(report.simulation_path)}")
     lines.append(f"  replay           {_or_none(report.replay_command)}")
     lines.append("  " + ("all steps ok" if report.ok else "one or more steps FAILED"))
     lines.append("")
@@ -662,6 +684,7 @@ def _slate_payload(report: SlateReport) -> dict[str, object]:
         "decision_snapshot_id": report.decision_snapshot_id,
         "upload_csv": None if report.upload_csv_path is None else str(report.upload_csv_path),
         "memo": None if report.memo_path is None else str(report.memo_path),
+        "simulation": (None if report.simulation_path is None else str(report.simulation_path)),
         "replay_command": report.replay_command,
         "steps": [
             {
@@ -749,6 +772,16 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from error
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
     return parsed
 
 

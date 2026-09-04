@@ -31,6 +31,7 @@ from narrative_alpha.portfolio.heuristic_report import (
 )
 from narrative_alpha.portfolio.models import (
     CLASSIC_SITE_RULES,
+    SHOWDOWN_SITE_RULES,
     BringBackRule,
     CandidatePlayer,
     CandidatePlayerScenario,
@@ -43,12 +44,14 @@ from narrative_alpha.portfolio.models import (
     NumericRange,
     OptimizationRequest,
     PlayerExposureRange,
+    ShowdownSiteRules,
     SlateType,
     StackRule,
     UploadEntry,
     ValidationIssue,
     ValidationResult,
     lineup_sha256,
+    site_rules,
 )
 from narrative_alpha.portfolio.validation import (
     validate_lineup,
@@ -63,6 +66,7 @@ __all__ = [
     "CONTEST_POLICY_ARTIFACT_KIND",
     "DEFAULT_CONTEST_POLICIES_PATH",
     "HEURISTIC_NOTICE",
+    "SHOWDOWN_SITE_RULES",
     "BringBackRule",
     "CandidatePlayer",
     "CandidatePlayerScenario",
@@ -87,6 +91,7 @@ __all__ = [
     "PlayerExposureRange",
     "PolicyRequestFields",
     "PydfsAdapter",
+    "ShowdownSiteRules",
     "SlateType",
     "StackRule",
     "UnsupportedOptimizationFeature",
@@ -101,6 +106,7 @@ __all__ = [
     "parse_upload_entries",
     "policy_request_fields",
     "render_heuristic_report",
+    "site_rules",
     "validate_lineup",
     "validate_portfolio",
 ]

@@ -200,7 +200,15 @@ def _answer(
     appearances = sum(
         1
         for lineup in lineups
-        if any(player.player_id == delta.player_id for player in lineup.players)
+        if any(
+            player.player_id == delta.player_id
+            and (
+                delta.role == "classic"
+                or (delta.role == "captain" and player.slot in {"CPT", "MVP"})
+                or (delta.role == "flex" and player.slot not in {"CPT", "MVP"})
+            )
+            for player in lineup.players
+        )
     )
     return RedTeamAnswer(
         player_id=delta.player_id,
@@ -244,13 +252,19 @@ def _do_nothing(
             f"sum would move {-delta.delta_points * appearances:+.2f}pt in total"
         )
     if not optimizer_reads_ownership:
+        role_effect = "; the captain swap would stay unchanged" if delta.role == "captain" else ""
         return (
             f"{rostered}; this request set no ownership_sum_range, so the optimizer "
-            "objective never read ownership and no roster would change"
+            f"objective never read ownership and no roster would change{role_effect}"
         )
+    role_effect = (
+        "; reverting captain ownership could change the captain swap"
+        if delta.role == "captain"
+        else ""
+    )
     return (
         f"{rostered}; this request constrained the lineup ownership sum, so reverting to "
-        "the baseline could change which rosters satisfy that constraint"
+        f"the baseline could change which rosters satisfy that constraint{role_effect}"
     )
 
 
@@ -381,9 +395,7 @@ def _confounders(
     )
     if availability:
         statuses = [str(row["availability_status"]) for row in availability]
-        found.append(
-            f"availability: {len(statuses)} official row(s), newest {statuses[-1]}"
-        )
+        found.append(f"availability: {len(statuses)} official row(s), newest {statuses[-1]}")
     odds = session.query(
         """
         SELECT o.total, o.home_spread

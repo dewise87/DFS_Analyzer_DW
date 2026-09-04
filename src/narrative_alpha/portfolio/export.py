@@ -9,11 +9,12 @@ from pathlib import Path
 
 from narrative_alpha.portfolio.adapter import OptimizerError
 from narrative_alpha.portfolio.models import (
-    CLASSIC_SITE_RULES,
     DfsSite,
     Lineup,
     LineupPlayer,
+    SlateType,
     UploadEntry,
+    site_rules,
 )
 
 
@@ -83,7 +84,18 @@ def export_upload_csv(
 
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
-    slots = CLASSIC_SITE_RULES[site].slots
+    slate_type = (
+        SlateType.SHOWDOWN
+        if any(player.slot in {"CPT", "MVP"} for player in lineups[0].players)
+        else SlateType.CLASSIC
+    )
+    if any(
+        any(player.slot in {"CPT", "MVP"} for player in lineup.players)
+        != (slate_type is SlateType.SHOWDOWN)
+        for lineup in lineups
+    ):
+        raise OptimizerError("cannot mix classic and showdown lineups in one upload")
+    slots = site_rules(site, slate_type).slots
     prefix: tuple[str, ...]
     if entries and site is DfsSite.DRAFTKINGS:
         prefix = ("Entry ID", "Contest Name", "Contest ID", "Entry Fee")

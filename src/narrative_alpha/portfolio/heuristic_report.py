@@ -17,9 +17,7 @@ if TYPE_CHECKING:
 
 HEURISTIC_NOTICE: Literal[
     "HEURISTIC ONLY — NOT SIMULATOR-BACKED. These values make no probability claims."
-] = (
-    "HEURISTIC ONLY — NOT SIMULATOR-BACKED. These values make no probability claims."
-)
+] = "HEURISTIC ONLY — NOT SIMULATOR-BACKED. These values make no probability claims."
 
 
 class HeuristicReportError(ValueError):
@@ -48,9 +46,7 @@ class HeuristicLineupRow(BaseModel):
     lineup_id: str
     heuristic_lineup_projection_sum: float = Field(allow_inf_nan=False)
     heuristic_salary_used: int = Field(ge=0)
-    heuristic_projected_ownership_sum: float | None = Field(
-        default=None, allow_inf_nan=False
-    )
+    heuristic_projected_ownership_sum: float | None = Field(default=None, allow_inf_nan=False)
     heuristic_naive_cash_line_proxy: float = Field(ge=0, allow_inf_nan=False)
     heuristic_naive_ev_cents: float = Field(allow_inf_nan=False)
 
@@ -97,7 +93,10 @@ def build_heuristic_report(
                 f"lineup {lineup.lineup_id} does not belong to contest site/slate"
             )
         ownership_values = tuple(
-            player.projected_ownership for player in lineup.players
+            player.projected_ownership_captain
+            if player.slot in {"CPT", "MVP"}
+            else player.projected_ownership
+            for player in lineup.players
         )
         ownership_sum = (
             None
@@ -106,9 +105,7 @@ def build_heuristic_report(
         )
         projection_sum = round(sum(player.projection for player in lineup.players), 6)
         salary_used = sum(player.salary for player in lineup.players)
-        cash_line_proxy = (
-            projection_sum / selected_thresholds.heuristic_cash_line_projection_points
-        )
+        cash_line_proxy = projection_sum / selected_thresholds.heuristic_cash_line_projection_points
         naive_ev = cash_line_proxy * average_prize - contest.entry_fee_cents
         report_rows.append(
             HeuristicLineupRow(

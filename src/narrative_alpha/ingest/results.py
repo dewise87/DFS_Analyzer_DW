@@ -167,6 +167,10 @@ class ParsedContestEntry(BaseModel):
     entry_id: str = Field(min_length=1)
     entry_name: str = Field(min_length=1)
     points: float = Field(allow_inf_nan=False)
+    # Retained by the parser for simulator calibration. The operational store still
+    # persists only ledger-matched settlements; calibration reads the immutable captured
+    # standings bytes by their already-stored SHA-256.
+    lineup: str = Field(min_length=1)
 
 
 class RejectedContestRow(BaseModel):
@@ -294,6 +298,7 @@ def parse_contest_standings(
                     entry_id=entry_id,
                     entry_name=entry_name,
                     points=float(row[entry_map[_entry_points_header(metadata.site)]].strip()),
+                    lineup=" ".join(row[entry_map["lineup"]].split()),
                 )
             )
             entry_ids.add(entry_id)
@@ -635,10 +640,21 @@ def _settle_ledger_entries(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
             """,
             (
-                int(ledger_row["contest_entry_id"]), status, rank, points, prize, reason,
-                parsed.source_file_sha256, source, optional_utc_timestamp(metadata.published_at),
-                stamp, utc_timestamp(ingested_at), optional_utc_timestamp(metadata.effective_at),
-                stamp, metadata.source_version, run_id,
+                int(ledger_row["contest_entry_id"]),
+                status,
+                rank,
+                points,
+                prize,
+                reason,
+                parsed.source_file_sha256,
+                source,
+                optional_utc_timestamp(metadata.published_at),
+                stamp,
+                utc_timestamp(ingested_at),
+                optional_utc_timestamp(metadata.effective_at),
+                stamp,
+                metadata.source_version,
+                run_id,
             ),
         )
         was_inserted = int(cursor.rowcount == 1)

@@ -79,9 +79,10 @@ def routing_config() -> OwnershipModelConfig:
 #: A routed decision freezes the configuration bytes it was governed under beside its
 #: other artifacts, so a later edit to the shipped file cannot make it unreplayable.
 OWNERSHIP_CONFIG_ARTIFACT_KIND: Literal["ownership_config"] = "ownership_config"
-#: Stage 4 governs one ownership value per candidate, so the caps it re-asserts are the
-#: classic ones; the showdown path falls back to the vendor baseline before reaching them.
+#: Named constants keep the classic compatibility surface while Stage 4 chooses the
+#: configured cap family from the slate it is actually routing.
 ROUTING_SLATE_KIND: Literal["classic"] = "classic"
+SHOWDOWN_ROUTING_SLATE_KIND: Literal["showdown"] = "showdown"
 # Float tolerance for the two comparisons below: a cap of 0.02 and a delta of exactly
 # 0.02 must not trip on the last bit of a subtraction.
 DELTA_TOLERANCE = 1e-9
@@ -338,7 +339,10 @@ class OwnershipRouting:
     def largest_deltas(self, limit: int) -> tuple[AppliedOwnershipDelta, ...]:
         """The ``limit`` largest applied moves by absolute points, ties broken by id."""
 
-        ordered = sorted(self.deltas, key=lambda delta: (-abs(delta.delta), delta.player_id))
+        ordered = sorted(
+            self.deltas,
+            key=lambda delta: (-abs(delta.delta), delta.player_id, delta.role),
+        )
         return tuple(ordered[:limit])
 
 
@@ -378,6 +382,7 @@ def select_routed_candidate_scenario(
         session,
         slate_id=slate_id,
         site=site,
+        slate_type=slate_type,
         as_of=as_of,
         salary_artifacts=salary_artifacts,
         projection_artifacts=projection_artifacts,
@@ -397,11 +402,24 @@ def select_routed_candidate_scenario(
     if not routing.applied:
         return RoutedCandidateSelection(selection=selection, routing=routing)
 
-    applied = {delta.player_id: delta.applied_ownership for delta in routing.deltas}
-    players = tuple(
-        player.model_copy(update={"projected_ownership": applied[player.player_id]})
-        for player in selection.players
-    )
+    applied = {(delta.player_id, delta.role): delta.applied_ownership for delta in routing.deltas}
+    if slate_type == "showdown":
+        players = tuple(
+            player.model_copy(
+                update={
+                    "projected_ownership": applied[(player.player_id, "flex")],
+                    "projected_ownership_captain": applied[(player.player_id, "captain")],
+                }
+            )
+            for player in selection.players
+        )
+    else:
+        players = tuple(
+            player.model_copy(
+                update={"projected_ownership": applied[(player.player_id, "classic")]}
+            )
+            for player in selection.players
+        )
     return RoutedCandidateSelection(
         selection=CandidateSelection(
             players=players,
@@ -430,17 +448,10 @@ def select_ownership_routing(
 
     governance = config or routing_config()
     pinned_run_id = None if pinned is None else pinned.scenario_run_id
-    if slate_type != "classic":
-        # A classic optimizer candidate carries one ownership value and no captain/flex
-        # split, so a showdown scenario set has nowhere to land yet.
-        return _refuse_or_baseline(
-            pinned_run_id,
-            contest_archetype,
-            slate_type,
-            f"{slate_type} routing is not wired to the optimizer, which carries one "
-            "ownership value per candidate; the vendor baseline was applied",
-        )
-    role = "classic"
+    if slate_type not in {ROUTING_SLATE_KIND, SHOWDOWN_ROUTING_SLATE_KIND}:
+        raise OwnershipRoutingError(f"unsupported ownership routing slate type {slate_type!r}")
+    roles = ("classic",) if slate_type == ROUTING_SLATE_KIND else ("captain", "flex")
+    role = roles[0] if len(roles) == 1 else "captain+flex"
     if pinned is not None and pinned_run_id is None:
         return _baseline(
             contest_archetype,
@@ -454,7 +465,7 @@ def select_ownership_routing(
         slate_id=slate_id,
         site=site.value,
         contest_archetype=contest_archetype,
-        role=role,
+        roles=roles,
         as_of=as_of,
         pinned_run_id=pinned_run_id,
     )
@@ -513,51 +524,54 @@ def select_ownership_routing(
             "beat the untouched vendor baseline; the vendor baseline was applied",
         )
 
-    rows = _scenario_rows(
-        session,
-        run_id=str(header["run_id"]),
-        role=role,
-        as_of=as_of,
-    )
-    covered = {int(row["player_id"]) for row in rows}
-    uncovered = sorted(candidate_player_ids - covered)
-    if uncovered:
-        # Applying a set that misses candidates would mix modeled and vendor ownership
-        # inside one roster-total calibration (§12.2.6), so the whole slate falls back.
-        return _refuse_or_baseline(
-            pinned_run_id,
-            contest_archetype,
-            role,
-            f"ownership scenario set {str(header['run_id'])!r} covers "
-            f"{len(covered & candidate_player_ids)} of {len(candidate_player_ids)} candidate "
-            f"player(s) — missing {_listed_ids(uncovered)}; the vendor baseline was applied",
-        )
-
     feature_as_of = _scenario_feature_instant(
         session,
         decision_snapshot_id=str(header["decision_snapshot_id"]),
         as_of=as_of,
     )
-    provenance = feature_provenance(
-        session,
-        slate_id=slate_id,
-        site=site.value,
-        role=role,
-        feature_as_of=feature_as_of,
-        feature_version=str(header["feature_version"]),
-        as_of=as_of,
-    )
-    deltas = tuple(
-        _delta(
-            row,
-            provenance.get(int(row["player_id"])),
-            threshold=governance.evaluation.material_delta,
+    collected: list[AppliedOwnershipDelta] = []
+    for routed_role in roles:
+        rows = _scenario_rows(
+            session,
+            run_id=str(header["run_id"]),
+            role=routed_role,
+            as_of=as_of,
         )
-        for row in rows
-        if int(row["player_id"]) in candidate_player_ids
-    )
+        covered = {int(row["player_id"]) for row in rows}
+        uncovered = sorted(candidate_player_ids - covered)
+        if uncovered:
+            # Showdown's captain and flex totals are calibrated separately, so either
+            # role being partial sends the whole set back to its vendor baselines.
+            return _refuse_or_baseline(
+                pinned_run_id,
+                contest_archetype,
+                role,
+                f"ownership scenario set {str(header['run_id'])!r} {routed_role} role "
+                f"covers {len(covered & candidate_player_ids)} of "
+                f"{len(candidate_player_ids)} candidate player(s) — missing "
+                f"{_listed_ids(uncovered)}; the vendor baseline was applied",
+            )
+        provenance = feature_provenance(
+            session,
+            slate_id=slate_id,
+            site=site.value,
+            role=routed_role,
+            feature_as_of=feature_as_of,
+            feature_version=str(header["feature_version"]),
+            as_of=as_of,
+        )
+        collected.extend(
+            _delta(
+                row,
+                provenance.get(int(row["player_id"])),
+                threshold=governance.evaluation.material_delta,
+            )
+            for row in rows
+            if int(row["player_id"]) in candidate_player_ids
+        )
+    deltas = tuple(collected)
     governance_status = str(header["governance_status"])
-    capped = governance.cap_for(ROUTING_SLATE_KIND, governance_status)
+    capped = governance.cap_for(slate_type, governance_status)
     if capped is None:
         raise OwnershipRoutingError(
             f"ownership scenario set {str(header['run_id'])!r} carries governance status "
@@ -570,9 +584,11 @@ def select_ownership_routing(
     if over_cap:
         raise OwnershipRoutingError(
             f"ownership scenario set {str(header['run_id'])!r} moves {len(over_cap)} "
-            f"player(s) past the {governance_status} cap of {cap * 100:.1f} point(s): "
+            f"player-role row(s) past the {governance_status} cap of "
+            f"{cap * 100:.1f} point(s) for {slate_type}: "
             + ", ".join(
-                f"player {delta.player_id} {delta.delta_points:+.2f}pt" for delta in over_cap[:10]
+                f"player {delta.player_id} {delta.role} {delta.delta_points:+.2f}pt"
+                for delta in over_cap[:10]
             )
         )
     # A material move whose feature row cites episodes that resolve to no evidence is a
@@ -608,12 +624,13 @@ def select_ownership_routing(
         ""
         if not held
         else (
-            f"; {len(held)} player(s) held at the vendor baseline because the set moved them "
+            f"; {len(held)} player-role row(s) held at the vendor baseline because the set "
+            "moved them "
             f"more than {governance.evaluation.material_delta * 100:.1f} point(s) with no "
             "narrative episode behind "
             "the move: "
             + ", ".join(
-                f"player {delta.player_id} "
+                f"player {delta.player_id} {delta.role} "
                 f"{((delta.proposed_ownership or 0.0) - delta.baseline_ownership) * 100:+.2f}pt"
                 for delta in held[:10]
             )
@@ -625,8 +642,7 @@ def select_ownership_routing(
             f"applied ownership scenario set {str(header['run_id'])!r} at governance status "
             f"{governance_status} "
             f"(multiplier {float(header['status_multiplier']):.2f}); evaluation "
-            f"{evaluation.model_eval_id!r} beat the untouched vendor baseline"
-            + held_note
+            f"{evaluation.model_eval_id!r} beat the untouched vendor baseline" + held_note
         ),
         contest_archetype=contest_archetype,
         role=role,
@@ -656,16 +672,12 @@ def pinned_routing_from_manifest(
     """
 
     artifacts = [
-        item
-        for item in manifest
-        if getattr(item, "artifact_kind", None) == MANIFEST_ARTIFACT_KIND
+        item for item in manifest if getattr(item, "artifact_kind", None) == MANIFEST_ARTIFACT_KIND
     ]
     if not artifacts:
         return NO_PINNED_ROUTING
     if len(artifacts) > 1:
-        raise OwnershipRoutingError(
-            "decision manifest names more than one ownership scenario set"
-        )
+        raise OwnershipRoutingError("decision manifest names more than one ownership scenario set")
     path = str(getattr(artifacts[0], "path", ""))
     if not path.startswith(MANIFEST_PATH_PREFIX):
         raise OwnershipRoutingError(
@@ -680,9 +692,7 @@ def pinned_routing_from_manifest(
     )
 
 
-def verify_pinned_routing(
-    routing: OwnershipRouting, pinned: PinnedOwnershipRouting
-) -> None:
+def verify_pinned_routing(routing: OwnershipRouting, pinned: PinnedOwnershipRouting) -> None:
     """Fail closed when replayed routing is not byte-for-byte what was frozen."""
 
     if pinned.scenario_run_id is None:
@@ -734,38 +744,63 @@ def _scenario_set(
     slate_id: int,
     site: str,
     contest_archetype: str,
-    role: str,
+    roles: tuple[str, ...],
     as_of: datetime,
     pinned_run_id: str | None,
 ) -> sqlite3.Row | None:
     rows = session.query(
         """
-        SELECT DISTINCT os.run_id, os.decision_snapshot_id, os.contest_archetype,
+        SELECT DISTINCT os.run_id, os.decision_snapshot_id, os.contest_archetype, os.role,
                os.governance_status, os.status_multiplier, os.model_run_id,
                os.model_version, os.config_sha256, os.feature_version, os.source,
                os.observed_at
         FROM ownership_scenarios AS os
         JOIN model_runs AS run ON run.run_id = os.run_id
         WHERE os.slate_id = :slate_id AND os.site = :site
-          AND os.contest_archetype = :contest_archetype AND os.role = :role
+          AND os.contest_archetype = :contest_archetype
           AND (:pinned_run_id IS NULL OR os.run_id = :pinned_run_id)
           AND run.status = 'succeeded'
           AND rtrim(os.observed_at, 'Z') <= rtrim(:as_of, 'Z')
           AND rtrim(os.created_at, 'Z') <= rtrim(:as_of, 'Z')
           AND rtrim(run.completed_at, 'Z') <= rtrim(:as_of, 'Z')
         ORDER BY rtrim(os.observed_at, 'Z') DESC, os.run_id DESC
-        LIMIT 1
         """,
         {
             "slate_id": slate_id,
             "site": site,
             "contest_archetype": contest_archetype,
-            "role": role,
             "pinned_run_id": pinned_run_id,
         },
         as_of=as_of,
     )
-    return rows[0] if rows else None
+    required_roles = set(roles)
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["run_id"]), []).append(row)
+    for run_rows in grouped.values():
+        if {str(row["role"]) for row in run_rows} >= required_roles:
+            shared = {
+                (
+                    str(row["decision_snapshot_id"]),
+                    str(row["governance_status"]),
+                    float(row["status_multiplier"]),
+                    str(row["model_run_id"]),
+                    str(row["model_version"]),
+                    str(row["config_sha256"]),
+                    str(row["feature_version"]),
+                    str(row["source"]),
+                    str(row["observed_at"]),
+                )
+                for row in run_rows
+                if str(row["role"]) in required_roles
+            }
+            if len(shared) != 1:
+                raise OwnershipRoutingError(
+                    f"ownership scenario set {str(run_rows[0]['run_id'])!r} has "
+                    "inconsistent captain/flex provenance"
+                )
+            return run_rows[0]
+    return None
 
 
 def latest_evaluation_status(
@@ -883,7 +918,8 @@ def feature_provenance(
         """
         SELECT nf.player_id, nf.feature_id, nf.episode_ids_json
         FROM narrative_features AS nf
-        WHERE nf.slate_id = :slate_id AND nf.site = :site AND nf.role = :role
+        WHERE nf.slate_id = :slate_id AND nf.site = :site
+          AND nf.role = CASE WHEN :role = 'captain' THEN 'flex' ELSE :role END
           AND nf.as_of = :feature_as_of AND nf.feature_version = :feature_version
           AND rtrim(nf.observed_at, 'Z') <= rtrim(:as_of, 'Z')
           AND rtrim(nf.ingested_at, 'Z') <= rtrim(:as_of, 'Z')
@@ -917,9 +953,7 @@ def feature_provenance(
         player_id: PlayerProvenance(
             feature_id=feature_id,
             episode_ids=episode_ids,
-            episodes=tuple(
-                everything[value] for value in episode_ids if value in everything
-            ),
+            episodes=tuple(everything[value] for value in episode_ids if value in everything),
             evidence_refs=tuple(
                 sorted(
                     reference
@@ -1024,9 +1058,7 @@ def episode_provenance(
                     extract_end=int(row["extract_end"]),
                     # A tombstoned excerpt is cleared, not deleted; offsets and hash remain.
                     verbatim_extract=(
-                        None
-                        if row["verbatim_extract"] is None
-                        else str(row["verbatim_extract"])
+                        None if row["verbatim_extract"] is None else str(row["verbatim_extract"])
                     ),
                     observed_at=str(row["observed_at"]),
                 )

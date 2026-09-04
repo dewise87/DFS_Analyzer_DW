@@ -1,0 +1,23 @@
+# First-season shadow-simulation assumptions. These values are hypotheses to expose and
+# calibrate, not learned contest parameters. Any byte change produces a new config hash.
+config_version = "first-season-v1"
+calibrated_against_real_contest = false
+default_draws = 1000
+default_seed = 20260904
+
+[dependence]
+game_loading = 0.15
+team_loading = 0.10
+within_position_negative_loading = 0.75
+touch_positions = ["RB", "WR", "TE"]
+
+[field]
+stack_rate = 0.65
+stack_weight = 4.0
+ownership_tolerance = 0.025
+calibration_iterations = 16
+lineup_attempts = 300
+
+[calibration]
+score_quantiles = [0.05, 0.25, 0.50, 0.75, 0.95]
+score_sample_limit = 100000

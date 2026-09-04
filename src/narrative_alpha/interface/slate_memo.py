@@ -28,6 +28,7 @@ from narrative_alpha.ownership_routing import (
 )
 from narrative_alpha.portfolio import (
     HEURISTIC_NOTICE,
+    SHOWDOWN_SITE_RULES,
     CandidatePlayer,
     ContestPolicy,
     DfsSite,
@@ -35,6 +36,7 @@ from narrative_alpha.portfolio import (
     HeuristicThresholds,
     Lineup,
     LineupPlayer,
+    SlateType,
     build_heuristic_report,
     render_heuristic_report,
 )
@@ -378,6 +380,37 @@ def render_slate_memo(memo: SlateMemo) -> str:
             )
         )
 
+    if memo.slate.slate_type == "showdown":
+        output.write("\nCAPTAIN CHOICES\n")
+        writer.writerow(
+            (
+                "lineup_id",
+                "slot",
+                "player_id",
+                "site_player_id",
+                "name",
+                "projected_ownership_flex",
+                "projected_ownership_captain",
+            )
+        )
+        for lineup in memo.lineups:
+            captain = next(player for player in lineup.players if player.slot in {"CPT", "MVP"})
+            writer.writerow(
+                (
+                    lineup.lineup_id,
+                    captain.slot,
+                    captain.player_id,
+                    captain.site_player_id,
+                    captain.name,
+                    "unavailable"
+                    if captain.projected_ownership is None
+                    else f"{captain.projected_ownership:.6f}",
+                    "unavailable"
+                    if captain.projected_ownership_captain is None
+                    else f"{captain.projected_ownership_captain:.6f}",
+                )
+            )
+
     output.write("\nROSTERS\n")
     writer.writerow(
         (
@@ -629,7 +662,12 @@ def _validate_build_result(
             raise SlateMemoError(f"lineup {lineup.lineup_id} does not match the request")
         for player in lineup.players:
             candidate = candidates.get(player.player_id)
-            if candidate is None or not _lineup_player_matches(player, candidate):
+            if candidate is None or not _lineup_player_matches(
+                player,
+                candidate,
+                site=request.site,
+                slate_type=request.slate_type,
+            ):
                 raise SlateMemoError(
                     f"lineup player {player.player_id} cannot be reproduced from the store"
                 )
@@ -732,16 +770,26 @@ def _memo_delta(delta: AppliedOwnershipDelta) -> SlateMemoAppliedDelta:
     )
 
 
-def _lineup_player_matches(player: LineupPlayer, candidate: CandidatePlayer) -> bool:
+def _lineup_player_matches(
+    player: LineupPlayer,
+    candidate: CandidatePlayer,
+    *,
+    site: DfsSite,
+    slate_type: SlateType,
+) -> bool:
+    captain = slate_type is SlateType.SHOWDOWN and player.slot in {"CPT", "MVP"}
+    points_multiplier = SHOWDOWN_SITE_RULES[site].captain_points_multiplier if captain else 1.0
+    salary_multiplier = SHOWDOWN_SITE_RULES[site].captain_salary_multiplier if captain else 1.0
     return (
         player.site_player_id == candidate.site_player_id
         and player.name == candidate.name
         and player.team == candidate.team
         and player.opponent == candidate.opponent
         and player.position == candidate.position
-        and player.salary == candidate.salary
-        and player.projection == candidate.projection
+        and player.salary == round(candidate.salary * salary_multiplier)
+        and player.projection == round(candidate.projection * points_multiplier, 6)
         and player.projected_ownership == candidate.projected_ownership
+        and player.projected_ownership_captain == candidate.projected_ownership_captain
         and player.game_id == candidate.game_id
         and player.slot in candidate.eligible_roster_slots
     )
@@ -829,7 +877,12 @@ def _optional_scalar(value: int | str | None) -> str:
 
 
 def _memo_lineup(lineup: Lineup) -> SlateMemoLineup:
-    ownership = tuple(player.projected_ownership for player in lineup.players)
+    ownership = tuple(
+        player.projected_ownership_captain
+        if player.slot in {"CPT", "MVP"}
+        else player.projected_ownership
+        for player in lineup.players
+    )
     ownership_sum = (
         None
         if any(value is None for value in ownership)

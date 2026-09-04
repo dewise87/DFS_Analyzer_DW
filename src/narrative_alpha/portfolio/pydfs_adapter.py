@@ -22,9 +22,8 @@ from narrative_alpha.portfolio.adapter import (
 )
 from narrative_alpha.portfolio.export import export_upload_csv
 from narrative_alpha.portfolio.models import (
-    CLASSIC_SITE_RULES,
+    SHOWDOWN_SITE_RULES,
     CandidatePlayer,
-    ContestArchetype,
     DfsSite,
     Lineup,
     LineupPlayer,
@@ -33,6 +32,7 @@ from narrative_alpha.portfolio.models import (
     UploadEntry,
     ValidationResult,
     lineup_sha256,
+    site_rules,
 )
 from narrative_alpha.portfolio.validation import (
     eligible_for_slot,
@@ -49,7 +49,7 @@ class PydfsAdapter:
         if unsupported:
             raise UnsupportedOptimizationFeature(unsupported)
 
-        roster_size = len(CLASSIC_SITE_RULES[request.site].slots)
+        roster_size = len(site_rules(request.site, request.slate_type).slots)
         ownership_bounds = _ownership_average_bounds(request, roster_size)
         ownership_pool_range = _ownership_pool_range(request)
         _require_ownership_band_intersection(request, ownership_pool_range)
@@ -61,7 +61,7 @@ class PydfsAdapter:
         # Every pydfs interaction stays inside this boundary so callers only ever
         # see the adapter's own error type, never a raw LineupOptimizerException.
         try:
-            optimizer = get_optimizer(_pydfs_site(request.site), Sport.FOOTBALL)
+            optimizer = get_optimizer(_pydfs_site(request.site, request.slate_type), Sport.FOOTBALL)
             optimizer.settings.budget = request.salary_cap
             if request.max_players_per_team is not None:
                 optimizer.settings.max_from_one_team = request.max_players_per_team
@@ -69,8 +69,8 @@ class PydfsAdapter:
                 optimizer.settings.min_games = request.min_games
 
             games = _build_game_infos(request.candidate_player_scenario.players)
-            pydfs_players = []
-            pydfs_by_canonical_id: dict[int, Player] = {}
+            pydfs_players: list[Player] = []
+            pydfs_by_canonical_role: dict[tuple[int, str], Player] = {}
             maximum_counts = {
                 player_id: math.floor(maximum * request.number_of_lineups + 1e-9)
                 for player_id, maximum in exposure_maxima.items()
@@ -90,25 +90,20 @@ class PydfsAdapter:
                 )
             for candidate in request.candidate_player_scenario.players:
                 game = games[candidate.game_id]
-                first_name, last_name = _split_name(candidate.name)
-                pydfs_player = Player(
-                    player_id=candidate.site_player_id,
-                    first_name=first_name,
-                    last_name=last_name,
-                    positions=[_pydfs_position(candidate, request.site)],
-                    team=candidate.team,
-                    salary=candidate.salary,
-                    fppg=candidate.projection,
-                    is_injured=candidate.is_injured,
-                    projected_ownership=candidate.projected_ownership,
-                    game_info=game,
+                variants = _pydfs_player_variants(
+                    candidate,
+                    request,
+                    game=game,
                     max_exposure=_pydfs_max_exposure(
                         maximum_counts.get(candidate.player_id),
                         request.number_of_lineups,
                     ),
                 )
-                pydfs_players.append(pydfs_player)
-                pydfs_by_canonical_id[candidate.player_id] = pydfs_player
+                pydfs_players.extend(variants)
+                for variant in variants:
+                    pydfs_by_canonical_role[
+                        (candidate.player_id, _variant_role(variant, request.slate_type))
+                    ] = variant
             optimizer.player_pool.load_players(pydfs_players)
 
             # pydfs validates min_teams against the loaded pool, so this must
@@ -125,7 +120,7 @@ class PydfsAdapter:
             # makes that exclusion deterministic and replayable without leaking the
             # dependency outside this adapter.
             excluded_lineups: list[Any] = [
-                tuple(pydfs_by_canonical_id[player_id] for player_id in lineup)
+                tuple(pydfs_by_canonical_role[(player_id, "classic")] for player_id in lineup)
                 for lineup in request.excluded_lineup_player_ids
             ]
             # A pinned lineup is returned verbatim and never regenerated: the optimizer
@@ -133,7 +128,12 @@ class PydfsAdapter:
             # duplicate of one cannot come back as "new".
             pinned = request.pinned_lineups
             excluded_lineups.extend(
-                tuple(pydfs_by_canonical_id[player.player_id] for player in lineup.players)
+                tuple(
+                    pydfs_by_canonical_role[
+                        (player.player_id, _lineup_role(player.slot, request.slate_type))
+                    ]
+                    for player in lineup.players
+                )
                 for lineup in pinned
             )
             remaining = request.number_of_lineups - len(pinned)
@@ -187,10 +187,8 @@ class PydfsAdapter:
 
 def _unsupported_features(request: OptimizationRequest) -> tuple[str, ...]:
     features: list[str] = []
-    if request.slate_type is not SlateType.CLASSIC:
-        features.append("showdown slate rules")
-    if request.contest_archetype is ContestArchetype.SHOWDOWN:
-        features.append(f"contest objective {request.contest_archetype.value}")
+    if request.slate_type is SlateType.SHOWDOWN and request.excluded_lineup_player_ids:
+        features.append("showdown excluded lineups without captain-slot identities")
     if request.objective != "projection":
         features.append(f"objective {request.objective}")
     if request.stack_rules:
@@ -219,8 +217,8 @@ def _unsupported_features(request: OptimizationRequest) -> tuple[str, ...]:
         # example an RB without FLEX) cannot be honored faithfully.
         narrowed = tuple(
             slot
-            for slot in _pydfs_granted_slots(candidate, request.site)
-            if not eligible_for_slot(candidate, slot, request.site)
+            for slot in _pydfs_granted_slots(candidate, request.site, request.slate_type)
+            if not eligible_for_slot(candidate, slot, request.site, request.slate_type)
         )
         if narrowed:
             features.append(
@@ -313,9 +311,13 @@ def _build_game_infos(players: Iterable[CandidatePlayer]) -> dict[str, GameInfo]
     return games
 
 
-def _pydfs_granted_slots(player: CandidatePlayer, site: DfsSite) -> tuple[str, ...]:
+def _pydfs_granted_slots(
+    player: CandidatePlayer, site: DfsSite, slate_type: SlateType
+) -> tuple[str, ...]:
     """The roster slots pydfs 3.6.1 grants this player's position on this site."""
 
+    if slate_type is SlateType.SHOWDOWN:
+        return player.eligible_roster_slots
     position = player.position
     if site is DfsSite.FANDUEL and position in {"D", "DEF", "DST"}:
         return ("DEF",)
@@ -337,9 +339,7 @@ def _ownership_average_bounds(
     sum_range = request.ownership_sum_range
     if sum_range is None:
         return None
-    if any(
-        player.projected_ownership is None for player in request.candidate_player_scenario.players
-    ):
+    if _ownership_is_incomplete(request):
         raise OptimizerError("ownership_sum_range requires ownership for every player")
     if sum_range.minimum == sum_range.maximum:
         raise OptimizerError(
@@ -361,27 +361,39 @@ def _ownership_pool_range(request: OptimizationRequest) -> tuple[float, float] |
 
     if request.ownership_sum_range is None:
         return None
-    players = request.candidate_player_scenario.players
-    if any(player.projected_ownership is None for player in players):
+    if _ownership_is_incomplete(request):
         return None  # _ownership_average_bounds gives the stable missing-data refusal.
     minimum = _extreme_ownership_sum(request, maximize=False)
     maximum = _extreme_ownership_sum(request, maximize=True)
     return minimum, maximum
 
 
+def _ownership_is_incomplete(request: OptimizationRequest) -> bool:
+    for player in request.candidate_player_scenario.players:
+        if player.projected_ownership is None:
+            return True
+        if (
+            request.slate_type is SlateType.SHOWDOWN
+            and SHOWDOWN_SITE_RULES[request.site].captain_slot in player.eligible_roster_slots
+            and player.projected_ownership_captain is None
+        ):
+            return True
+    return False
+
+
 def _extreme_ownership_sum(request: OptimizationRequest, *, maximize: bool) -> float:
-    optimizer, candidates = _ownership_optimizer(request, maximize=maximize)
+    optimizer, _ = _ownership_optimizer(request, maximize=maximize)
     try:
         lineup = next(optimizer.optimize(1))
     except (LineupOptimizerException, StopIteration) as error:
         raise OptimizerError(
             "candidate pool has no lineup satisfying the site, salary, team, and game rules"
         ) from error
-    return sum(cast(float, candidates[str(item.id)].projected_ownership) for item in lineup)
+    return sum(cast(float, item.projected_ownership) for item in lineup)
 
 
 def _ownership_band_is_feasible(request: OptimizationRequest) -> bool:
-    roster_size = len(CLASSIC_SITE_RULES[request.site].slots)
+    roster_size = len(site_rules(request.site, request.slate_type).slots)
     bounds = _ownership_average_bounds(request, roster_size)
     optimizer, _ = _ownership_optimizer(request, maximize=True)
     if bounds is not None:
@@ -400,7 +412,7 @@ def _ownership_optimizer(
 ) -> tuple[Any, dict[str, CandidatePlayer]]:
     """Build the one-lineup solver used only to characterize ownership feasibility."""
 
-    optimizer = get_optimizer(_pydfs_site(request.site), Sport.FOOTBALL)
+    optimizer = get_optimizer(_pydfs_site(request.site, request.slate_type), Sport.FOOTBALL)
     optimizer.settings.budget = request.salary_cap
     if request.max_players_per_team is not None:
         optimizer.settings.max_from_one_team = request.max_players_per_team
@@ -410,22 +422,15 @@ def _ownership_optimizer(
         player.site_player_id: player for player in request.candidate_player_scenario.players
     }
     games = _build_game_infos(request.candidate_player_scenario.players)
-    pydfs_players = []
+    pydfs_players: list[Player] = []
     direction = 1.0 if maximize else -1.0
     for candidate in request.candidate_player_scenario.players:
-        first_name, last_name = _split_name(candidate.name)
-        pydfs_players.append(
-            Player(
-                player_id=candidate.site_player_id,
-                first_name=first_name,
-                last_name=last_name,
-                positions=[_pydfs_position(candidate, request.site)],
-                team=candidate.team,
-                salary=candidate.salary,
-                fppg=direction * cast(float, candidate.projected_ownership),
-                is_injured=candidate.is_injured,
-                projected_ownership=candidate.projected_ownership,
-                game_info=games[candidate.game_id],
+        pydfs_players.extend(
+            _pydfs_player_variants(
+                candidate,
+                request,
+                game=games[candidate.game_id],
+                objective_from_ownership=direction,
             )
         )
     optimizer.player_pool.load_players(pydfs_players)
@@ -468,8 +473,13 @@ def _convert_lineup(
     players: list[LineupPlayer] = []
     for item in pydfs_lineup:
         site_player_id = str(item.id)
-        slot = str(item.lineup_position).upper()
+        slot = _normalized_lineup_slot(str(item.lineup_position), request)
         candidate = candidates[site_player_id]
+        captain = request.slate_type is SlateType.SHOWDOWN and slot in {"CPT", "MVP"}
+        multiplier = SHOWDOWN_SITE_RULES[request.site].captain_points_multiplier if captain else 1.0
+        salary_multiplier = (
+            SHOWDOWN_SITE_RULES[request.site].captain_salary_multiplier if captain else 1.0
+        )
         players.append(
             LineupPlayer(
                 slot=slot,
@@ -479,9 +489,10 @@ def _convert_lineup(
                 team=candidate.team,
                 opponent=candidate.opponent,
                 position=candidate.position,
-                salary=candidate.salary,
-                projection=candidate.projection,
+                salary=round(candidate.salary * salary_multiplier),
+                projection=round(candidate.projection * multiplier, 6),
                 projected_ownership=candidate.projected_ownership,
+                projected_ownership_captain=candidate.projected_ownership_captain,
                 game_id=candidate.game_id,
             )
         )
@@ -496,8 +507,13 @@ def _convert_lineup(
     )
 
 
-def _pydfs_site(site: DfsSite) -> str:
-    value = Site.DRAFTKINGS if site is DfsSite.DRAFTKINGS else Site.FANDUEL
+def _pydfs_site(site: DfsSite, slate_type: SlateType) -> str:
+    if slate_type is SlateType.SHOWDOWN:
+        value = (
+            Site.DRAFTKINGS_CAPTAIN_MODE if site is DfsSite.DRAFTKINGS else Site.FANDUEL_SINGLE_GAME
+        )
+    else:
+        value = Site.DRAFTKINGS if site is DfsSite.DRAFTKINGS else Site.FANDUEL
     return cast(str, value)
 
 
@@ -505,6 +521,113 @@ def _pydfs_position(player: CandidatePlayer, site: DfsSite) -> str:
     if site is DfsSite.FANDUEL and player.position in {"DEF", "DST"}:
         return "D"
     return player.position
+
+
+def _pydfs_player_variants(
+    candidate: CandidatePlayer,
+    request: OptimizationRequest,
+    *,
+    game: GameInfo,
+    max_exposure: float | None = None,
+    objective_from_ownership: float | None = None,
+) -> tuple[Player, ...]:
+    first_name, last_name = _split_name(candidate.name)
+    if request.slate_type is SlateType.CLASSIC:
+        projection = (
+            candidate.projection
+            if objective_from_ownership is None
+            else objective_from_ownership * cast(float, candidate.projected_ownership)
+        )
+        return (
+            Player(
+                player_id=candidate.site_player_id,
+                first_name=first_name,
+                last_name=last_name,
+                positions=[_pydfs_position(candidate, request.site)],
+                team=candidate.team,
+                salary=candidate.salary,
+                fppg=projection,
+                is_injured=candidate.is_injured,
+                projected_ownership=candidate.projected_ownership,
+                game_info=game,
+                max_exposure=max_exposure,
+            ),
+        )
+
+    rules = SHOWDOWN_SITE_RULES[request.site]
+    variants: list[Player] = []
+    if rules.captain_slot in candidate.eligible_roster_slots:
+        captain_projection = (
+            candidate.projection * rules.captain_points_multiplier
+            if objective_from_ownership is None
+            else objective_from_ownership * cast(float, candidate.projected_ownership_captain)
+        )
+        variants.append(
+            Player(
+                player_id=candidate.site_player_id,
+                first_name=first_name,
+                last_name=last_name,
+                positions=[rules.captain_slot],
+                team=candidate.team,
+                salary=round(candidate.salary * rules.captain_salary_multiplier),
+                fppg=captain_projection,
+                is_injured=candidate.is_injured,
+                projected_ownership=candidate.projected_ownership_captain,
+                game_info=game,
+                max_exposure=max_exposure,
+                original_positions=[candidate.position],
+            )
+        )
+    if rules.flex_slot in candidate.eligible_roster_slots:
+        flex_projection = (
+            candidate.projection
+            if objective_from_ownership is None
+            else objective_from_ownership * cast(float, candidate.projected_ownership)
+        )
+        variants.append(
+            Player(
+                player_id=candidate.site_player_id,
+                first_name=first_name,
+                last_name=last_name,
+                positions=(
+                    ["FLEX"]
+                    if request.site is DfsSite.DRAFTKINGS
+                    else [_pydfs_position(candidate, request.site)]
+                ),
+                team=candidate.team,
+                salary=candidate.salary,
+                fppg=flex_projection,
+                is_injured=candidate.is_injured,
+                projected_ownership=candidate.projected_ownership,
+                game_info=game,
+                max_exposure=max_exposure,
+                original_positions=[candidate.position],
+            )
+        )
+    return tuple(variants)
+
+
+def _variant_role(player: Player, slate_type: SlateType) -> str:
+    if slate_type is SlateType.CLASSIC:
+        return "classic"
+    return "captain" if set(player.positions) & {"CPT", "MVP"} else "flex"
+
+
+def _lineup_role(slot: str, slate_type: SlateType) -> str:
+    if slate_type is SlateType.CLASSIC:
+        return "classic"
+    return "captain" if slot in {"CPT", "MVP"} else "flex"
+
+
+def _normalized_lineup_slot(slot: str, request: OptimizationRequest) -> str:
+    normalized = slot.upper()
+    if (
+        request.slate_type is SlateType.SHOWDOWN
+        and request.site is DfsSite.FANDUEL
+        and normalized == "UTIL"
+    ):
+        return "FLEX"
+    return normalized
 
 
 def _split_name(name: str) -> tuple[str, str]:

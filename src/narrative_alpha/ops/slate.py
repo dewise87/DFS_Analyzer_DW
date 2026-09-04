@@ -79,6 +79,16 @@ from narrative_alpha.report_cli import (
     render_report_bundle,
     write_report_atomic,
 )
+from narrative_alpha.simulation import (
+    DEFAULT_SIMULATION_CONFIG_PATH,
+    ContestSimulationError,
+    FieldGenerationError,
+    OutcomeSimulationError,
+    SimulationConfigError,
+    SimulationRunError,
+    SimulationRunResult,
+    run_simulation,
+)
 from narrative_alpha.snapshots import MANIFEST_FILENAME, CaptureKind, load_manifest
 from narrative_alpha.snapshots.core import snapshot_week_path
 from narrative_alpha.snapshots.models import SnapshotManifest
@@ -97,6 +107,7 @@ VendorStep = Callable[..., ProjectionLoadReport]
 FeatureStep = Callable[..., FeatureBuildReport]
 DecisionStep = Callable[..., BuildResult]
 MemoStep = Callable[..., SlateMemo]
+SimulationStep = Callable[..., SimulationRunResult]
 
 
 @dataclass(frozen=True)
@@ -116,6 +127,7 @@ class SlateDependencies:
     build_features: FeatureStep = build_features
     build_decision: DecisionStep = build_decision
     build_slate_memo: MemoStep = build_slate_memo
+    run_simulation: SimulationStep = run_simulation
     source_formats: tuple[SourceFormat, ...] = ()
 
 
@@ -136,6 +148,7 @@ SLATE_STEP_ERRORS: tuple[type[BaseException], ...] = (
     SlateIngestError,
     SlateMemoError,
     StoreConfigurationError,
+    SimulationRunError,
     ValueError,
     sqlite3.Error,
     ContestEntryError,
@@ -158,6 +171,7 @@ class SlateReport:
     decision_snapshot_id: str | None = None
     upload_csv_path: Path | None = None
     memo_path: Path | None = None
+    simulation_path: Path | None = None
     replay_command: str | None = None
 
     @property
@@ -187,6 +201,12 @@ def run_slate(
     artifact_directory: Path = DEFAULT_ARTIFACT_DIRECTORY,
     report_directory: Path = DEFAULT_REPORT_DIRECTORY,
     heat_config_path: Path = DEFAULT_HEAT_CONFIG_PATH,
+    simulate: bool = False,
+    simulation_contest_external_id: str | None = None,
+    simulation_draws: int | None = None,
+    simulation_seed: int | None = None,
+    simulation_independent: bool = False,
+    simulation_config_path: Path = DEFAULT_SIMULATION_CONFIG_PATH,
     dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES,
     now: datetime | None = None,
 ) -> SlateReport:
@@ -281,6 +301,8 @@ def run_slate(
         recorder.skip("slate_features", no_slate)
         recorder.skip("slate_build", no_slate)
         recorder.skip("slate_memo", no_slate)
+        if simulate:
+            recorder.skip("slate_simulate", no_slate)
         return _report(
             slate_run_id,
             season=season,
@@ -292,6 +314,7 @@ def run_slate(
             slate_id=None,
             build_result=None,
             memo_path=None,
+            simulation_path=None,
             database=database,
             artifact_directory=artifact_directory,
         )
@@ -310,6 +333,9 @@ def run_slate(
     )
 
     built: list[BuildResult] = []
+    build_archetype: ContestArchetype | str = (
+        ContestArchetype.SHOWDOWN if target.slate_type == "showdown" else contest_archetype
+    )
     recorder.run(
         "slate_build",
         lambda: _build_decision(
@@ -324,7 +350,7 @@ def run_slate(
             decision_at=cutoff,
             artifact_directory=artifact_directory,
             number_of_lineups=number_of_lineups,
-            contest_archetype=contest_archetype,
+            contest_archetype=build_archetype,
             upload_entries=upload_entries,
             into=built,
         ),
@@ -349,6 +375,26 @@ def run_slate(
             ),
         )
 
+    simulation_paths: list[Path] = []
+    if simulate:
+        _run_optional_simulation(
+            dependencies,
+            connection,
+            recorder=recorder,
+            build_result=built[0] if built else None,
+            site=canonical_site,
+            as_of=cutoff,
+            artifact_directory=artifact_directory,
+            report_directory=report_directory,
+            contest_external_id=simulation_contest_external_id,
+            draws=simulation_draws,
+            seed=simulation_seed,
+            independent=simulation_independent,
+            config_path=simulation_config_path,
+            run_at=started_at,
+            into=simulation_paths,
+        )
+
     return _report(
         slate_run_id,
         season=season,
@@ -360,6 +406,7 @@ def run_slate(
         slate_id=target.slate_id,
         build_result=built[0] if built else None,
         memo_path=memo_paths[0] if memo_paths else None,
+        simulation_path=simulation_paths[0] if simulation_paths else None,
         database=database,
         artifact_directory=artifact_directory,
     )
@@ -377,6 +424,7 @@ def _report(
     slate_id: int | None,
     build_result: BuildResult | None,
     memo_path: Path | None,
+    simulation_path: Path | None,
     database: Path,
     artifact_directory: Path,
 ) -> SlateReport:
@@ -394,6 +442,7 @@ def _report(
         decision_snapshot_id=snapshot_id,
         upload_csv_path=None if build_result is None else build_result.generated_lineups_path,
         memo_path=memo_path,
+        simulation_path=simulation_path,
         replay_command=None
         if snapshot_id is None
         else replay_command(
@@ -919,6 +968,167 @@ def _write_memo(
         },
         None,
     )
+
+
+def _run_optional_simulation(
+    dependencies: SlateDependencies,
+    connection: sqlite3.Connection,
+    *,
+    recorder: StepRecorder,
+    build_result: BuildResult | None,
+    site: str,
+    as_of: datetime,
+    artifact_directory: Path,
+    report_directory: Path,
+    contest_external_id: str | None,
+    draws: int | None,
+    seed: int | None,
+    independent: bool,
+    config_path: Path,
+    run_at: datetime,
+    into: list[Path],
+) -> None:
+    if build_result is None:
+        recorder.skip(
+            "slate_simulate",
+            "the build step produced no frozen decision, so simulation has no portfolio input",
+        )
+        return
+    decision = build_result.snapshot
+    stamp = utc_timestamp(as_of)
+    distributions = int(
+        connection.execute(
+            """
+            SELECT count(*) FROM player_distributions
+            WHERE slate_id = ?
+              AND rtrim(as_of_at, 'Z') <= rtrim(?, 'Z')
+              AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
+              AND rtrim(ingested_at, 'Z') <= rtrim(?, 'Z')
+              AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
+              AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
+            """,
+            (decision.slate_id, stamp, stamp, stamp, stamp, stamp),
+        ).fetchone()[0]
+    )
+    if distributions == 0:
+        recorder.skip(
+            "slate_simulate",
+            "the frozen slate has no player_distributions available at the decision; "
+            "simulation refuses to impute outcomes",
+            {"decision_snapshot_id": decision.decision_snapshot_id},
+        )
+        return
+    contest, problem = _simulation_contest(
+        connection,
+        slate_id=decision.slate_id,
+        site=site,
+        as_of=as_of,
+        requested=contest_external_id,
+    )
+    if contest is None:
+        recorder.skip(
+            "slate_simulate",
+            problem or "no contest was available at the decision",
+            {"decision_snapshot_id": decision.decision_snapshot_id},
+        )
+        return
+
+    def action() -> tuple[OpsStepStatus, dict[str, object], str | None]:
+        try:
+            result = dependencies.run_simulation(
+                connection,
+                decision_snapshot_id=decision.decision_snapshot_id,
+                contest_external_id=contest,
+                artifact_root=artifact_directory,
+                report_directory=report_directory,
+                config_path=config_path,
+                draws=draws,
+                seed=seed,
+                independent=independent,
+                run_at=run_at,
+            )
+        except SHADOW_SIMULATION_ERRORS as error:
+            # The simulator is experimental and changes nothing the lane decides. A
+            # Sunday must not read "one or more steps FAILED" because a shadow field
+            # could not be generated; the gap is stated, and the decision stands.
+            return (
+                "skipped",
+                {
+                    "decision_snapshot_id": decision.decision_snapshot_id,
+                    "contest_external_id": contest,
+                },
+                f"shadow simulation did not run: {type(error).__name__}: {error}",
+            )
+        into.append(result.report_path)
+        return (
+            "succeeded",
+            {
+                "decision_snapshot_id": decision.decision_snapshot_id,
+                "contest_external_id": contest,
+                "simulation_run_id": result.simulation_run_id,
+                "simulation_report_path": str(result.report_path),
+                "draws": result.report.draws,
+                "seed": result.report.seed,
+                "config_sha256": result.report.config_sha256,
+            },
+            None,
+        )
+
+    recorder.run("slate_simulate", action)
+
+
+#: What the shadow simulator may raise for a bad store or an unlucky field. None of them
+#: is a bug in the lane, and none of them may fail the lane.
+SHADOW_SIMULATION_ERRORS: tuple[type[BaseException], ...] = (
+    ContestSimulationError,
+    FieldGenerationError,
+    OutcomeSimulationError,
+    SimulationConfigError,
+    SimulationRunError,
+    ValueError,
+)
+
+
+def _simulation_contest(
+    connection: sqlite3.Connection,
+    *,
+    slate_id: int,
+    site: str,
+    as_of: datetime,
+    requested: str | None,
+) -> tuple[str | None, str | None]:
+    stamp = utc_timestamp(as_of)
+    parameters: list[object] = [slate_id, site, stamp, stamp, stamp, stamp]
+    requested_clause = ""
+    if requested is not None:
+        requested_clause = "AND external_contest_id = ?"
+        parameters.append(requested)
+    rows = connection.execute(
+        f"""
+        SELECT external_contest_id FROM contests
+        WHERE slate_id = ? AND site = ?
+          AND rtrim(observed_at, 'Z') <= rtrim(?, 'Z')
+          AND rtrim(ingested_at, 'Z') <= rtrim(?, 'Z')
+          AND rtrim(valid_from, 'Z') <= rtrim(?, 'Z')
+          AND (valid_to IS NULL OR rtrim(valid_to, 'Z') > rtrim(?, 'Z'))
+          {requested_clause}
+        GROUP BY external_contest_id
+        ORDER BY external_contest_id
+        """,
+        parameters,
+    ).fetchall()
+    if not rows:
+        detail = "" if requested is None else f" {requested!r}"
+        return None, (
+            f"no contest{detail} for slate {slate_id} was available at the decision; "
+            "add the contest and payout curve before requesting slate simulation"
+        )
+    if len(rows) > 1:
+        return None, (
+            "more than one contest was available at the decision; set "
+            "--simulation-contest to choose its external id"
+        )
+    return str(rows[0]["external_contest_id"]), None
 
 
 def _listed(commands: list[str]) -> str:

@@ -114,9 +114,7 @@ log_directory = "{logs}"
     weekly_hash = hashlib.sha256(weekly_bytes).hexdigest()
     snaps_hash = hashlib.sha256(snaps_bytes).hexdigest()
     reviewed = NOW.date()
-    roster_release = PinnedRosterRelease(
-        2026, "https://example.test/roster", roster_hash, reviewed
-    )
+    roster_release = PinnedRosterRelease(2026, "https://example.test/roster", roster_hash, reviewed)
     stats_release = PinnedStatsRelease(
         season=2026,
         reviewed_at=reviewed,
@@ -267,9 +265,7 @@ def test_doctor_failure_fixtures_name_their_remedies(tmp_path: Path) -> None:
     backup = _check(no_backup, "newest backup")
     assert backup.level == "FAIL" and "na-ops backup" in backup.detail
 
-    no_agents = fixture.run(
-        home=tmp_path / "empty-home", launchctl=lambda command: (3, "absent")
-    )
+    no_agents = fixture.run(home=tmp_path / "empty-home", launchctl=lambda command: (3, "absent"))
     launchd = [check for check in no_agents.checks if check.name.startswith("launchd ")]
     assert launchd and all(check.level == "FAIL" for check in launchd)
     assert all("schedule install" in check.detail for check in launchd)
@@ -294,12 +290,12 @@ def test_doctor_pending_migration_and_expired_rules_are_failures(tmp_path: Path)
     fixture = _doctor_fixture(tmp_path)
     migrations = tmp_path / "migrations"
     shutil.copytree(DEFAULT_MIGRATIONS_PATH, migrations)
-    (migrations / "0021_fixture_pending.sql").write_text(
+    (migrations / "0022_fixture_pending.sql").write_text(
         "CREATE TABLE fixture_pending(value TEXT) STRICT;\n", encoding="utf-8"
     )
     pending = fixture.run(migrations_path=migrations)
     migration = _check(pending, "database migrations")
-    assert migration.level == "FAIL" and "0021_fixture_pending.sql" in migration.detail
+    assert migration.level == "FAIL" and "0022_fixture_pending.sql" in migration.detail
 
     expired_path = tmp_path / "expired-rules.yaml"
     expired = fixture.config_paths["fast_lane_rules.yaml"].read_text(encoding="utf-8")
@@ -372,9 +368,7 @@ def test_backup_can_include_snapshot_captures_explicitly(tmp_path: Path) -> None
     report = create_backup(**paths, include_snapshots=True, now=NOW)
     manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
     assert manifest["included_snapshots"] is True
-    assert (report.path / "snapshots" / "capture.bin").read_bytes() == (
-        b"large immutable capture"
-    )
+    assert (report.path / "snapshots" / "capture.bin").read_bytes() == (b"large immutable capture")
 
 
 def test_backup_pruning_keeps_newest_n(tmp_path: Path) -> None:
@@ -461,10 +455,10 @@ keep_newest = 14
 local_time = "02:00"
 
 [paths]
-database = "{paths['database']}"
-snapshot_root = "{paths['snapshot_root']}"
-nflverse_archive = "{paths['pin_archive']}"
-log_directory = "{tmp_path / 'logs'}"
+database = "{paths["database"]}"
+snapshot_root = "{paths["snapshot_root"]}"
+nflverse_archive = "{paths["pin_archive"]}"
+log_directory = "{tmp_path / "logs"}"
 """.lstrip(),
         encoding="utf-8",
     )
