@@ -312,6 +312,34 @@ def test_conflicting_result_sources_fail_loudly(tmp_path: Path) -> None:
             )
 
 
+def test_a_workload_stats_row_is_not_a_second_opinion_on_the_label(tmp_path: Path) -> None:
+    """nflverse's PPR points beside the standings' DraftKings points are not a conflict:
+    the workload row is a grading fact and the evaluation never reads it as a label."""
+
+    from narrative_alpha.ingest.nflverse_stats import WORKLOAD_STATS_SOURCE
+
+    database = tmp_path / "workload.sqlite3"
+    _seed_baseline(database)
+    with connect_database(database) as connection:
+        _insert_result(
+            connection,
+            result_id=904,
+            player_id=2,
+            points=99.0,
+            source=WORKLOAD_STATS_SOURCE,
+            source_hash="8" * 64,
+            observed_at=datetime(2026, 9, 14, 11, tzinfo=UTC),
+            stat_line={"played": True, "snap_share": 0.8, "scoring": "nflverse:fantasy_points_ppr"},
+        )
+        report = build_baseline_report(
+            connection,
+            decision_snapshot_id=SNAPSHOT_ID,
+            decision_at=DECISION_AT,
+            evaluation_as_of=EVALUATION_AT,
+        )
+    assert report is not None
+
+
 @pytest.mark.parametrize(
     "stat_line",
     (

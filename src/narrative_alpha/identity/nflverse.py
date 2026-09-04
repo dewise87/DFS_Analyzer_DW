@@ -1,11 +1,15 @@
-"""Pinned nflverse roster fetch/cache and canonical-player seeding."""
+"""Pinned nflverse roster fetch/cache and canonical-player seeding.
+
+The dated pin table below is roster-specific; the mechanism that selects, fetches,
+verifies, and archives its bytes is the shared one in :mod:`narrative_alpha.identity.pins`,
+which the weekly workload files use too.
+"""
 
 from __future__ import annotations
 
 import csv
 import hashlib
 import io
-import os
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
@@ -13,27 +17,37 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import MappingProxyType
+from typing import ClassVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from narrative_alpha.identity.pins import (
+    HTTP_TIMEOUT,
+    NflversePinError,
+    PinHashError,
+    PinnedRelease,
+    archive_bytes,
+    fetch_bytes,
+    fetch_pinned,
+    newest_pin,
+    pin_archive_path,
+    pinned_release,
+    verify_hash,
+)
+
 NFLVERSE_SOURCE = "nflverse"
-HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-MAX_ATTEMPTS = 3
-INITIAL_BACKOFF_SECONDS = 0.25
+ROSTER_LABEL = "nflverse roster"
 _REQUIRED_COLUMNS = frozenset(
     {"season", "team", "position", "status", "full_name", "birth_date", "gsis_id", "week"}
 )
 
 
 @dataclass(frozen=True)
-class PinnedRosterRelease:
+class PinnedRosterRelease(PinnedRelease):
     """A manually versioned roster artifact accepted by the seed process."""
 
-    season: int
-    url: str
-    sha256: str
-    reviewed_at: date
+    label: ClassVar[str] = ROSTER_LABEL
 
 
 @dataclass(frozen=True)
@@ -129,17 +143,13 @@ PINNED_ROSTER_RELEASES: Mapping[int, tuple[PinnedRosterRelease, ...]] = MappingP
             PinnedRosterRelease(
                 season=2026,
                 url=ROLLING_ROSTER_URL.format(season=2026),
-                sha256=(
-                    "fa89e8c9766c6ea02b943a7a50465370b50dad5cfb76ee6ea6e287d13840ec63"
-                ),
+                sha256=("fa89e8c9766c6ea02b943a7a50465370b50dad5cfb76ee6ea6e287d13840ec63"),
                 reviewed_at=date(2026, 9, 1),
             ),
             PinnedRosterRelease(
                 season=2026,
                 url=ROLLING_ROSTER_URL.format(season=2026),
-                sha256=(
-                    "44087b928376ef297c702ffed2c6b930185b4556105011baf70673b9a3073a2d"
-                ),
+                sha256=("44087b928376ef297c702ffed2c6b930185b4556105011baf70673b9a3073a2d"),
                 reviewed_at=date(2026, 9, 2),
             ),
         )
@@ -147,15 +157,14 @@ PINNED_ROSTER_RELEASES: Mapping[int, tuple[PinnedRosterRelease, ...]] = MappingP
 )
 
 
-class NflverseRosterError(RuntimeError):
-    """Base error for untrusted or unreadable nflverse roster artifacts."""
+# The pin mechanism is shared, so its failures are too: these names are the roster's view
+# of `pins.NflversePinError`/`pins.PinHashError`, and every existing caller still catches
+# exactly what it caught before.
+NflverseRosterError = NflversePinError
+RosterHashError = PinHashError
 
 
-class RosterHashError(NflverseRosterError):
-    """Raised when bytes do not match the manually reviewed release hash."""
-
-
-class RosterSchemaError(NflverseRosterError):
+class RosterSchemaError(NflversePinError):
     """Raised when the pinned file's required columns have drifted."""
 
 
@@ -185,32 +194,13 @@ def pinned_roster_release(
 ) -> PinnedRosterRelease:
     """Return the newest reviewed release available on ``as_of``; never look ahead."""
 
-    cutoff = as_of.date() if isinstance(as_of, datetime) else as_of
-    eligible = tuple(
-        release
-        for release in releases.get(season, ())
-        if release.season == season and release.reviewed_at <= cutoff
-    )
-    if not eligible:
-        raise NflverseRosterError(
-            f"no nflverse roster release is pinned for season {season} at or before "
-            f"{cutoff.isoformat()}; review and add its hash"
-        )
-    return _newest_pin(eligible)
-
-
-def _newest_pin(pins: tuple[PinnedRosterRelease, ...]) -> PinnedRosterRelease:
-    """Newest ``reviewed_at`` wins; a same-day re-pin later in the table beats an earlier one."""
-
-    return max(enumerate(pins), key=lambda item: (item[1].reviewed_at, item[0]))[1]
+    return pinned_release(season, as_of, releases=releases, label=ROSTER_LABEL)
 
 
 def roster_archive_path(archive_dir: Path, sha256: str) -> Path:
     """Return the content-addressed path for exact roster bytes."""
 
-    if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256):
-        raise NflverseRosterError("nflverse roster sha256 must be 64 lowercase hexadecimal chars")
-    return archive_dir / "sha256" / sha256[:2] / f"{sha256}.csv"
+    return pin_archive_path(archive_dir, sha256, label=ROSTER_LABEL)
 
 
 def fetch_pinned_roster(
@@ -222,45 +212,7 @@ def fetch_pinned_roster(
 ) -> Path:
     """Return verified bytes from the local archive, fetching only on an archive miss."""
 
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    target = roster_archive_path(archive_dir, release.sha256)
-    if target.exists():
-        archived_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
-        if archived_sha256 != release.sha256:
-            raise RosterHashError(
-                f"archived nflverse roster bytes at {target} do not match the reviewed hash "
-                f"(expected {release.sha256}, got {archived_sha256}); the local archive file is "
-                "corrupt — delete it to refetch"
-            )
-        return target
-
-    owns_client = client is None
-    http_client = client or httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True)
-    try:
-        content = _fetch_roster_bytes(http_client, release.url, sleep=sleep)
-        _verify_hash(content, release)
-        return _archive_bytes(archive_dir, content, release.sha256)
-    finally:
-        if owns_client:
-            http_client.close()
-
-
-def _archive_bytes(archive_dir: Path, content: bytes, sha256: str) -> Path:
-    """Write ``content`` at its content-addressed path atomically; the hash must already hold."""
-
-    if hashlib.sha256(content).hexdigest() != sha256:
-        raise RosterHashError("refusing to archive roster bytes under a hash they do not match")
-    target = roster_archive_path(archive_dir, sha256)
-    if target.exists():
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".csv.partial")
-    with temporary.open("wb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(target)
-    return target
+    return fetch_pinned(release, archive_dir, client=client, sleep=sleep)
 
 
 def refresh_roster_release(
@@ -298,7 +250,7 @@ def refresh_roster_release(
             f"reviewed_at {reviewed_at.isoformat()} is in the future (today is "
             f"{current_day.isoformat()}); as-of selection could never choose that pin"
         )
-    newest = _newest_pin(pins)
+    newest = newest_pin(pins)
     if reviewed_at < newest.reviewed_at:
         raise NflverseRosterError(
             f"reviewed_at {reviewed_at.isoformat()} precedes newest pin "
@@ -335,13 +287,13 @@ def refresh_roster_release(
             prior_path = None
             prior_unavailable_reason = reason
         url = ROLLING_ROSTER_URL.format(season=season)
-        current_bytes = _fetch_roster_bytes(http_client, url, sleep=sleep)
+        current_bytes = fetch_bytes(http_client, url, label=ROSTER_LABEL, sleep=sleep)
     finally:
         if owns_client:
             http_client.close()
 
     current_sha256 = hashlib.sha256(current_bytes).hexdigest()
-    _archive_bytes(archive_dir, current_bytes, current_sha256)
+    archive_bytes(archive_dir, current_bytes, current_sha256, label=ROSTER_LABEL)
 
     current, issues = _roster_players(current_bytes)
     if prior_path is None:
@@ -408,7 +360,7 @@ def seed_nflverse_roster(
 
     observed_at = _utc(observed_at)
     raw_bytes = roster_path.read_bytes()
-    _verify_hash(raw_bytes, release)
+    verify_hash(raw_bytes, release)
     try:
         text = raw_bytes.decode("utf-8-sig")
     except UnicodeDecodeError as error:
@@ -592,40 +544,6 @@ def _append_team_membership(
             run_id,
         ),
     )
-
-
-def _verify_hash(content: bytes, release: PinnedRosterRelease) -> None:
-    actual = hashlib.sha256(content).hexdigest()
-    if actual != release.sha256:
-        raise RosterHashError(
-            f"nflverse roster hash mismatch for {release.season}: "
-            f"expected {release.sha256}, got {actual}"
-        )
-
-
-def _fetch_roster_bytes(
-    client: httpx.Client,
-    url: str,
-    *,
-    sleep: Callable[[float], None],
-) -> bytes:
-    last_error: httpx.HTTPError | None = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            response = client.get(url)
-            response.raise_for_status()
-        except httpx.HTTPError as error:
-            last_error = error
-            if attempt < MAX_ATTEMPTS:
-                sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-                continue
-            break
-        return response.content
-    assert last_error is not None
-    raise NflverseRosterError(
-        f"failed to fetch nflverse roster after {MAX_ATTEMPTS} attempts: "
-        f"{type(last_error).__name__}"
-    ) from last_error
 
 
 def _roster_players(

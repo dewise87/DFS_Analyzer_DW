@@ -37,6 +37,15 @@ from narrative_alpha.identity.normalization import (
     normalize_team_code,
     team_code_variants,
 )
+from narrative_alpha.identity.pins import (
+    NflversePinError,
+    PinHashError,
+    PinnedRelease,
+    fetch_pinned,
+    newest_pin,
+    pin_archive_path,
+    pinned_release,
+)
 
 __all__ = [
     "CANONICAL_TEAM_CODES",
@@ -49,7 +58,10 @@ __all__ = [
     "IdentityMatchResult",
     "MatchCandidate",
     "MatchMethod",
+    "NflversePinError",
     "NflverseRosterError",
+    "PinHashError",
+    "PinnedRelease",
     "PinnedRosterRelease",
     "PlayerCrosswalk",
     "PlayerIdentityInput",
@@ -59,10 +71,14 @@ __all__ = [
     "RosterSchemaError",
     "RosterSeedIssue",
     "RosterSeedReport",
+    "fetch_pinned",
     "fetch_pinned_roster",
     "name_without_suffix",
+    "newest_pin",
     "normalize_name",
     "normalize_team_code",
+    "pin_archive_path",
+    "pinned_release",
     "pinned_roster_release",
     "refresh_roster_release",
     "roster_archive_path",

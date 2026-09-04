@@ -2496,6 +2496,29 @@ too), Slice 16's dated-pin discipline for anything from nflverse.
 > false and a DNP claim grades correct; re-running the step inserts nothing new. Gates
 > green; never the production database.
 
+**Implementation status (2026-09-04):** landed as `src/narrative_alpha/ingest/nflverse_stats.py`
+with `config/workload_stats.toml` (byte-hashed into every row's `source_version`), migration
+0019 (the `results_stats` step in `ops_runs`), a `results_stats` step between
+`results_labels` and `results_grade`, `na-crosswalk nflverse-stats-refresh`, and a WORKLOAD
+STATS PIN block plus DO BY HAND action on `na-ops status`. The roster's dated-pin mechanism
+was generalized into `identity/pins.py` rather than copied, and both workload files are one
+`PinnedStatsRelease` reviewed on one date. Grading was not touched: the stat line writes the
+keys `config/claim_grading.toml` already names, and a usage claim now grades end to end from
+a written row. `PINNED_STATS_RELEASES` ships empty — an unreviewed hash is not a pin — so the
+step skips with the refresh command until an entry is pasted. Suite 716 → 732.
+
+**Review outcome (2026-09-04):** accepted with one fix. The rows carry nflverse's full-PPR
+points as a DraftKings `fantasy_points`, on the reasoning that DraftKings is full PPR — it
+is not quite (DraftKings adds yardage bonuses), and the baseline evaluation refuses to
+choose between two result sources whose numbers differ, so any Tuesday report rebuilt
+after these rows existed would have failed on the first quarterback with a 300-yard game.
+The evaluation now reads outcome labels from the standings export alone and never from
+the workload source; each workload row names the nflverse column behind its points in its
+stat line. Checked and clean: the baseline never includes the current game and is absent
+in a player's first game; a zero-snap player is not played and a DNP claim grades correct
+end to end; the pin refuses drifted bytes and never looks ahead; a rerun writes nothing.
+Suite 716 → 733.
+
 ### Slice 38 — Stage 2/3 hardening (start after Week 2's episodes exist)
 
 **Goal:** the two limits recorded at Slices 20–21 — paraphrase detection that is headline

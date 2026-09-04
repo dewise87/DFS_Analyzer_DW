@@ -2,6 +2,49 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-04 — One pin mechanism, and workload facts that never see their own game
+
+- **The roster's dated-pin machinery was generalized, not copied.** Selection as-of a date,
+  hash verification, and the content-addressed byte archive now live in
+  `identity/pins.py` and serve the roster and both workload files. `PinnedRosterRelease`
+  keeps its exact constructor (`label` is a `ClassVar`, not a field, so a pasted pin entry
+  is unchanged), and `NflverseRosterError`/`RosterHashError` are now names for the shared
+  `NflversePinError`/`PinHashError` — every existing caller catches what it always caught.
+  Revisit if a pinned artifact ever needs a non-CSV extension or a different archive layout.
+- **The two nflverse workload files are one pin, reviewed on one date.** A snap share from
+  one vintage beside a target share from another is a mixture nobody reviewed, so
+  `PinnedStatsRelease` carries both URLs and both hashes and is selected as a unit.
+- **`PINNED_STATS_RELEASES` ships empty.** An unreviewed hash is not a pin, and there is no
+  honest hash to write without a person reading the files. Until an entry is pasted,
+  `results_stats` *skips* with the remedy rather than failing: nothing is broken, a review
+  simply has not happened. `na-ops status` carries it as a DO BY HAND action.
+- **Canonical identity comes from the crosswalk; the two nflverse files are joined to each
+  other by (season, week, team, name).** The weekly file's GSIS id resolves through
+  `external_player_ids`, and an unresolved row is held and queued, never guessed. The snap
+  file keys on `pfr_player_id`, which no canonical row carries, so it is matched to the
+  weekly row inside one vendor's own data for one team's one game — exact normalized name,
+  then suffix-tolerant, refusing when more than one candidate matches. Resolving snap rows
+  through the crosswalk instead would queue several hundred defenders a week and fail-close
+  the next slate build for players who are never priced.
+- **`played` uses total snaps, not offensive snaps.** A returner who scores has played, and
+  calling that a DNP would put the row's own fantasy points in conflict with its played
+  fact — `_played_fact` would return `indeterminate` for exactly the weeks that matter.
+- **A workload row's points are nflverse's, never the site's label.** nflverse publishes
+  standard and full-PPR points; neither is DraftKings scoring (DraftKings adds yardage
+  bonuses) and FanDuel's half-PPR is not published at all. A `nflverse-stats` row carries
+  `fantasy_points_ppr` as its `fantasy_points`, says so in its stat line (`scoring`), and
+  is excluded from the baseline evaluation's outcome labels, which come from the standings
+  export alone; the two must never be asked to agree. The step skips for a site with no
+  nflverse column rather than reimplementing that site's scoring (§3.2).
+- **`route_share` is written only when the pinned file carries a `routes` column.** nflverse
+  does not publish routes run in the weekly file today. An absent key is absent, exactly as
+  a missing baseline is, and route-share claims stay `ungradable` rather than being graded
+  against an invented denominator.
+- **Result rows are appended by content, not by clock.** A rerun on an unchanged pin writes
+  nothing; a re-pin that changes a number appends a new observation; a changed fact that
+  collides with an existing row at the same observation instant is reported as a held row,
+  because one instant cannot hold two different facts.
+
 ## 2026-09-02 — Slate identity is derived, and a slate is an identity, not an observation
 
 - **The slate key is derived from what the export carries.** DK and FD salary exports have no

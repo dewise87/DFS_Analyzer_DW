@@ -17,6 +17,15 @@ from narrative_alpha.evaluation import (
     render_baseline_report,
 )
 from narrative_alpha.grading import GradeWeekReport, GradingConfigError, GradingError, grade_week
+from narrative_alpha.identity.pins import NflversePinError
+from narrative_alpha.ingest.nflverse_stats import (
+    SITE_SCORING_COLUMNS,
+    NflverseStatsError,
+    UnpinnedStatsError,
+    WorkloadStatsConfigError,
+    WorkloadStatsReport,
+    load_workload_stats,
+)
 from narrative_alpha.ingest.results import (
     ContestArchetype,
     ContestLoadReport,
@@ -58,6 +67,7 @@ BuildBaseline = Callable[..., BaselineEvaluationReport]
 RenderBaseline = Callable[[BaselineEvaluationReport], str]
 WriteReport = Callable[[Path, str], None]
 GradeClaims = Callable[..., GradeWeekReport]
+LoadWorkloadStats = Callable[..., WorkloadStatsReport]
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,7 @@ class ResultsDependencies:
     build_baseline_report: BuildBaseline = build_baseline_report
     render_baseline_report: RenderBaseline = render_baseline_report
     write_report: WriteReport = write_report_atomic
+    load_workload_stats: LoadWorkloadStats = load_workload_stats
     grade_claims: GradeClaims = grade_week
 
 
@@ -87,6 +98,8 @@ RESULTS_STEP_ERRORS: tuple[type[BaseException], ...] = (
     ValueError,
     GradingConfigError,
     GradingError,
+    NflversePinError,
+    WorkloadStatsConfigError,
     sqlite3.Error,
 )
 
@@ -243,6 +256,18 @@ def run_results(
         )
 
     recorder.run("results_labels", lambda: _labels(connection))
+    recorder.run(
+        "results_stats",
+        lambda: _stats(
+            dependencies,
+            connection,
+            config=config,
+            season=season,
+            week=week,
+            site=canonical_site,
+            observed_at=started_at,
+        ),
+    )
     recorder.run(
         "results_grade",
         lambda: _grade(
@@ -699,6 +724,81 @@ def _labels(
     connection: sqlite3.Connection,
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     return "succeeded", label_summary(connection), None
+
+
+def _stats(
+    dependencies: ResultsDependencies,
+    connection: sqlite3.Connection,
+    *,
+    config: OpsConfig,
+    season: int,
+    week: int,
+    site: str,
+    observed_at: datetime,
+) -> tuple[OpsStepStatus, dict[str, object], str | None]:
+    """Write this week's workload stat lines from the reviewed nflverse pin.
+
+    The step runs whether or not the standings ingest succeeded: nothing here reads a
+    contest export, and the usage arm of `results_grade` is waiting on these rows.
+    """
+
+    if site not in SITE_SCORING_COLUMNS:
+        return (
+            "skipped",
+            {"season": season, "week": week, "site": site},
+            f"nflverse publishes no fantasy-point column for {site}, so no workload stat "
+            "line can carry that site's scoring without reimplementing it here; "
+            f"nflverse-backed sites: {', '.join(sorted(SITE_SCORING_COLUMNS))}",
+        )
+    try:
+        report = dependencies.load_workload_stats(
+            connection,
+            season=season,
+            week=week,
+            site=site,
+            archive_dir=config.nflverse_archive,
+            observed_at=observed_at,
+        )
+    except UnpinnedStatsError as error:
+        return (
+            "skipped",
+            {"season": season, "week": week, "site": site},
+            f"{error}. Run `na-crosswalk nflverse-stats-refresh --season {season} "
+            f"--reviewed-at {observed_at.date().isoformat()}`, review the output, and paste "
+            "the entry into PINNED_STATS_RELEASES; until then every usage claim is "
+            "ungradable, by design",
+        )
+    except NflverseStatsError as error:
+        raise StepFailure(
+            f"workload stats are unavailable — {error}. To re-pin: run "
+            f"`na-crosswalk nflverse-stats-refresh --season {season} --reviewed-at "
+            f"{observed_at.date().isoformat()}`, review the output, and paste the entry into "
+            "PINNED_STATS_RELEASES",
+            {"season": season, "week": week, "site": site},
+        ) from error
+    connection.commit()
+    summary: dict[str, object] = {
+        "reviewed_at": report.reviewed_at.isoformat(),
+        "weekly_sha256": report.weekly_sha256,
+        "snap_counts_sha256": report.snap_counts_sha256,
+        "scoring_column": report.scoring_column,
+        "source_version": report.source_version,
+        "rows_seen": report.rows_seen,
+        "players_written": report.players_written,
+        "players_unchanged": report.players_unchanged,
+        "players_held": report.players_held,
+        "players_without_baseline": report.players_without_baseline,
+        "players_not_salaried": report.players_not_salaried,
+        "salaried_without_stats": report.salaried_without_stats,
+        "held": [item.model_dump(mode="json") for item in report.held[:20]],
+    }
+    if report.unresolved_ids:
+        raise StepFailure(
+            f"{len(report.unresolved_ids)} nflverse player(s) did not resolve to a canonical "
+            "player, so their stat lines were held: `na-crosswalk resolve`",
+            summary,
+        )
+    return "succeeded", summary, None
 
 
 def _grade(

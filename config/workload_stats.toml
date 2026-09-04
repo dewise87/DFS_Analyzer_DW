@@ -1,0 +1,10 @@
+# Deterministic workload stat lines from the pinned nflverse weekly files. The raw file
+# bytes are SHA-256 hashed into every row's source_version; change the version whenever the
+# meaning of a stored share or reference changes.
+config_version = "workload-stats-v1"
+
+# A share's reference is THIS PLAYER'S trailing mean over the `baseline_games` games of the
+# season immediately before the graded one (§5.9: never a league constant, never the game
+# itself). Fewer prior games means a mean over fewer; no prior game at all means the
+# `<stat_key>_baseline` key is absent and the usage rule is honestly ungradable.
+baseline_games = 4

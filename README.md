@@ -103,7 +103,8 @@ reached the store (proved by the file's own hash appearing on a row, not by a st
 reporting success), each ingested slate with its lock time, player count and unresolved
 count, the latest salary/projection/ownership observation, how many features exist at the
 latest decision instant, and the decision snapshot frozen against it. `--json` prints the
-same data. Its RESULTS LANE and RESULT LABELS sections show Tuesday's five steps and the
+same data. Its RESULTS LANE, WORKLOAD STATS PIN and RESULT LABELS sections show
+Tuesday's steps, the reviewed nflverse workload pin with its age, and the
 per-week/site/archetype label counts that gate the first ownership model. It answers "did this
 week run, and what do I need to do by hand" without any other command.
 
@@ -243,7 +244,8 @@ frame carries no usable origin, and it is refused rather than trusted.
 - **Tuesday after settlement** — keep each export's contest ID in its filename, then run
   `na-ops results --season 2026 --week N --site dk|fd <standings files...>`. The lane
   captures the exports, ingests actual ownership/results, verifies every frozen decision,
-  writes the baseline report, updates the three-week label gate, and grades eligible claims
+  writes the baseline report, updates the three-week label gate, writes each salaried
+  player's workload stat line from the reviewed nflverse pin, and grades eligible claims
   into the report-only source ledger. Inspect the weekly cells with
   `na-report sources --season 2026 --week N`; `na-ops status` shows the week's graded and
   ungradable counts.
@@ -253,7 +255,10 @@ frame carries no usable origin, and it is refused rather than trusted.
   `na-crosswalk nflverse-refresh --season 2026 --reviewed-at <today>` prints the hash, the
   player diff, and the entry to paste. Add `--allow-missing-prior` when the previous pin's
   bytes were never archived and upstream has overwritten them; the diff is then unavailable
-  and the roster file must be reviewed by hand.
+  and the roster file must be reviewed by hand. The workload files are pinned the same way:
+  `na-crosswalk nflverse-stats-refresh --season 2026 --reviewed-at <today>` prints both
+  hashes and the `PinnedStatsRelease` entry to paste. Until one is pasted, `results_stats`
+  skips with that reason and every usage claim stays ungradable, by design.
 
 Phase −1 rule: **every week the snapshot capture doesn't run destroys irreplaceable
 training data.** See Appendix D of the design doc for the full checklist.
@@ -430,6 +435,16 @@ uv run na-crosswalk nflverse-refresh --season 2026 --reviewed-at 2026-09-02
 uv run na-crosswalk --database data/db/narrative_alpha.sqlite3 seed \
   --season 2026 --as-of 2026-09-02
 ```
+
+The same dated-pin mechanism (`narrative_alpha.identity.pins`) carries the season's nflverse
+weekly player stats and snap counts. The Tuesday `results_stats` step reads them for the week,
+resolves each row through the crosswalk's nflverse ids, and writes one `results` row per
+salaried player-game whose stat line carries `snap_share`, `route_share`, `target_share`,
+`touch_share`, `played`, and a `<stat_key>_baseline` — that player's trailing mean over the
+previous `baseline_games` games of the season (`config/workload_stats.toml`, default 4),
+never including the game being graded. A player with no prior game has no baseline and the
+usage rule reports the claim ungradable rather than comparing a game with itself. A row whose
+player does not resolve is held and queued, never guessed.
 
 `seed` requires an explicit `--as-of` cutoff, selects only a reviewed pin available by then,
 verifies or fetches its content-addressed archive bytes, and idempotently seeds canonical players

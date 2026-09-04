@@ -146,6 +146,18 @@ Each row references its raw response hash and carries §3.2 provenance for point
 
 Stores player fantasy outcomes and an optional raw stat-line object for a game and DFS site.  
 Rows retain the result-file hash and §3.2 source fields even though they are post-lock labels.
+Two sources write here. `<site>-contest-standings` carries the site's own settled points plus the
+contest and roster slot. `nflverse-stats` carries the workload facts grading reads: `snap_share`,
+`route_share`, `target_share` and `touch_share` as fractions, `played` as a boolean, and for each
+share a `<stat_key>_baseline` — the player's trailing mean over the previous N games of the season
+(N versioned in `config/workload_stats.toml`), computed only from games *before* this one. A share
+whose source column is absent, and a baseline with no prior game, are absent keys rather than
+invented numbers, which the usage rule reports as `ungradable`. `source_version` on these rows names
+the reviewed pin date, both file hashes, and the baseline config version and hash;
+`source_file_sha256` is the hash of the two reviewed file hashes, since the row is built from both.
+Rows are appended by content: a rerun on an unchanged pin writes nothing, a re-pin that changes a
+number appends a new observation, and a changed fact colliding at one observation instant is
+reported, never silently dropped.
 
 ## `claim_grades`
 

@@ -17,6 +17,7 @@ from narrative_alpha.identity.nflverse import (
     refresh_roster_release,
     seed_nflverse_roster,
 )
+from narrative_alpha.ingest.nflverse_stats import refresh_stats_release
 from narrative_alpha.store import apply_migrations, connect_database
 
 DEFAULT_DATABASE_PATH = Path("data/db/narrative_alpha.sqlite3")
@@ -47,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
             "moved: report the current hash and paste entry without a player diff"
         ),
     )
+    stats_refresh = commands.add_parser(
+        "nflverse-stats-refresh",
+        help="hash the rolling nflverse workload files without changing the pin table",
+    )
+    stats_refresh.add_argument("--season", type=int, required=True)
+    stats_refresh.add_argument("--reviewed-at", type=date.fromisoformat, required=True)
+    stats_refresh.add_argument("--archive", type=Path, default=DEFAULT_NFLVERSE_ARCHIVE)
     seed = commands.add_parser(
         "seed",
         help="seed canonical players from the newest reviewed nflverse pin available as of a date",
@@ -73,6 +81,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allow_missing_prior=args.allow_missing_prior,
             )
             print(refresh_report.render(), end="")
+            return 0
+        if args.command == "nflverse-stats-refresh":
+            stats_report = refresh_stats_release(
+                args.season,
+                args.archive,
+                reviewed_at=args.reviewed_at,
+            )
+            print(stats_report.render(), end="")
             return 0
         if args.command == "seed":
             release = pinned_roster_release(args.season, args.as_of)

@@ -34,6 +34,7 @@ OpsResultsStep = Literal[
     "results_replay",
     "results_report",
     "results_labels",
+    "results_stats",
     "results_grade",
 ]
 OpsStep = OpsBatchStep | OpsSlateStep | OpsResultsStep

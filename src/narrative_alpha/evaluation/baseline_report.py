@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from narrative_alpha.ingest.nflverse_stats import WORKLOAD_STATS_SOURCE
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.quant.distributions import PlayerOutcomeDistribution
 from narrative_alpha.quant.scoring import crps, log_score, pit_histogram
@@ -850,6 +851,10 @@ def _load_outcomes(
              AND s.game_id = r.game_id
              AND s.version_rank = 1
             WHERE r.site = :site
+              -- Workload stat lines carry nflverse's own scoring, not the site's; the
+              -- site's label is the standings export. They are facts for grading, never
+              -- a second opinion on what a lineup scored.
+              AND r.source <> :workload_source
               AND rtrim(r.observed_at, 'Z') <= rtrim(:evaluation_as_of, 'Z')
               AND rtrim(r.valid_from, 'Z') <= rtrim(:evaluation_as_of, 'Z')
               AND (
@@ -879,6 +884,7 @@ def _load_outcomes(
         {
             "slate_id": slate_id,
             "site": site,
+            "workload_source": WORKLOAD_STATS_SOURCE,
             "evaluation_as_of": utc_timestamp(evaluation_as_of),
             **salary_parameters,
         },

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -18,6 +18,8 @@ from narrative_alpha.fast.rules import (
     load_fast_lane_rules,
 )
 from narrative_alpha.identity.crosswalk import PlayerCrosswalk
+from narrative_alpha.identity.pins import NflversePinError
+from narrative_alpha.ingest.nflverse_stats import PinnedStatsRelease, pinned_stats_release
 from narrative_alpha.ingest.slates import SlateSummary, list_slates
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.narrative import (
@@ -186,6 +188,17 @@ class NarrativeStatus:
 
 
 @dataclass(frozen=True)
+class WorkloadStatsPinStatus:
+    """The reviewed nflverse workload pin the results lane would read today."""
+
+    season: int
+    reviewed_at: date
+    age_days: int
+    weekly_sha256: str
+    snap_counts_sha256: str
+
+
+@dataclass(frozen=True)
 class FastLaneRulesStatus:
     """The signed rule artifact operators must refresh before it expires."""
 
@@ -223,6 +236,7 @@ class OpsStatus:
     slate: SlateLaneStatus | None
     ownership_scenarios: tuple[OwnershipScenarioStatus, ...]
     labels: LabelsStatus
+    workload_stats_pin: WorkloadStatsPinStatus | None
     grading: ClaimGradingStatus | None
     narrative: NarrativeStatus
     fast_lane_rules: FastLaneRulesStatus | None
@@ -254,6 +268,12 @@ class OpsStatus:
             actions.append(
                 f"{self.inflight_attempts} extraction attempt(s) are in flight: rerun the "
                 "batch to resume, or `na-extract abandon` a stuck one"
+            )
+        if self.workload_stats_pin is None:
+            actions.append(
+                "review and pin the nflverse workload files — no reviewed pin exists, so "
+                "`results_stats` writes nothing and every usage claim stays ungradable: "
+                "`na-crosswalk nflverse-stats-refresh`"
             )
         if self.fast_lane_rules is None:
             actions.append(
@@ -405,6 +425,7 @@ def collect_ops_status(
         slate=slate,
         ownership_scenarios=_ownership_scenario_status(connection, slate=slate),
         labels=_label_status(connection),
+        workload_stats_pin=_workload_stats_pin(config.season, as_of),
         grading=_claim_grading_status(connection, slate=slate),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
@@ -412,6 +433,22 @@ def collect_ops_status(
         monthly_budget_usd=_usd(budget),
         budget_remaining_usd=_usd(max(budget - spent, 0)),
         warnings=tuple(warnings),
+    )
+
+
+def _workload_stats_pin(season: int, as_of: datetime) -> WorkloadStatsPinStatus | None:
+    """The newest reviewed workload pin for the configured season, or nothing yet."""
+
+    try:
+        release: PinnedStatsRelease = pinned_stats_release(season, as_of)
+    except NflversePinError:
+        return None
+    return WorkloadStatsPinStatus(
+        season=release.season,
+        reviewed_at=release.reviewed_at,
+        age_days=(as_of.date() - release.reviewed_at).days,
+        weekly_sha256=release.weekly_sha256,
+        snap_counts_sha256=release.snaps_sha256,
     )
 
 
@@ -1005,6 +1042,17 @@ def render_status(status: OpsStatus) -> str:
             lines.append(f"  {'':<18} last failure {_stamp(step.last_failure_at, status.as_of)}")
             lines.append(f"  {'':<18}   {step.last_failure_text}")
 
+    lines.extend(("", "WORKLOAD STATS PIN"))
+    pin = status.workload_stats_pin
+    if pin is None:
+        lines.append(
+            "  none reviewed — `na-crosswalk nflverse-stats-refresh`, then paste the entry"
+        )
+    else:
+        lines.append(f"  {pin.season} reviewed {pin.reviewed_at.isoformat()} ({pin.age_days}d old)")
+        lines.append(f"  {'':<4} weekly stats  {pin.weekly_sha256}")
+        lines.append(f"  {'':<4} snap counts   {pin.snap_counts_sha256}")
+
     lines.extend(("", "CLAIM GRADING"))
     if status.grading is None:
         lines.append("  no grading week is available")
@@ -1304,6 +1352,15 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                 "captured": dict(status.snapshot_week.captured),
             },
             "problems": list(status.snapshot_problems),
+        },
+        "workload_stats_pin": None
+        if status.workload_stats_pin is None
+        else {
+            "season": status.workload_stats_pin.season,
+            "reviewed_at": status.workload_stats_pin.reviewed_at.isoformat(),
+            "age_days": status.workload_stats_pin.age_days,
+            "weekly_sha256": status.workload_stats_pin.weekly_sha256,
+            "snap_counts_sha256": status.workload_stats_pin.snap_counts_sha256,
         },
         "warnings": list(status.warnings),
         "manual_actions": list(status.manual_actions),

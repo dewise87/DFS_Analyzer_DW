@@ -1817,6 +1817,7 @@ class OpsRunRow(StoreRow):
         "results_replay",
         "results_report",
         "results_labels",
+        "results_stats",
         "results_grade",
     ]
     status: Literal["succeeded", "failed", "skipped"]
