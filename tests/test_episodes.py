@@ -9,6 +9,7 @@ import pytest
 
 from narrative_alpha.episodes_cli import main as episodes_main
 from narrative_alpha.narrative import (
+    PROMPT_VERSION_ID,
     EpisodeSnapshotConflictError,
     PreparedExtraction,
     ProviderBatchSubmission,
@@ -514,7 +515,7 @@ def test_build_reports_dropped_team_references_and_pins_the_prompt_version(
             connection,
             as_of=as_of,
             built_at=as_of + timedelta(hours=1),
-            prompt_version_id="stage1-extraction-v2",
+            prompt_version_id="stage1-unrelated-fixture",
         )
         stored = connection.execute(
             "SELECT prompt_version_id, subject_type FROM narrative_episodes"
@@ -523,7 +524,7 @@ def test_build_reports_dropped_team_references_and_pins_the_prompt_version(
     # "LA" is ambiguous and "no" is a stray word, never the Saints; both are reported.
     assert report.dropped_team_references == ("LA", "no")
     assert report.unclustered_claims == 1
-    assert [tuple(row) for row in stored] == [("stage1-extraction-v1", "unclustered")]
+    assert [tuple(row) for row in stored] == [(PROMPT_VERSION_ID, "unclustered")]
     # Claims extracted under another prompt version are a different snapshot, not a conflict.
     assert other_prompt.claims_considered == 0
     assert other_prompt.episode_count == 0
