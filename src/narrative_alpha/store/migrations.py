@@ -134,6 +134,12 @@ def apply_migrations(
             continue
 
         applied_at = datetime.now(UTC)
+        rebuild = migration.sql.startswith("-- rebuild_with_foreign_keys_off\n")
+        foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        if rebuild:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            if int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 0:
+                raise MigrationError("table rebuild requires foreign keys off before BEGIN")
         try:
             connection.execute("BEGIN IMMEDIATE")
             for statement in _iter_sql_statements(migration.sql):
@@ -143,6 +149,8 @@ def apply_migrations(
                         f"migration {migration.name} contains transaction control {keyword}"
                     )
                 connection.execute(statement)
+            if rebuild and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise MigrationError("table rebuild violated foreign-key integrity")
             connection.execute(
                 """
                 INSERT INTO applied_migrations(version, name, sha256, applied_at)
@@ -162,6 +170,9 @@ def apply_migrations(
             raise MigrationError(f"migration {migration.name} failed: {error}") from error
         else:
             connection.commit()
+        finally:
+            if rebuild:
+                connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
 
         applied.append(
             AppliedMigration(

@@ -138,9 +138,10 @@ def test_migration_runner_is_idempotent(tmp_path: Path) -> None:
         22,
         23,
         24,
+        25,
     ]
     assert second == ()
-    assert len(records) == 24
+    assert len(records) == 25
     assert records[0][0] == 1
     assert records[0][1] == "0001_phase_0_1_schema.sql"
     assert len(records[0][2]) == 64
@@ -292,6 +293,7 @@ def test_source_versioning_migration_preserves_existing_narrative_rows(
             22,
             23,
             24,
+            25,
         ]
     assert counts == {
         "source_keys": 1,
@@ -362,6 +364,7 @@ def test_stage1_eval_migration_backfills_existing_recovery_parent_timestamps(
             22,
             23,
             24,
+            25,
         ]
     assert parent["observed_at"] == timestamp
     assert parent["ingested_at"] == timestamp
@@ -1363,3 +1366,27 @@ def _insert_values(
         f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
         tuple(values.values()),
     )
+
+
+def test_rebuild_migration_rolls_back_bad_foreign_keys_and_restores_enforcement(
+    tmp_path: Path,
+) -> None:
+    from narrative_alpha.store.migrations import MigrationError
+
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    (directory / "0001_fixture.sql").write_text(
+        "CREATE TABLE parent(id INTEGER PRIMARY KEY);\n"
+        "CREATE TABLE child(parent_id INTEGER REFERENCES parent(id));\n"
+        "INSERT INTO parent VALUES (1);\nINSERT INTO child VALUES (1);\n"
+    )
+    with connect_database(tmp_path / "store.sqlite3") as connection:
+        apply_migrations(connection, directory)
+        (directory / "0002_bad_rebuild.sql").write_text(
+            "-- rebuild_with_foreign_keys_off\nDELETE FROM parent;\n"
+        )
+        with pytest.raises(MigrationError, match="foreign-key integrity"):
+            apply_migrations(connection, directory)
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("SELECT id FROM parent").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM applied_migrations").fetchone()[0] == 1

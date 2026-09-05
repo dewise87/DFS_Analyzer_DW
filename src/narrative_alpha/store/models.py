@@ -940,6 +940,8 @@ class SourceItemExtractionRow(PointInTimeRow):
     latency_ms: int | None = Field(default=None, ge=0)
     error_code: str | None
     error_message: str | None
+    error_detail_json: dict[str, object] | None = None
+    refusal_bucket: str | None = None
 
     @field_validator(
         "provider_request_id",
@@ -955,7 +957,7 @@ class SourceItemExtractionRow(PointInTimeRow):
             raise ValueError("provider trace identifiers and error codes must not be blank")
         return value
 
-    @field_validator("output_json", mode="before")
+    @field_validator("output_json", "error_detail_json", mode="before")
     @classmethod
     def decode_output_json(cls, value: object) -> object:
         return _decode_json(value)
@@ -1007,6 +1009,24 @@ class SourceItemExtractionRow(PointInTimeRow):
                 ).encode("utf-8")
                 if hashlib.sha256(canonical).hexdigest() != self.output_sha256:
                     raise ValueError("output_sha256 does not match canonical output_json")
+        elif self.status == "failed":
+            if self.error_code is None:
+                raise ValueError("failed extraction requires an error")
+            if self.output_sha256 is None:
+                if self.output_json is not None or self.output_redacted_at is not None:
+                    raise ValueError("failed output requires its hash")
+            elif (self.output_json is None) == (self.output_redacted_at is None):
+                raise ValueError("failed output requires JSON unless compliance-redacted")
+            if self.output_json is not None:
+                canonical = json.dumps(
+                    self.output_json, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                if hashlib.sha256(canonical).hexdigest() != self.output_sha256:
+                    raise ValueError("output_sha256 does not match canonical output_json")
+            if self.output_redacted_at is not None and (
+                self.error_message is not None or self.error_detail_json is not None
+            ):
+                raise ValueError("redacted failed output cannot retain diagnostic text")
         elif self.output_json is not None or self.output_sha256 is not None:
             raise ValueError("non-succeeded extraction cannot carry model output")
         elif self.output_redacted_at is not None:

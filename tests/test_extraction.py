@@ -5468,3 +5468,103 @@ def test_paraphrased_evidence_is_still_rejected_after_offset_repair(tmp_path: Pa
     assert not report.ok
     assert [error.code for error in report.errors] == ["evidence_validation_error"]
     assert claims == 0
+
+
+@pytest.mark.parametrize("failure", ["quote", "name_length", "empty_evidence", "empty_players"])
+def test_failed_output_retained_diagnosed_and_tombstone_redacted(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    title = "WAS update"
+    body = "Jordan Reed remains the starter for WAS."
+    with connect_database(tmp_path / "store.sqlite3") as connection:
+        apply_migrations(connection)
+        item_id = _seed_source_item(connection, title=title, body=body)
+        payload = _claim_payload(item_id, normalize_item_text(title, body), name="Jordan Reed")
+        if failure == "quote":
+            _first_evidence(payload)["verbatim_extract"] = body.replace("starter", "backup")
+        elif failure == "name_length":
+            _first_claim(payload)["player_refs"] = [{"name_raw": "X" * 65}]
+        elif failure == "empty_evidence":
+            _first_evidence(payload)["verbatim_extract"] = ""
+        else:
+            _first_claim(payload)["player_refs"] = []
+        report = run_extraction_batch(
+            connection,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            provider=FakeProvider(payload),
+            pricing=load_batch_pricing(PRICING_PATH),
+            run_at=RUN_TIME,
+        )
+        before = dict(connection.execute("SELECT * FROM source_item_extractions").fetchone())
+        attempt = SourceItemExtractionRow.from_db(before)
+        assert attempt.status == "failed"
+        assert attempt.output_json == payload
+        assert (
+            before["output_sha256"]
+            == hashlib.sha256(before["output_json"].encode("utf-8")).hexdigest()
+        )
+        assert attempt.error_detail_json is not None
+        assert attempt.error_message == report.errors[0].message
+        if failure == "quote":
+            assert attempt.error_code == "evidence_validation_error"
+            detail = attempt.error_detail_json
+            assert detail["claim_index"] == detail["evidence_ref_index"] == 0
+            assert "backup" in str(detail["verbatim_extract"])
+            assert "starter" in str(detail["closest_substring"])
+            assert 0 < float(str(detail["similarity"])) < 1
+        else:
+            assert attempt.error_code == "schema_violation"
+            fields = attempt.error_detail_json["fields"]
+            assert isinstance(fields, list)
+            assert fields[0]["value_length"] == (65 if failure == "name_length" else 0)
+            assert fields[0]["field_path"].startswith("claims.0.")
+        for assignment in (
+            "output_json = '{}'",
+            "output_sha256 = '" + "a" * 64 + "'",
+            "error_detail_json = '{}'",
+            "refusal_bucket = 'changed'",
+            "status = 'succeeded'",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(f"UPDATE source_item_extractions SET {assignment}")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM source_item_extractions")
+        assert connection.execute("SELECT count(*) FROM claims").fetchone()[0] == 0
+        tombstone_removed_item(connection, item_id, reported_at=RUN_TIME + timedelta(minutes=1))
+        after = SourceItemExtractionRow.from_db(
+            connection.execute("SELECT * FROM source_item_extractions").fetchone()
+        )
+        assert after.output_json is after.error_message is after.error_detail_json is None
+        assert after.output_redacted_at is not None
+        assert after.output_sha256 == attempt.output_sha256
+        assert after.refusal_bucket == attempt.refusal_bucket
+        assert after.cost_nanos_usd == attempt.cost_nanos_usd
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE source_item_extractions SET output_json = ?, output_redacted_at = NULL",
+                (before["output_json"],),
+            )
+
+
+def test_failed_malformed_output_is_preserved_losslessly() -> None:
+    from narrative_alpha.narrative.extraction import _failed_output_json
+
+    result = ProviderResult(
+        custom_id="fixture",
+        provider_request_id=None,
+        batch_submission_request_id=None,
+        provider_batch_id=None,
+        provider_message_id=None,
+        actual_model_id=DEFAULT_MODEL_ID,
+        output_json='{"claims": [',
+        content_types=("text",),
+        stop_reason="max_tokens",
+        input_tokens=10,
+        output_tokens=20,
+        latency_ms=1,
+    )
+    stored = _failed_output_json(result)
+    assert stored is not None
+    assert json.loads(stored) == {"raw_output": result.output_json}

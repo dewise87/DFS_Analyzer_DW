@@ -2,6 +2,20 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Refusal output and diagnostics are retained until tombstoning
+
+- Failed provider responses now retain canonical output JSON and its hash; malformed/non-object
+  text is wrapped losslessly. The succeeded state rules are unchanged. Content-bearing error
+  messages and structured diagnostics are redacted with the source, while code, bucket, hashes,
+  tokens, cost, and lineage remain immutable. Similarity is diagnostic only.
+- Evidence diagnostics use provider claim/ref order, before canonical sorting. Schema diagnostics
+  name the field path and offending value length. Empty claims already satisfy the strict envelope;
+  no schema or quote acceptance change is justified before examining the diagnostic cohort.
+- The historical 227 failures represent 144 distinct source items (44 later succeeded). The scratch
+  diagnostic rerun selects those 144 once, under a new whitespace-only prompt artifact, and retains
+  the mapping back to all 227 historical attempts. Historical outputs cannot be reconstructed from
+  newly sampled responses; comparisons must identify their denominator.
+
 ## 2026-09-05 — Batch lane: episodes gate on the store, refusals are counted by code
 
 - **The episodes step asks the store whether Stage 1 has ever succeeded, not the run

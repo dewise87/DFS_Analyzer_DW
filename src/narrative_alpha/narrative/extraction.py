@@ -37,6 +37,11 @@ from narrative_alpha.narrative.collectors import (
     normalize_item_text,
     require_current_policy,
 )
+from narrative_alpha.narrative.extraction_diagnostics import (
+    diagnostic_message,
+    evidence_error_detail,
+    schema_error_detail,
+)
 from narrative_alpha.narrative.extraction_models import (
     SCHEMA_VERSION,
     ExtractedClaim,
@@ -457,6 +462,10 @@ _NFL_TEAM_REFERENCES = frozenset(
 class ExtractionError(RuntimeError):
     """Base error for a visible, fail-closed extraction refusal."""
 
+    def __init__(self, message: str, *, detail: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
+
 
 class ExtractionInputError(ExtractionError):
     """Raised when source content is missing, corrupt, or outside the requested window."""
@@ -654,10 +663,12 @@ def default_prompt_version() -> PromptVersionRow:
     )
 
 
-def ensure_prompt_version(connection: sqlite3.Connection) -> PromptVersionRow:
+def ensure_prompt_version(
+    connection: sqlite3.Connection, prompt_version: PromptVersionRow | None = None
+) -> PromptVersionRow:
     """Insert the prompt once and reject reuse of its ID for changed content."""
 
-    expected = default_prompt_version()
+    expected = prompt_version or default_prompt_version()
     row = connection.execute(
         "SELECT * FROM prompt_versions WHERE prompt_version_id = ?",
         (expected.prompt_version_id,),
@@ -690,6 +701,8 @@ def plan_extraction(
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     max_items: int | None = None,
     source_item_id: int | None = None,
+    source_item_ids: tuple[int, ...] | None = None,
+    prompt_version: PromptVersionRow | None = None,
 ) -> ExtractionPlan:
     """Build exact requests without writing data or constructing an API client."""
 
@@ -715,8 +728,17 @@ def plan_extraction(
         raise ExtractionInputError("max_output_tokens must be positive")
     if source_item_id is not None and source_item_id < 1:
         raise ExtractionInputError("source_item_id must be positive")
+    if source_item_ids is not None and (
+        source_item_id is not None
+        or not source_item_ids
+        or any(isinstance(item_id, bool) or item_id < 1 for item_id in source_item_ids)
+        or len(set(source_item_ids)) != len(source_item_ids)
+    ):
+        raise ExtractionInputError(
+            "source_item_ids must be unique positive IDs, without source_item_id"
+        )
     policy_at = ensure_utc(planned_at or datetime.now(UTC))
-    prompt = default_prompt_version()
+    prompt = prompt_version or default_prompt_version()
     # Migration 0007 validates every legacy timestamp and enforces fixed-width UTC-Z on new
     # rows. That invariant makes lexical bounds exact and lets SQLite use the Stage 1 window
     # index instead of materializing the entire source-item table in Python.
@@ -724,6 +746,9 @@ def plan_extraction(
     parameters: tuple[object, ...] = (utc_timestamp(start), utc_timestamp(end))
     if source_item_id is not None:
         parameters = (*parameters, source_item_id)
+    if source_item_ids is not None:
+        item_filter = "AND source_item_id IN (SELECT value FROM json_each(?)) "
+        parameters = (*parameters, json.dumps(source_item_ids))
     rows = tuple(
         SourceItemRow.from_db(row)
         for row in connection.execute(
@@ -1006,6 +1031,8 @@ def run_extraction_batch(
     clock: Callable[[], datetime] | None = None,
     max_items: int | None = None,
     source_item_id: int | None = None,
+    source_item_ids: tuple[int, ...] | None = None,
+    prompt_version: PromptVersionRow | None = None,
     run_tag: Literal["batch", "fast"] = "batch",
 ) -> ExtractionReport:
     """Extract eligible items with durable reservations and atomic per-item results."""
@@ -1037,6 +1064,8 @@ def run_extraction_batch(
         max_output_tokens=max_output_tokens,
         max_items=max_items,
         source_item_id=source_item_id,
+        source_item_ids=source_item_ids,
+        prompt_version=prompt_version,
     )
     if plan.ready:
         _preflight_submission_receipt_storage(connection)
@@ -1062,7 +1091,7 @@ def run_extraction_batch(
             deferred_items=plan.deferred_items,
         )
 
-    prompt = ensure_prompt_version(connection)
+    prompt = ensure_prompt_version(connection, prompt_version)
     run_id = f"stage1{'-fast' if run_tag == 'fast' else ''}-{uuid4().hex}"
     run = ModelRunRow(
         run_id=run_id,
@@ -3257,6 +3286,7 @@ def _process_submitted_batch(
                 recorded_at=terminal_at,
                 code=code,
                 message=message,
+                detail=error.detail if isinstance(error, ExtractionError) else None,
                 result=result,
                 pricing=pricing,
             )
@@ -3555,24 +3585,23 @@ def _validate_provider_envelope(
     try:
         envelope = ExtractionEnvelope.model_validate_json(result.output_json, strict=True)
     except ValidationError as error:
-        error_types = sorted({str(detail["type"]) for detail in error.errors()})
-        raise ExtractionSchemaError(
-            f"strict Stage 1 schema violation ({', '.join(error_types)})"
-        ) from error
+        detail = schema_error_detail(error)
+        raise ExtractionSchemaError(diagnostic_message(detail), detail=detail) from error
     if envelope.prompt_injection_detected:
         return envelope
     # Model-counted character offsets are unreliable (the first live run got 1 of 36 right
     # while 33 extracts were verbatim in the source). The verbatim text is the evidence; the
     # offsets are located here, deterministically, and stored as computed.
     repaired_claims = tuple(_repair_evidence_offsets(item, claim) for claim in envelope.claims)
+    # Diagnose in provider order, before canonical sorting changes claim/ref indexes.
+    for claim_index, claim in enumerate(repaired_claims):
+        _validate_claim_source(item, claim, claim_index=claim_index)
     canonical_claims = tuple(
         sorted((_canonical_claim(claim) for claim in repaired_claims), key=_json)
     )
     claim_payloads = tuple(_json(claim) for claim in canonical_claims)
     if len(claim_payloads) != len(set(claim_payloads)):
         raise ExtractionSchemaError("provider emitted duplicate claims")
-    for claim in canonical_claims:
-        _validate_claim_source(item, claim)
     return envelope.model_copy(update={"claims": canonical_claims})
 
 
@@ -3670,50 +3699,80 @@ def _canonical_claim(claim: ExtractedClaim) -> ExtractedClaim:
     )
 
 
-def _validate_claim_source(item: PreparedExtraction, claim: ExtractedClaim) -> None:
+def _validate_claim_source(
+    item: PreparedExtraction, claim: ExtractedClaim, *, claim_index: int = 0
+) -> None:
+    def refuse(extract: str, field_path: str, reason: str, ref_index: int | None = None) -> None:
+        detail = evidence_error_detail(
+            item.source_text,
+            extract,
+            claim_index=claim_index,
+            field_path=field_path,
+            evidence_ref_index=ref_index,
+            reason=reason,
+        )
+        raise EvidenceValidationError(diagnostic_message(detail), detail=detail)
+
     folded_source = _fold_verbatim(item.source_text)
     if (
         claim.disconfirming_context is not None
         and _fold_verbatim(claim.disconfirming_context) not in folded_source
     ):
-        raise EvidenceValidationError(
-            "disconfirming context is not verbatim in the canonical source item"
+        refuse(
+            claim.disconfirming_context,
+            "disconfirming_context",
+            "disconfirming context is not verbatim in the canonical source item",
         )
-    for player in claim.player_refs:
+    for player_index, player in enumerate(claim.player_refs):
         if _fold_verbatim(player.name_raw) not in folded_source:
-            raise EvidenceValidationError(
-                f"player name {player.name_raw!r} is not verbatim in source item "
-                f"{item.source_item_id}"
+            refuse(
+                player.name_raw,
+                f"player_refs.{player_index}.name_raw",
+                "player name is not verbatim in the canonical source item",
             )
-    for team in claim.team_refs:
+    for team_index, team in enumerate(claim.team_refs):
         if team.casefold() not in _NFL_TEAM_REFERENCES:
-            raise EvidenceValidationError(
-                f"team reference {team!r} is outside the reviewed NFL team lexicon"
+            refuse(
+                team,
+                f"team_refs.{team_index}",
+                "team is outside the reviewed NFL team lexicon",
             )
         if _fold_verbatim(team) not in folded_source:
-            raise EvidenceValidationError(
-                f"team reference {team!r} is not verbatim in source item {item.source_item_id}"
+            refuse(
+                team,
+                f"team_refs.{team_index}",
+                "team is not verbatim in the canonical source item",
             )
     seen_refs: set[tuple[int, int, int, str]] = set()
-    for ref in claim.evidence_refs:
+    for ref_index, ref in enumerate(claim.evidence_refs):
+        path = f"evidence_refs.{ref_index}.verbatim_extract"
         if ref.source_item_id != item.source_item_id:
-            raise EvidenceValidationError(
-                f"claim for source item {item.source_item_id} cited item {ref.source_item_id}"
+            refuse(
+                ref.verbatim_extract,
+                path,
+                f"claim for source item {item.source_item_id} cited item {ref.source_item_id}",
+                ref_index,
             )
         key = (ref.source_item_id, ref.extract_start, ref.extract_end, ref.verbatim_extract)
         if key in seen_refs:
-            raise EvidenceValidationError("claim contains a duplicate evidence reference")
+            refuse(ref.verbatim_extract, path, "duplicate evidence reference", ref_index)
         seen_refs.add(key)
         if ref.extract_end > len(item.source_text):
-            raise EvidenceValidationError(
+            refuse(
+                ref.verbatim_extract,
+                path,
                 f"evidence span {ref.extract_start}:{ref.extract_end} is outside source item "
-                f"{item.source_item_id}"
+                f"{item.source_item_id}",
+                ref_index,
             )
         actual = item.source_text[ref.extract_start : ref.extract_end]
         if actual != ref.verbatim_extract:
-            raise EvidenceValidationError(
+            refuse(
+                ref.verbatim_extract,
+                path,
                 f"evidence extract does not match source item {item.source_item_id} at "
-                f"{ref.extract_start}:{ref.extract_end}"
+                f"{ref.extract_start}:{ref.extract_end}",
+                ref_index,
             )
 
 
@@ -4159,13 +4218,17 @@ def _store_failed_attempt(
     message: str,
     result: ProviderResult | None,
     pricing: BatchPricing,
+    detail: dict[str, object] | None = None,
 ) -> None:
     trace = _trace_values(result)
     cost_nanos = None if result is None else _provider_cost(result, pricing, required=False)
+    output_text = _failed_output_json(result)
     assignments: dict[str, object] = {
         "status": "failed",
-        "output_json": None,
-        "output_sha256": None,
+        "output_json": output_text,
+        "output_sha256": (
+            None if output_text is None else hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+        ),
         "output_redacted_at": None,
         "input_tokens": None if result is None else result.input_tokens,
         "output_tokens": None if result is None else result.output_tokens,
@@ -4173,6 +4236,8 @@ def _store_failed_attempt(
         "latency_ms": None if result is None else result.latency_ms,
         "error_code": code,
         "error_message": message[:2000],
+        "error_detail_json": None if detail is None else json.dumps(detail, ensure_ascii=False),
+        "refusal_bucket": code if detail is None else detail["bucket"],
         "ingested_at": utc_timestamp(recorded_at),
         "valid_from": utc_timestamp(recorded_at),
     }
@@ -4195,6 +4260,29 @@ def _store_failed_attempt(
     if cursor.rowcount != 1:
         raise ExtractionInputError(
             f"extraction reservation {extraction_id!r} is no longer submitted"
+        )
+
+
+def _failed_output_json(result: ProviderResult | None) -> str | None:
+    """Canonical JSON for rejected objects; losslessly wrap non-object or malformed text."""
+    if result is None or result.output_json is None:
+        return None
+    try:
+        payload = json.loads(result.output_json)
+    except (ValueError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {"raw_output": result.output_json}
+    try:
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except ValueError:
+        return json.dumps(
+            {"raw_output": result.output_json},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
 
@@ -4289,10 +4377,10 @@ def _output_error_code(error: Exception) -> str:
 
 
 def _safe_output_error_message(error: Exception) -> str:
-    """Describe a rejected output without persisting provider/source free text."""
+    """Content-bearing diagnostics are stored only on the redactable attempt."""
 
     if isinstance(error, EvidenceValidationError):
-        return "provider evidence or entity text did not match the canonical source item"
+        return str(error)
     if isinstance(error, ValidationError):
         details = error.errors(include_input=False, include_url=False)
         return f"strict Stage 1 schema violation: {json.dumps(details, sort_keys=True)}"
