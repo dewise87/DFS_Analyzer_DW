@@ -152,6 +152,15 @@ PINNED_ROSTER_RELEASES: Mapping[int, tuple[PinnedRosterRelease, ...]] = MappingP
                 sha256=("44087b928376ef297c702ffed2c6b930185b4556105011baf70673b9a3073a2d"),
                 reviewed_at=date(2026, 9, 2),
             ),
+            # Post-cutdown roster: mostly CUT -> DEV (practice-squad signings), reviewed by
+            # Daniel from the refresh diff on 2026-09-05. Upstream had briefly dropped the
+            # `week` column on 2026-09-04; this file carries it again.
+            PinnedRosterRelease(
+                season=2026,
+                url=ROLLING_ROSTER_URL.format(season=2026),
+                sha256=("01ed4adec274529038c4ec8c88ca1d95239b26addac160bdf63410f196f7e5a1"),
+                reviewed_at=date(2026, 9, 5),
+            ),
         )
     }
 )
