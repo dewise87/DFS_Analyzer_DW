@@ -3243,6 +3243,81 @@ capture hold fires only above 10% unresolved, so the seven names above still nee
 `na-crosswalk resolve` before their facts exist. Migrations 0021/0022 apply to production on
 the next command. Suite stays at 850; the CLI checks live inside the existing capture tests.
 
+### Slice 47 — Slate input readiness (the review's third milestone)
+
+**Goal:** before any build, the operator can see whether the slate's inputs are actually
+there: how many salaried, active players have a projection from each source, an ownership
+baseline, odds for their game, and weather for their stadium, how old each input is, and
+whether the build will refuse. Today `na-ops status` proves per kind that a captured file's
+hash reached the store, and candidate selection silently drops any salaried player without
+a projection row (the JOIN in `select_candidate_scenario`); a slate with 40% projection
+coverage builds as happily as one with 100%.
+
+**Design doc:** §1.6 (solo operator, ≤2 h/week: the screen must answer "can I build?" in one
+read), §3.2 (as-of reads), §6.8 (artifacts per slate), [REPOSITORY_REVIEW.md](REPOSITORY_REVIEW.md)
+milestone 3 ("a healthy collector or doctor screen alone is not slate readiness").
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse; the reads and the
+render conventions exist. No vendor file is needed — every fixture is synthetic.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; gates are
+> `uv run --frozen ruff check .`, `uv run --frozen mypy src/narrative_alpha`,
+> `uv run --frozen pytest -q`). Read `src/narrative_alpha/ops/status.py` (`SlateStatus`,
+> `_slate_row`, `_capture_ingest_status`, `render_status`, `status_payload`),
+> `candidate_selection.py` (`select_candidate_scenario` — note which salaried players never
+> reach a candidate), `build.py` (where a build refuses today), `ingest/availability.py`,
+> `ops/dashboard.py` (`_status_page`), `docs/DECISIONS.md`, and the repository review's
+> milestone 3. Keep the as-of discipline: every count is computed at an explicit instant
+> (default now), using the same observed/ingested cutoffs the build uses.
+>
+> 1. **A readiness read.** `ops/readiness.py` with `collect_slate_readiness(connection,
+>    slate_id, as_of) -> SlateReadiness`: for the slate's latest salary rows (excluding
+>    players whose salary-feed status is inactive under `inactive_salary_status`, and
+>    excluding players an official availability decision rules out), report per input the
+>    number of players covered and missing, the newest observation and ingestion time, and
+>    the sources present:
+>    - projections, per source (a player is covered by a source when a projection row from
+>      that source exists as of the instant);
+>    - ownership baselines, per role (classic; captain and flex on showdown), distinguishing
+>      a dedicated baseline from ownership embedded in a projection file — say which one
+>      each player would get, because the build's precedence rule mixes them;
+>    - odds for the slate's games and weather for its outdoor stadiums (a covered game, not
+>      a covered player; name the missing games);
+>    - `projected_stats` (Slice 46) coverage as an informational line, since it is not a
+>      build input.
+>    Also list the salaried, active players with no projection at all — those the build
+>    would drop — by name and salary, most expensive first, capped at 25 with a total.
+> 2. **Thresholds in config, not code.** `config/readiness.toml`, byte-hashed into the
+>    output: minimum projection coverage of active salaried players (default 0.95),
+>    minimum ownership coverage (default 0.90), maximum projection age at decision
+>    (default 6 h for a main slate, 3 h for showdown), and whether odds/weather are
+>    required (default: odds required, weather required for outdoor stadiums only). A
+>    threshold miss is a named failure with the number that missed it; a met threshold is a
+>    named pass. Ship the defaults with a one-line rationale each; the review will
+>    recalibrate them on real pools, so keep them easy to change.
+> 3. **The build consults it.** `na-build` (and the slate lane's build step) calls the read
+>    at its decision instant and refuses on any failed threshold, naming it, unless
+>    `--accept-readiness <failure name>` is passed for that failure; an accepted failure is
+>    written into the decision manifest so replay and the memo show it. A refusal writes
+>    nothing. Do not change candidate selection itself.
+> 4. **Surfaces.** `na-ops readiness --slate-id N [--as-of]` prints the report;
+>    `na-ops status` shows one line per slate ("READY" or the first failed threshold) under
+>    the existing slate block; the dashboard's slate section shows the same line and links
+>    to the full report on a `/readiness?slate_id=N` page rendered from the same payload.
+>    `status_payload` gains a `readiness` entry per slate so `na-mcp` exposes it without
+>    another read path.
+> 5. **Tests** (synthetic fixtures, temporary stores): coverage counts exclude inactive and
+>    ruled-out players; a player with only embedded ownership is reported as embedded; a
+>    projection ingested after the instant does not count; each threshold fails and passes
+>    at its boundary; the build refuses on a failure, accepts it with the flag, and the
+>    manifest records the acceptance; replay of an accepted decision reproduces the same
+>    readiness summary; the dashboard page renders and the payload carries the entry.
+>    Gates green; never the production database.
+
+**Status note (2026-09-05):** prompted; not started. Depends on nothing outside the repo.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until the Data Hub
