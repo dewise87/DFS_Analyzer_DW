@@ -3338,6 +3338,132 @@ build needs a projection capture from that morning (the 6 h bound) or an explici
 `--accept-readiness projection_age`. Follow-on queued: odds/weather ingestion from the
 Slice 2 captures, at which point the two flags flip to true. Suite 887.
 
+### Slice 48 — Odds and weather ingestion (closes the readiness gap)
+
+**Goal:** the two per-game inputs Slice 2 has captured since 2026-09-01 finally reach the
+store. `odds_snapshots` and `weather_snapshots` have existed since migration 0001 and
+nothing writes them; Slice 47's readiness therefore ships odds and weather as measured but
+not required. This slice writes them from the captured raw responses and flips the two
+flags to required in the same change.
+
+**Design doc:** §4.4 (market and weather as point-in-time context), §3.2, Slice 2's
+capture contract (raw response bytes plus a sanitized request record in the manifest),
+Slice 47's decision-log entry on why a threshold no input can meet is an excuse.
+
+**Real-file facts:** `data/snapshots/2026/week_01/2026-09-01T13:19:13.269014Z/odds/odds.json`
+is a real The Odds API v4 response: a JSON array of events with `id`, `commence_time`,
+`home_team`/`away_team` as full names ("Seattle Seahawks"), and `bookmakers[]` each with
+`key`, `last_update`, and `markets[]` (`spreads`, `totals`) whose `outcomes[]` carry
+`name`, `price` (American), and `point`.
+`data/snapshots/2026/week_01/2026-09-01T13:22:54.824755Z/weather/` holds four real
+Open-Meteo single-run responses (Lumen Field, Lambeau Field, AT&T Stadium, Empower Field)
+with their request records in the manifest. `snapshots/fetch.py` documents both request
+shapes (`ODDS_API_URL`, `WEATHER_API_URL`, `WEATHER_SOURCE`, `_weather_params`).
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; gates are
+> `uv run --frozen ruff check .`, `uv run --frozen mypy src/narrative_alpha`,
+> `uv run --frozen pytest -q`). Read `docs/DECISIONS.md` (no silent fallback, no
+> magnitude-inferred units, insert-only point-in-time writes, canonical UTC-Z),
+> `src/narrative_alpha/snapshots/fetch.py` (how odds and weather were requested and what
+> the manifest's `requests` records carry — `stadium`, `kickoff_at`,
+> `forecast_model_run_at`, `forecast_lead_time_seconds`), `snapshots/stadiums.py`,
+> `ingest/slates.py` (how games and teams get their ids; `team_code_variants`),
+> `ingest/projections.py` (`load_projection_capture`'s hash verification and report shape —
+> mirror it), `docs/schema.md` for `odds_snapshots` and `weather_snapshots`, and
+> `src/narrative_alpha/readiness.py` (`_game_input_coverage` reads these tables by
+> `game_id`). Read the real odds file and the four real weather files named above; they
+> are the schema. If either is missing, STOP and say so — do not invent a response.
+>
+> 1. **Odds.** `ingest/odds.py`: `load_odds_capture(connection, capture_path, *, season,
+>    week, ingested_at=None)` verifies each `odds` file's hash against the manifest, parses
+>    the events, and matches each event to a `games` row for that season/week by kickoff
+>    and the two teams. Team matching goes from the API's full names through an explicit
+>    name table in `identity/teams.py` (or wherever the existing team-code helpers live —
+>    reuse, do not duplicate); an event whose teams or kickoff do not match exactly one
+>    game is reported and skipped, never guessed. For each event × bookmaker write one
+>    `odds_snapshots` row: `sportsbook` = bookmaker key, `home_spread`/`away_spread` from the
+>    spreads market (the CHECK requires `home_spread = -away_spread`; refuse the bookmaker
+>    if the two points disagree), `total` from totals, the four prices as American integers,
+>    `published_at` = the market's `last_update`, `observed_at` = the capture's observed
+>    time, `response_file_sha256` = the file hash, `source = "the-odds-api"`,
+>    `source_version` = a stated format version constant. Insert-only with the existing
+>    duplicate-vs-conflict pattern.
+> 2. **Weather.** `ingest/weather.py`: `load_weather_capture(...)` the same way. Each
+>    response is one stadium × one forecast run; the manifest request record names the
+>    stadium, kickoff, model run time, and lead time — use them, do not re-derive. Map the
+>    game by stadium + kickoff to exactly one `games` row. Write one `weather_snapshots`
+>    row per game with the forecast value at the kickoff hour (`forecast_for_at` = kickoff
+>    rounded as the request did; say how), `forecast_model = WEATHER_SOURCE`,
+>    `forecast_run_at`, `lead_time_seconds`, temperature in °C, precipitation probability
+>    as a fraction in [0,1] (convert from the API's percent explicitly; never by
+>    magnitude), wind speed and gust in kph, `weather_code`. Refuse a body whose units
+>    block does not say what you assumed.
+> 3. **Operator path.** `na-slate load-odds` and `na-slate load-weather` (newest capture
+>    of the kind for the week by default, `--capture` to name one), each printing games
+>    matched, rows inserted, duplicates, and every skipped event with the reason; exit 0
+>    clean, 1 anything skipped, 2 refused. Add both as steps in `na-ops slate` before the
+>    build, after salaries are ingested (they need `games` rows), widening the `ops_runs`
+>    CHECK by migration as earlier steps did; a missing capture of either kind is a
+>    reported skip, not a lane failure. `na-ops status`'s per-kind capture/ingest table
+>    already counts these kinds once rows carry the file hash — confirm it lights up.
+> 4. **Flip readiness.** In the same change set `odds_required = true` and
+>    `weather_required = true` in `config/readiness.toml`, bump `config_version`, update the
+>    golden memo's manifest hash, and update the Slice 47 tests that pin the shipped
+>    defaults. The lane fixture must now seed odds and weather captures (or accept the two
+>    checks explicitly and say why in the fixture).
+> 5. **Fixtures:** trim the real odds file to two events and two bookmakers as
+>    `tests/golden/the_odds_api_two_games.json` (public data, no anonymization needed);
+>    one real weather body as `tests/golden/open_meteo_one_game.json`.
+> 6. **Tests:** parse both goldens; an event matching no game is skipped and named; a
+>    bookmaker whose spreads disagree is refused; percent-to-fraction is explicit; a
+>    tampered file fails its hash; reload inserts nothing; both `na-slate` commands and the
+>    lane steps end to end on a seeded scratch store; readiness on that store passes
+>    `odds_coverage` and `weather_coverage` under the flipped defaults.
+>
+> Finish by loading the real 2026-09-01 odds capture into a **copy** of the production
+> store — wait: production has no `games` rows yet (no salary export has been ingested),
+> so say so and load into the seeded test store instead. Gates green.
+
+**Status note (2026-09-05):** prompted; not started. Needs no vendor login. Production has
+no `games` rows until the first salary export is ingested, so the real-capture acceptance
+waits for Week 1's DraftKings file even though the code does not.
+
+### Slice 49 — Stats read scoped to a slate, stats capture in the lane and status (small)
+
+**Goal:** the two open items from the Slice 46 review, small enough for the cheap tier.
+
+**Model:** Claude **Haiku 4.5** · ChatGPT **GPT-5.1**. Cheap/mechanical.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; gates are
+> `uv run --frozen ruff check .`, `uv run --frozen mypy src/narrative_alpha`,
+> `uv run --frozen pytest -q`). Read `src/narrative_alpha/ingest/stokastic_stats.py`
+> (`read_derived_projection_means`, `_slate_teams`, `newest_stats_capture`,
+> `load_stokastic_stats_capture`), `slate_cli.py` (`stats`, `load-stats`), `ops/slate.py`
+> (the vendor-capture steps and how a missing capture is a reported skip), and
+> `ops/status.py` (`_INGEST_TARGETS`, `_capture_ingest_status`).
+>
+> 1. `na-slate stats` gains `--slate-id N`: when given, only players on that slate's teams
+>    (from its salary rows) are printed, and the header says how many export rows were
+>    outside the slate. Without it, behavior is unchanged. Library: a `slate_id` keyword on
+>    `read_derived_projection_means`.
+> 2. `na-ops slate` gets a `slate_stats` step after salaries: load the week's newest stats
+>    capture with `load_stokastic_stats_capture`; no capture is a reported skip; a held
+>    capture is a failed step that does not stop the lane (stats are not a build input).
+>    Widen the `ops_runs` CHECK by migration as earlier steps did.
+> 3. `na-ops status`'s capture/ingest table counts the `stats` kind: add
+>    `CaptureKind.STATS → projected_stats` to `_INGEST_TARGETS`, keyed on `file_sha256`
+>    (that table's column name differs from the others — handle it, do not rename it).
+> 4. Tests for each: the slate filter on a seeded store, the lane step's three outcomes,
+>    and the status row. Gates green; never the production database.
+
+**Status note (2026-09-05):** prompted; not started.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until the Data Hub
@@ -3351,6 +3477,12 @@ Slice 2 captures, at which point the two flags flip to true. Suite 887.
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.
 - **Late swap MVP** (§6.7, Phase 3): after Week 1 shows what in-slate captures look like.
+- **Operator chore, not a slice — paste the reviewed roster pin.** `na-crosswalk
+  nflverse-refresh --season 2026 --reviewed-at <today>` succeeds again (upstream restored
+  the `week` column on 2026-09-05); Daniel reads the status-change diff it prints and
+  pastes its `paste_entry` block into `PINNED_ROSTER_RELEASES` in
+  `src/narrative_alpha/identity/nflverse.py`, then gates and commit. The workload-stats
+  pin cannot be reviewed until nflverse publishes 2026 weekly stats (after Week 1).
 
 ---
 
