@@ -184,8 +184,10 @@ class LaneRunner:
         with self._lock:
             current = self._states[lane]
             if current.running:
-                since = "an unknown time" if current.started_at is None else utc_timestamp(
-                    current.started_at
+                since = (
+                    "an unknown time"
+                    if current.started_at is None
+                    else utc_timestamp(current.started_at)
                 )
                 raise LaneBusyError(
                     f"the {lane} lane started at {since} and has not finished; a second "
@@ -905,9 +907,13 @@ code { font-family: var(--mono); font-size: .875rem; background: var(--sunk);
 table { border-collapse: collapse; width: 100%; font-size: .9375rem; }
 th, td { text-align: left; vertical-align: top; padding: .35rem .7rem .35rem 0;
          border-bottom: 1px solid var(--hair); }
+/* Header labels wrap. Set unbreakable, a label like SOURCE ITEM REVIEW FLAG ID decides
+   its column's width before any cell does, and the prose columns beside it get the
+   leftovers. Figures and instants keep their own nowrap through .num and .stamp. */
 thead th { font-family: var(--mono); font-size: .75rem; font-weight: 700;
            letter-spacing: .06em; text-transform: uppercase; color: var(--soft);
-           white-space: nowrap; border-bottom: 1px solid var(--rule); }
+           white-space: normal; min-width: 5ch; border-bottom: 1px solid var(--rule); }
+th.stamp { white-space: nowrap; }
 tbody th { font-weight: 600; white-space: nowrap; }
 tbody tr:nth-child(even) { background: var(--sunk); }
 tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
@@ -915,7 +921,10 @@ th.num, td.num { text-align: right; font-family: var(--mono);
                  font-variant-numeric: tabular-nums; white-space: nowrap;
                  padding-right: 1rem; }
 td.id, td.stamp, .id { font-family: var(--mono); font-size: .875rem; }
-td.id { overflow-wrap: anywhere; }
+/* A 64-character hash has no natural break, so an auto-layout table hands it the widest
+   column and squeezes the prose beside it. Bound it: it wraps to a few lines and the
+   reason and title columns get the room; the full identifier is still in the cell. */
+td.id { overflow-wrap: anywhere; max-width: 24ch; min-width: 12ch; }
 td.stamp { white-space: nowrap; }
 
 /* ---- the lane block reads as cards once the columns no longer fit ---- */
@@ -1088,10 +1097,16 @@ def _status_page(context: DashboardContext) -> str:
         ),
     ]
     # Rendered from the payload itself, so a section added to `na-ops status` shows up
-    # here without anyone remembering to add it, and none can be silently dropped.
+    # here without anyone remembering to add it, and none can be silently dropped. The
+    # payload's bare values (the instant, the paths, a single count) share one block: a
+    # heading over a lone timestamp is a heading the reader has to scroll past.
+    scalars = {key: value for key, value in payload.items() if _is_scalar(value)}
+    if scalars:
+        body.append(f"<section><h2>this read</h2>{_render_mapping(scalars)}</section>")
     body.extend(
         f"<section><h2>{escape(_label(key))}</h2>{_render(value)}</section>"
         for key, value in payload.items()
+        if key not in scalars
     )
     return _page(
         "operator status",
@@ -1756,9 +1771,9 @@ def _readiness_page(context: DashboardContext, query: Mapping[str, list[str]]) -
     payload = readiness_payload(found.readiness)
     heading = (
         f"<section><h2>Slate {slate_id} — {escape(found.readiness_line)}</h2>"
-        f"<p>Thresholds <span class=\"mono\">{escape(found.readiness.config_version)}</span> "
-        f"(<span class=\"mono\">{escape(found.readiness.config_sha256)}</span>), measured at "
-        f"<span class=\"mono\">{escape(utc_timestamp(found.readiness.as_of))}</span>.</p>"
+        f'<p>Thresholds <span class="mono">{escape(found.readiness.config_version)}</span> '
+        f'(<span class="mono">{escape(found.readiness.config_sha256)}</span>), measured at '
+        f'<span class="mono">{escape(utc_timestamp(found.readiness.as_of))}</span>.</p>'
         "</section>"
     )
     sections = "".join(
@@ -1814,6 +1829,30 @@ def _label(key: str) -> str:
     return key.replace("_", " ")
 
 
+def _is_scalar(value: object) -> bool:
+    return value is None or isinstance(value, str | int | float | bool)
+
+
+def _age_text(seconds: int) -> str:
+    """An age a reader can place: `8h 34m`, not `30844`. The exact figure stays beside it."""
+
+    if seconds < 0:
+        return "0m"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600:02d}h"
+
+
+def _render_keyed(key: str, value: object) -> str:
+    """Render a value under its key; the key says what the number means."""
+
+    if key.endswith("age_seconds") and isinstance(value, int) and not isinstance(value, bool):
+        return f'{escape(_age_text(value))} <span class="none">({value:,} s)</span>'
+    return _render(value)
+
+
 def _render(value: object) -> str:
     """Render a JSON-shaped value. Nothing is summarized away and nothing is truncated."""
 
@@ -1863,7 +1902,8 @@ def _render_mapping(value: Mapping[str, object]) -> str:
     if not value:
         return '<span class="none">empty</span>'
     items = "".join(
-        f"<dt>{escape(_label(key))}</dt><dd>{_render(item)}</dd>" for key, item in value.items()
+        f"<dt>{escape(_label(key))}</dt><dd>{_render_keyed(key, item)}</dd>"
+        for key, item in value.items()
     )
     return f"<dl>{items}</dl>"
 
@@ -1900,7 +1940,11 @@ def _render_table(rows: list[dict[str, object]]) -> str:
         "<tr>"
         + "".join(
             f"<td{_kind(kinds[column])}>"
-            + (_render(row[column]) if column in row else '<span class="none">—</span>')
+            + (
+                _render_keyed(column, row[column])
+                if column in row
+                else '<span class="none">—</span>'
+            )
             + "</td>"
             for column in columns
         )
@@ -1911,11 +1955,20 @@ def _render_table(rows: list[dict[str, object]]) -> str:
     # A long one is given a height as well, so four hundred in-flight attempts stay four
     # hundred in-flight attempts without becoming the whole queues page.
     tall = " tall" if len(rows) > TALL_TABLE_ROWS else ""
-    return (
+    table = (
         f'<div class="scroll{tall}"><table>'
         f"<thead><tr>{header}</tr></thead><tbody>{body}</tbody>"
         "</table></div>"
     )
+    # A step table with nothing recorded is ten rows of "none". Every row stays, under a
+    # head that says so, instead of a screen of empty cells before the next section.
+    if len(columns) > 1 and all(row.get(column) is None for row in rows for column in columns[1:]):
+        names = ", ".join(escape(str(row.get(columns[0], "—"))) for row in rows)
+        return (
+            f"<details><summary>{len(rows)} {escape(_label(columns[0]))}(s), nothing "
+            f'recorded yet <span class="count">[{names}]</span></summary>{table}</details>'
+        )
+    return table
 
 
 def _column_kind(column: str, rows: list[dict[str, object]]) -> str:

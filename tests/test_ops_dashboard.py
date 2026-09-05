@@ -322,11 +322,12 @@ def test_status_page_shows_every_section_of_the_status_payload(seeded_client: _C
     status, body = seeded_client.get("/")
 
     assert status == 200
+    # The payload's bare values share one block instead of a heading each.
+    assert "<h2>this read</h2>" in body
+    for scalar in ("as of", "config path", "database"):
+        assert f"<dt>{scalar}</dt>" in body, f"{scalar} is missing from the status page"
     for section in (
-        "as of",
         "collection",
-        "config path",
-        "database",
         "extraction",
         "fast lane rules",
         "identity",
@@ -1331,6 +1332,27 @@ def test_a_long_text_folds_whole_under_a_named_or_first_line_head() -> None:
     assert _text_block(text, head="summary").startswith("<details><summary>summary ")
     # Short text is a plain <pre>, with nothing to open.
     assert _text_block("one line") == "<pre>one line</pre>"
+
+
+def test_ages_read_as_durations_and_empty_step_tables_fold() -> None:
+    """A reader places `8h 34m` at a glance; `30844` is kept beside it, exact."""
+
+    from narrative_alpha.ops.dashboard import _render_mapping, _render_table
+
+    rendered = _render_mapping({"last_success_age_seconds": 30844, "rows": 3})
+    assert '<dd>8h 34m <span class="none">(30,844 s)</span></dd>' in rendered
+    assert "<dd>3</dd>" in rendered
+    folded = _render_table(
+        [
+            {"step": "slate_salaries", "last_success_at": None, "last_failure_at": None},
+            {"step": "slate_build", "last_success_at": None, "last_failure_at": None},
+        ]
+    )
+    assert folded.startswith("<details><summary>2 step(s), nothing recorded yet ")
+    assert "slate_salaries, slate_build" in folded
+    assert "<table>" in folded, "every row is still there under the fold"
+    live = _render_table([{"step": "collect", "last_success_at": "2026-09-05T10:00:00.000000Z"}])
+    assert live.startswith('<div class="scroll">')
 
 
 def test_the_write_forms_do_not_widen_a_phone_page(seeded_client: _Client) -> None:

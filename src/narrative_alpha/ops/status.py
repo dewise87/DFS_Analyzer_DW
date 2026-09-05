@@ -493,9 +493,7 @@ def collect_ops_status(
         grading=_claim_grading_status(connection, slate=slate),
         narrative=narrative,
         fast_lane_rules=fast_lane_rules,
-        entry_fees_to_date_usd=(
-            f"{Decimal(entry_receipts.fees_cents) / Decimal(100):.2f}"
-        ),
+        entry_fees_to_date_usd=(f"{Decimal(entry_receipts.fees_cents) / Decimal(100):.2f}"),
         entry_net_to_date_usd=f"{Decimal(entry_receipts.net_cents) / Decimal(100):.2f}",
         month_to_date_spend_usd=_usd(spent),
         monthly_budget_usd=_usd(budget),
@@ -792,9 +790,7 @@ def _slate_row(
     readiness: SlateReadiness | None = None
     readiness_error: str | None = None
     try:
-        readiness = collect_slate_readiness(
-            connection, slate_id=summary.slate_id, as_of=as_of
-        )
+        readiness = collect_slate_readiness(connection, slate_id=summary.slate_id, as_of=as_of)
     except (ReadinessError, sqlite3.Error) as error:
         # A screen that cannot read readiness says so on the slate's own line. It must not
         # take down the rest of the status, and it must not read as ready.
@@ -1566,7 +1562,15 @@ def _brief(text: str | None, limit: int = 140) -> str:
     if not text:
         return "no reason recorded"
     first = text.strip().splitlines()[0]
-    return first if len(first) <= limit else f"{first[: limit - 1].rstrip()}…"
+    if len(first) <= limit:
+        return first
+    cut = first[: limit - 1]
+    # Break after the last whole word when one falls in the back half of the budget, so
+    # the line ends "…in the run" rather than "…in the run su…".
+    space = cut.rfind(" ")
+    if space >= limit // 2:
+        cut = cut[:space]
+    return f"{cut.rstrip()}…"
 
 
 def _stamp(value: datetime | None, as_of: datetime) -> str:

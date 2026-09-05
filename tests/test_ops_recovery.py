@@ -192,10 +192,19 @@ def _check(report: DoctorReport, name: str):
     return next(check for check in report.checks if check.name == name)
 
 
+def _free_port() -> int:
+    """A port nothing holds right now, so a dashboard the operator left running on the
+    default port does not turn the healthy fixture's port check into a warning."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
 def test_doctor_all_checks_have_a_healthy_fixture(tmp_path: Path) -> None:
     fixture = _doctor_fixture(tmp_path)
     secret = "fixture-secret-that-must-never-print"
-    report = fixture.run(secret_reader=lambda config: secret)
+    report = fixture.run(secret_reader=lambda config: secret, dashboard_port=_free_port())
     assert report.ok, [
         (check.name, check.detail) for check in report.checks if check.level == "FAIL"
     ]

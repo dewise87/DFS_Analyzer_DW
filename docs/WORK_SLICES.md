@@ -2,7 +2,19 @@
 
 **Current review:** [2026-09-05 repository assessment](REPOSITORY_REVIEW.md). It supersedes
 the obsolete five-player FanDuel assumptions in Slice 44 and distinguishes fixture coverage
-from native vendor/site acceptance. Historical slice prompts below are retained as history.
+from native vendor/site acceptance. Its code (commit 6012c2c) was content-reviewed by the
+project lead on 2026-09-05 and accepted: the ingestion-time cutoff is applied to every
+joined table, ownership precedence and its manifest freezing agree between build and replay,
+the validator checks values against the scenario rather than trusting the solver, and the
+lock refusal precedes any write. Historical slice prompts below are retained as history.
+
+**Project-lead pass, 2026-09-05 evening (end of the pre-season build window):** every slice
+through 51 is landed, reviewed, and pushed; the README's last stale line (a Slice 26
+dependency) is gone; the dashboard got a rendering-only pass — the status page's bare
+values share one "this read" block instead of a heading each, ages read as durations with
+the exact seconds beside them, an all-empty step table folds under a head that names its
+steps, identifier columns are bounded so prose columns keep their room, and the strip's
+manual-action lines cut at a word boundary. No behavior changed; the payload is unchanged.
 
 The build plan, cut into PR-sized slices. Each slice has: goal, design-doc references, a
 ready-to-paste prompt for the executing model, and a model recommendation for both Claude

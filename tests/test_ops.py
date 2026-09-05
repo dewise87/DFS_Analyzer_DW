@@ -1629,3 +1629,16 @@ def test_batch_max_items_per_run_comes_from_config(tmp_path: Path) -> None:
         == 0
     )
     assert seen == [7, 3]
+
+
+def test_manual_action_lines_are_cut_at_a_word_boundary() -> None:
+    from narrative_alpha.ops.status import _brief
+
+    long = "extraction reported 103 item failure(s) beside 95 succeeded — " + "word " * 40
+    brief = _brief(long, limit=60)
+    assert len(brief) <= 60
+    assert brief.endswith("…")
+    assert not brief[:-1].endswith(" ") and " su…" not in brief
+    assert brief[:-1] == long[: len(brief) - 1].rstrip()  # a prefix, cut at a space
+    assert _brief("short line") == "short line"
+    assert _brief(None) == "no reason recorded"

@@ -246,9 +246,10 @@ yet.
 uv run na-ops dashboard
 ```
 
-Start it with the Anthropic key in its environment if you mean to press "Run batch now";
-the extract step refuses without one, and until Slice 26 lands only the launchd wrapper
-reads the Keychain:
+The batch lane reads the Anthropic key from the macOS Keychain item
+`narrative-alpha-anthropic` in-process, so "Run batch now" works from a plain start. If the
+Keychain item is unreadable in your session, the extract step refuses and names the fix;
+exporting the key into the environment is the fallback:
 
 ```bash
 ANTHROPIC_API_KEY="$(security find-generic-password -s narrative-alpha-anthropic -w)" uv run na-ops dashboard
