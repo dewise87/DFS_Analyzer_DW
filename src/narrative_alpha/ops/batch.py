@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -185,7 +186,7 @@ def run_batch(
         lambda: _nflverse_refresh(dependencies, config=config, now=started_at),
     )
 
-    if last_run(connection, step="extract", status="succeeded") is None:
+    if not _stage1_has_ever_succeeded(connection):
         recorder.skip(
             "episodes",
             "no extraction has ever succeeded, so there are no Stage 1 claims from which "
@@ -358,9 +359,39 @@ def _extract(
             summary,
         )
     if not report.ok:
-        detail = "; ".join(f"item {error.source_item_id}: {error.code}" for error in report.errors)
-        raise StepFailure(f"extraction reported item failures — {detail}", summary)
+        # Per-item validation failures are the normal texture of Stage 1 (a model output
+        # that names evidence the source does not contain is refused, by design). The step
+        # still fails so nobody mistakes the run for clean, but the sentence carries counts
+        # by code, not two hundred item ids; the ids live in the run summary.
+        by_code = Counter(error.code for error in report.errors)
+        summary["item_errors_by_code"] = dict(sorted(by_code.items()))
+        summary["item_error_ids"] = sorted(error.source_item_id for error in report.errors)
+        detail = ", ".join(f"{count} {code}" for code, count in by_code.most_common())
+        raise StepFailure(
+            f"extraction reported {len(report.errors)} item failure(s) beside "
+            f"{report.succeeded_items} succeeded — {detail}; item ids are in the run "
+            "summary (`na-ops status` run history)",
+            summary,
+        )
     return "succeeded", summary, None
+
+
+def _stage1_has_ever_succeeded(connection: sqlite3.Connection) -> bool:
+    """Whether any Stage 1 item has ever produced claims.
+
+    An extract *step* fails whenever one item fails, and one item nearly always does, so
+    gating episodes on a clean step would never build one. The store is the authority:
+    a succeeded extraction row is a claim source whether or not the run around it was
+    clean. The step record is kept as a second witness for stores seeded before rows
+    carried a status.
+    """
+
+    if last_run(connection, step="extract", status="succeeded") is not None:
+        return True
+    row = connection.execute(
+        "SELECT 1 FROM source_item_extractions WHERE status = 'succeeded' LIMIT 1"
+    ).fetchone()
+    return row is not None
 
 
 def _extraction_provider(

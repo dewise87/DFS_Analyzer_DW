@@ -663,3 +663,25 @@ uv run na-replay \
 Every replay read passes through `PointInTimeSession`, which refuses a missing as-of bound. Source
 rows must be both available at `decision_at` and named by the decision manifest's hash-set. The
 command exits 0 for an output-hash match, 1 for a reproducible mismatch, and 2 for a replay error.
+
+### Load captured game inputs
+
+After ingesting salaries (which create the game identities), run:
+
+```sh
+uv run na-slate load-odds --season 2026 --week 1
+uv run na-slate load-weather --season 2026 --week 1
+```
+
+Each defaults to the newest capture of its kind for the week; `--capture <directory>`
+selects one, and `--root` / `--database` select scratch inputs and stores. Exit codes are
+0 clean, 1 reported skips, 2 capture/configuration refusal. Every unmatched event or
+rejected bookmaker/forecast is named. Identical reloads insert nothing; conflicts never
+replace history. `na-ops slate` performs both loads after salaries, before the build;
+`na-ops status` counts ingested files using their raw response hashes.
+
+Odds and weather coverage are now required by readiness config `2026-09-05.3`.
+The September 1 real weather files end before their requested kickoffs and are therefore
+skipped. They also omit precipitation probability; that field stays NULL with a report
+note, while any supplied percent is explicitly converted to a fraction. Forecast selection
+floors kickoff to its containing UTC hour. A missing forecast never becomes a dry forecast.

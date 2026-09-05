@@ -8,7 +8,7 @@
 #
 # Bump `config_version` whenever a value changes, so a frozen decision names the ruleset it
 # was judged under rather than only its hash.
-config_version = "2026-09-05.2"
+config_version = "2026-09-05.3"
 
 [coverage]
 # A build silently drops every salaried player with no projection row (the JOIN in
@@ -31,13 +31,9 @@ maximum_projection_age_minutes = 360
 maximum_projection_age_minutes_showdown = 180
 
 [market]
-# Odds and weather are reported per game, but neither is *required* yet: Slice 2 captures
-# both as raw files under data/snapshots, and nothing ingests them into `odds_snapshots` or
-# `weather_snapshots`. A required check that no ingestion can satisfy is not a threshold, it
-# is a permanent excuse — the operator would pass `--accept-readiness` by reflex and the gate
-# would stop meaning anything. Flip these to true in the same change that lands the ingest.
-odds_required = false
-weather_required = false
+# Per-game loaders now populate both tables; builds require coverage.
+odds_required = true
+weather_required = true
 
 # When weather becomes required, restrict it to outdoor venues. A venue this repository's
 # stadium table cannot classify is treated as outdoor: an unrecognized name is not evidence

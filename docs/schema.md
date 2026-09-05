@@ -174,11 +174,19 @@ Updates and deletes are forbidden.
 
 Stores sportsbook spread, total, and optional American-price observations for a versioned game.  
 The raw-response hash and full §3.2 fields ensure closing lines cannot replace pre-lock markets.
+`load_odds_capture` writes `source=the-odds-api`, one row per matched event/bookmaker,
+with the common spreads/totals market publication time. Unequal market timestamps,
+inconsistent spread/total pairs, and ambiguous game identities are reported and skipped.
 
 ## `weather_snapshots`
 
 Stores stadium forecasts with explicit model run, forecast-valid time, lead time, and weather values.  
 Each row references its raw response hash and carries §3.2 provenance for point-in-time replay.
+`load_weather_capture` selects the containing UTC kickoff hour, using the manifest stadium,
+kickoff, model run and lead time. Temperature is °C and winds km/h; units are validated.
+The deterministic source omits precipitation probability: its nullable column remains NULL
+and the report names that absence. A supplied probability requires `%` and is divided by 100.
+Missing kickoff hours are skipped, never interpolated or extrapolated.
 
 ## `results`
 

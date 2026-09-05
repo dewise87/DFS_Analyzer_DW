@@ -694,10 +694,13 @@ def _snapshot_status(
 
 
 # Where each capture kind lands, and the column that proves one file reached the store.
-_INGEST_TARGETS: dict[CaptureKind, str] = {
-    CaptureKind.SALARIES: "salaries",
-    CaptureKind.PROJECTIONS: "projection_snapshots",
-    CaptureKind.OWNERSHIP: "ownership_baselines",
+_INGEST_TARGETS: dict[CaptureKind, tuple[str, str]] = {
+    CaptureKind.SALARIES: ("salaries", "source_file_sha256"),
+    CaptureKind.PROJECTIONS: ("projection_snapshots", "source_file_sha256"),
+    CaptureKind.OWNERSHIP: ("ownership_baselines", "source_file_sha256"),
+    CaptureKind.ODDS: ("odds_snapshots", "response_file_sha256"),
+    CaptureKind.WEATHER: ("weather_snapshots", "response_file_sha256"),
+    CaptureKind.STATS: ("projected_stats", "file_sha256"),
 }
 
 
@@ -841,7 +844,8 @@ def _capture_ingest_status(
                 1
                 for file_sha256 in hashes
                 if connection.execute(
-                    f"SELECT 1 FROM {_INGEST_TARGETS[kind]} WHERE source_file_sha256 = ? LIMIT 1",
+                    f"SELECT 1 FROM {_INGEST_TARGETS[kind][0]} "
+                    f"WHERE {_INGEST_TARGETS[kind][1]} = ? LIMIT 1",
                     (file_sha256,),
                 ).fetchone()
                 is not None

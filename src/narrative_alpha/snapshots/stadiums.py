@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from narrative_alpha.identity.normalization import normalize_team_code, team_code_from_name
+
 STADIUM_TABLE_VERSION = "2026-09-01.1"
 
 
@@ -314,41 +316,6 @@ STADIUMS_BY_TEAM: dict[str, Stadium] = {
     team: stadium for stadium in STADIUMS for team in stadium.home_teams
 }
 
-_TEAM_CODES_BY_NAME = {
-    "arizona cardinals": "ARI",
-    "atlanta falcons": "ATL",
-    "baltimore ravens": "BAL",
-    "buffalo bills": "BUF",
-    "carolina panthers": "CAR",
-    "chicago bears": "CHI",
-    "cincinnati bengals": "CIN",
-    "cleveland browns": "CLE",
-    "dallas cowboys": "DAL",
-    "denver broncos": "DEN",
-    "detroit lions": "DET",
-    "green bay packers": "GB",
-    "houston texans": "HOU",
-    "indianapolis colts": "IND",
-    "jacksonville jaguars": "JAX",
-    "kansas city chiefs": "KC",
-    "las vegas raiders": "LV",
-    "los angeles chargers": "LAC",
-    "los angeles rams": "LAR",
-    "miami dolphins": "MIA",
-    "minnesota vikings": "MIN",
-    "new england patriots": "NE",
-    "new orleans saints": "NO",
-    "new york giants": "NYG",
-    "new york jets": "NYJ",
-    "philadelphia eagles": "PHI",
-    "pittsburgh steelers": "PIT",
-    "san francisco 49ers": "SF",
-    "seattle seahawks": "SEA",
-    "tampa bay buccaneers": "TB",
-    "tennessee titans": "TEN",
-    "washington commanders": "WAS",
-}
-
 
 def find_stadium(name: str) -> Stadium | None:
     """Resolve a canonical stadium name or maintained historical alias."""
@@ -359,10 +326,6 @@ def find_stadium(name: str) -> Stadium | None:
 def find_stadium_for_team(team: str) -> Stadium | None:
     """Resolve a home venue from an NFL abbreviation or full team name."""
 
-    normalized = team.strip().upper()
-    team_code = (
-        normalized
-        if normalized in STADIUMS_BY_TEAM
-        else _TEAM_CODES_BY_NAME.get(_normalize_lookup(team))
-    )
+    normalized = normalize_team_code(team)
+    team_code = normalized if normalized in STADIUMS_BY_TEAM else team_code_from_name(team)
     return None if team_code is None else STADIUMS_BY_TEAM[team_code]

@@ -88,18 +88,9 @@ def _tuned(**changes: Any) -> ReadinessConfig:
 
 
 def _strict_market(tmp_path: Path) -> tuple[Path, ReadinessConfig]:
-    """The shipped file with odds and weather required, so a game-level miss can be provoked.
+    """Copy shipped required-market rules for tests freezing their exact bytes."""
 
-    Nothing ingests odds or weather yet, so the shipped defaults do not require them; these
-    tests exercise the required path on a written file so the frozen artifact's hash stays
-    honest about the bytes it was judged by.
-    """
-
-    text = (
-        SHIPPED.raw_bytes.decode("utf-8")
-        .replace("odds_required = false", "odds_required = true")
-        .replace("weather_required = false", "weather_required = true")
-    )
+    text = SHIPPED.raw_bytes.decode("utf-8")
     path = tmp_path / "readiness-strict.toml"
     path.write_text(text, encoding="utf-8")
     return path, load_readiness_config(path)
@@ -382,8 +373,8 @@ def test_weather_is_required_only_for_venues_that_are_not_domes(tmp_path: Path) 
     assert readiness.weather.missing == 2
     assert not _check(readiness, WEATHER_COVERAGE).passed
 
-    # Not required (the shipped default), the same store passes and says why.
-    relaxed = _read(database)
+    # Explicitly relaxed, the same store passes and says why.
+    relaxed = _read(database, config=_tuned(weather_required=False))
     check = _check(relaxed, WEATHER_COVERAGE)
     assert check.passed
     assert check.threshold == "not required"
@@ -483,7 +474,7 @@ def test_projection_age_fails_and_passes_at_its_boundary(tmp_path: Path) -> None
     assert "showdown bound" in showdown.detail
 
 
-def test_odds_are_reported_but_not_required_until_an_ingest_can_satisfy_them(
+def test_odds_are_required_now_that_ingestion_can_satisfy_them(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path)
@@ -492,8 +483,7 @@ def test_odds_are_reported_but_not_required_until_an_ingest_can_satisfy_them(
 
     shipped = _read(database)
     assert shipped.odds.missing == 1  # still measured and named
-    assert _check(shipped, ODDS_COVERAGE).passed
-    assert _check(shipped, ODDS_COVERAGE).threshold == "not required"
+    assert not _check(shipped, ODDS_COVERAGE).passed
     assert not _check(_read(database, config=_tuned(odds_required=True)), ODDS_COVERAGE).passed
 
 
@@ -509,10 +499,9 @@ def test_the_shipped_defaults_are_the_ones_the_slice_documents() -> None:
         "classic"
     ) == timedelta(hours=6)
     assert SHIPPED.maximum_projection_age("showdown") == timedelta(hours=3)
-    # Nothing ingests odds or weather into the store yet (Slice 2 captures raw files), so
-    # neither can be required without making every real build an excuse.
-    assert SHIPPED.odds_required is False
-    assert SHIPPED.weather_required is False
+    # Both feeds have capture-to-store loaders, so coverage is enforced.
+    assert SHIPPED.odds_required is True
+    assert SHIPPED.weather_required is True
     assert SHIPPED.weather_outdoor_only is True
 
 

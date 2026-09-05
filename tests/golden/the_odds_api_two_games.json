@@ -1,0 +1,178 @@
+[
+  {
+    "id": "8c94552d022acec4a0458d70c19d3da9",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-09-10T00:15:00Z",
+    "home_team": "Seattle Seahawks",
+    "away_team": "New England Patriots",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-09-01T13:18:20Z",
+        "markets": [
+          {
+            "key": "spreads",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "New England Patriots",
+                "price": -115,
+                "point": 3.5
+              },
+              {
+                "name": "Seattle Seahawks",
+                "price": -105,
+                "point": -3.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -105,
+                "point": 44.5
+              },
+              {
+                "name": "Under",
+                "price": -115,
+                "point": 44.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "betus",
+        "title": "BetUS",
+        "last_update": "2026-09-01T13:19:11Z",
+        "markets": [
+          {
+            "key": "spreads",
+            "last_update": "2026-09-01T13:19:10Z",
+            "outcomes": [
+              {
+                "name": "New England Patriots",
+                "price": -115,
+                "point": 3.5
+              },
+              {
+                "name": "Seattle Seahawks",
+                "price": -105,
+                "point": -3.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-01T13:19:10Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -110,
+                "point": 44.0
+              },
+              {
+                "name": "Under",
+                "price": -110,
+                "point": 44.0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "acc580d74344ea3b31bbcdd057fe6a9c",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-09-11T00:35:00Z",
+    "home_team": "Los Angeles Rams",
+    "away_team": "San Francisco 49ers",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-09-01T13:18:20Z",
+        "markets": [
+          {
+            "key": "spreads",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Rams",
+                "price": -112,
+                "point": -3.5
+              },
+              {
+                "name": "San Francisco 49ers",
+                "price": -108,
+                "point": 3.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -110,
+                "point": 48.5
+              },
+              {
+                "name": "Under",
+                "price": -110,
+                "point": 48.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "betmgm",
+        "title": "BetMGM",
+        "last_update": "2026-09-01T13:18:19Z",
+        "markets": [
+          {
+            "key": "spreads",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "Los Angeles Rams",
+                "price": -112,
+                "point": -3.5
+              },
+              {
+                "name": "San Francisco 49ers",
+                "price": -105,
+                "point": 3.5
+              }
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-01T13:18:19Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "price": -108,
+                "point": 48.5
+              },
+              {
+                "name": "Under",
+                "price": -110,
+                "point": 48.5
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

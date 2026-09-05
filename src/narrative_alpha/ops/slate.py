@@ -33,6 +33,13 @@ from narrative_alpha.entries import (
     validate_upload_contests,
 )
 from narrative_alpha.identity import CrosswalkError, PlayerCrosswalk
+from narrative_alpha.ingest.game_inputs import (
+    GameInputLoadReport,
+    MissingGameInputCapture,
+    newest_game_input_capture,
+    render_game_input_load,
+)
+from narrative_alpha.ingest.odds import load_odds_capture
 from narrative_alpha.ingest.projections import (
     ProjectionIngestError,
     ProjectionLoadReport,
@@ -49,7 +56,15 @@ from narrative_alpha.ingest.slates import (
     newest_salary_capture,
     normalize_site,
 )
+from narrative_alpha.ingest.stokastic_stats import (
+    MissingStatsCapture,
+    StokasticStatsLoadReport,
+    load_stokastic_stats_capture,
+    newest_stats_capture,
+    render_stats_load,
+)
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
+from narrative_alpha.ingest.weather import load_weather_capture
 from narrative_alpha.interface import SlateMemo, SlateMemoError, build_slate_memo
 from narrative_alpha.narrative.episodes import (
     EpisodeError,
@@ -95,7 +110,7 @@ from narrative_alpha.snapshots.models import SnapshotManifest
 from narrative_alpha.store import MigrationError, StoreConfigurationError
 
 # The two capture kinds the slate lane loads into a slate; salaries are loaded by their
-# own step, and odds/weather/news belong to other lanes.
+# own step, as are odds and weather.
 VENDOR_KINDS = frozenset({CaptureKind.PROJECTIONS, CaptureKind.OWNERSHIP})
 
 # How many by-hand commands a refusal prints before it says "+N more".
@@ -104,6 +119,7 @@ MAX_LISTED_ACTIONS = 10
 NewestCapture = Callable[..., Path]
 SalaryStep = Callable[..., SlateLoadReport]
 VendorStep = Callable[..., ProjectionLoadReport]
+StatsStep = Callable[..., StokasticStatsLoadReport]
 FeatureStep = Callable[..., FeatureBuildReport]
 DecisionStep = Callable[..., BuildResult]
 MemoStep = Callable[..., SlateMemo]
@@ -122,6 +138,10 @@ class SlateDependencies:
 
     newest_salary_capture: NewestCapture = newest_salary_capture
     load_salary_capture: SalaryStep = load_salary_capture
+    newest_stats_capture: NewestCapture = newest_stats_capture
+    load_stokastic_stats_capture: StatsStep = load_stokastic_stats_capture
+    load_odds_capture: Callable[..., GameInputLoadReport] = load_odds_capture
+    load_weather_capture: Callable[..., GameInputLoadReport] = load_weather_capture
     load_projection_capture: VendorStep = load_projection_capture
     build_episodes: EpisodeStep = build_episodes
     build_features: FeatureStep = build_features
@@ -261,6 +281,43 @@ def run_slate(
             slate_name=slate_name,
             starts_at=starts_at,
             ingested_at=started_at,
+        ),
+    )
+    recorder.run(
+        "slate_stats",
+        lambda: _ingest_stats_capture(
+            dependencies,
+            connection,
+            config=config,
+            season=season,
+            week=week,
+            site=canonical_site,
+            ingested_at=started_at,
+        ),
+    )
+
+    recorder.run(
+        "slate_odds",
+        lambda: _ingest_game_capture(
+            dependencies.load_odds_capture,
+            connection,
+            config.snapshot_root,
+            season,
+            week,
+            CaptureKind.ODDS,
+            started_at,
+        ),
+    )
+    recorder.run(
+        "slate_weather",
+        lambda: _ingest_game_capture(
+            dependencies.load_weather_capture,
+            connection,
+            config.snapshot_root,
+            season,
+            week,
+            CaptureKind.WEATHER,
+            started_at,
         ),
     )
 
@@ -541,6 +598,37 @@ def _ingest_salaries(
     if report.errors:
         reasons.append("; ".join(report.errors[:5]))
     raise StepFailure(" | ".join(reasons), summary)
+
+
+def _ingest_stats_capture(
+    dependencies: SlateDependencies,
+    connection: sqlite3.Connection,
+    *,
+    config: OpsConfig,
+    season: int,
+    week: int,
+    site: str,
+    ingested_at: datetime,
+) -> tuple[OpsStepStatus, dict[str, object], str | None]:
+    """Load optional stats without making them a prerequisite for the slate build."""
+
+    try:
+        capture = dependencies.newest_stats_capture(config.snapshot_root, season, week)
+    except MissingStatsCapture as error:
+        return "skipped", {}, str(error)
+    report = dependencies.load_stokastic_stats_capture(
+        connection,
+        capture,
+        season=season,
+        week=week,
+        site=site,
+        ingested_at=ingested_at,
+    )
+    connection.commit()
+    summary = report.model_dump(mode="json") | {"capture": str(capture)}
+    if report.held:
+        return "failed", summary, render_stats_load(report).strip()
+    return "succeeded", summary, None
 
 
 def _target_slate(
@@ -1145,3 +1233,24 @@ def _listed(commands: list[str]) -> str:
         else (f"\n  (+{len(commands) - MAX_LISTED_ACTIONS} more)")
     )
     return "\n  " + "\n  ".join(shown) + more
+
+
+def _ingest_game_capture(
+    loader: Callable[..., GameInputLoadReport],
+    connection: sqlite3.Connection,
+    root: Path,
+    season: int,
+    week: int,
+    kind: CaptureKind,
+    ingested_at: datetime,
+) -> tuple[OpsStepStatus, dict[str, object], str | None]:
+    try:
+        capture = newest_game_input_capture(root, season, week, kind)
+    except MissingGameInputCapture as error:
+        return "skipped", {}, str(error)
+    report = loader(connection, capture, season=season, week=week, ingested_at=ingested_at)
+    connection.commit()
+    summary = report.model_dump() | {"capture": str(capture)}
+    if not report.ok:
+        return "skipped", summary, render_game_input_load(report).strip()
+    return "succeeded", summary, None

@@ -2,6 +2,54 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Batch lane: episodes gate on the store, refusals are counted by code
+
+- **The episodes step asks the store whether Stage 1 has ever succeeded, not the run
+  log.** The extract step fails whenever one item fails, and with real inputs one always
+  does (the first settled batch: 606 succeeded, 227 refused), so gating episodes on a clean
+  extract step meant no episode could ever be built. A succeeded `source_item_extractions`
+  row is the witness now; the clean-step record remains a second witness for old stores.
+- **Item refusals fail the step by count, not by roster.** The step still fails, so a run
+  with refusals is never mistaken for clean, but its sentence says how many items were
+  refused beside how many succeeded, grouped by error code; the item ids move into the run
+  summary. A two-hundred-id sentence made `na-ops status` unreadable and told the operator
+  nothing a count does not.
+- **Odds events for games the store never ingested are a count, not a rejection.** The
+  feed is league-wide (272 events in the 2026-09-01 file); the store is slate-scoped. A
+  rejection is reserved for what is actually wrong: an ambiguous match, an inconsistent
+  bookmaker, a capture error.
+- **Refused Stage 1 attempts store no output today, and that is the next problem.** Nothing
+  can be learned from a 27% refusal rate whose outputs were discarded; Slice 50 keeps them
+  under the same redaction rules and names the mismatch.
+
+## 2026-09-05 — Game-input capture ingestion enables required readiness
+
+- **Both game feeds now have insert-only loaders and operator steps.** `na-slate load-odds`
+  and `load-weather` verify every relevant file hash before writes, name every unmatched
+  event/forecast and rejected bookmaker, and distinguish identical reloads from key conflicts.
+  `na-ops slate` loads the newest capture of each kind after salaries. Missing or partially
+  usable captures are reported skips; integrity refusals fail their step. The build still
+  enforces required odds/weather coverage with readiness config `2026-09-05.3`.
+- **The real September 1 weather capture cannot cover its requested games.** All four bodies
+  end at September 8 05:00 UTC, before their manifest kickoffs. Missing kickoff hours are
+  skipped, never extrapolated. The request itself does not round kickoff; ingestion floors
+  it to the containing UTC hour (minutes, seconds and microseconds zero) to select one
+  hourly value. Model run and lead time come directly from the manifest request.
+- **The real weather schema has no precipitation probability.** The pinned deterministic
+  endpoint captured millimeters, not ensemble probability (`fetch.py` documents its rejection).
+  The nullable probability remains NULL with an explicit report note. When supplied, its unit
+  must be `%` and conversion always divides by 100, including values below one. All consumed
+  temperature/wind/code/time units are checked. Tests keep an unchanged real body and label
+  synthetic request metadata or shifted lane forecasts explicitly.
+- **One row cannot describe two publication times.** Odds spreads and totals must carry the
+  same market `last_update`; asynchronous markets are refused rather than assigning a guessed
+  publication time. Both complete pairs and American integer prices are validated. Team
+  names reuse the maintained stadium name-to-code table moved into identity normalization;
+  game matching honors home/away, code variants, season/week and exact kickoff.
+- **Salary games have no venue field in the export.** Weather matching uses their maintained
+  home venue only when stadium_name is absent. An explicitly unknown stadium is refused;
+  there is no neutral-site override by guesswork.
+
 ## 2026-09-05 — Slice 47 slate input readiness
 
 - **Readiness is measured, thresholded in configuration, and enforced by the build.**

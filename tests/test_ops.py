@@ -303,6 +303,77 @@ def _refresh_ok(season: int, archive: Path, *, reviewed_at: date) -> Any:
     )
 
 
+def _seed_succeeded_extraction(connection: sqlite3.Connection) -> None:
+    """One Stage 1 row that produced claims, under a source item and prompt of its own."""
+
+    item_id = _seed_source_item(connection)
+    stamp = _timestamp(CAPTURE_TIME)
+    content_sha256 = str(
+        connection.execute(
+            "SELECT content_sha256 FROM source_items WHERE source_item_id = ?", (item_id,)
+        ).fetchone()[0]
+    )
+    policy_id = int(
+        connection.execute(
+            "SELECT source_policy_id FROM source_policies WHERE source_id = 'source-a'"
+        ).fetchone()[0]
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO prompt_versions(
+            prompt_version_id, stage, schema_version, system_prompt, user_prompt_template,
+            output_schema_json, prompt_sha256, created_at, source, published_at, observed_at,
+            ingested_at, effective_at, valid_from, valid_to, source_version, run_id
+        ) VALUES ('prompt-fixture', 'stage_1_extraction', 'v1', 'system', 'user', '{}', ?, ?,
+                  'fixture', NULL, ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+        """,
+        ("e" * 64,) + (stamp,) * 4,
+    )
+    connection.execute(
+        """
+        INSERT INTO source_item_extractions(
+            extraction_id, source_item_id, source_policy_id, source_family,
+            source_content_sha256, prompt_version_id, model_id, max_output_tokens,
+            request_sha256, provider_request_id, batch_submission_request_id,
+            provider_batch_id, provider_custom_id, provider_message_id, status, output_json,
+            output_sha256, output_redacted_at, input_tokens, output_tokens, cost_nanos_usd,
+            pricing_version, pricing_effective_at, pricing_source_url, input_nanos_per_token,
+            output_nanos_per_token, latency_ms, error_code, error_message, source,
+            published_at, observed_at, ingested_at, effective_at, valid_from, valid_to,
+            source_version, run_id
+        ) VALUES ('extract-fixture', ?, ?, 'official_team', ?, 'prompt-fixture',
+                  'fixture-model', 100, ?, NULL, NULL, NULL, NULL, NULL, 'creating', NULL,
+                  NULL, NULL, NULL, NULL, NULL, 'pricing-v1', '2026-01-01',
+                  'https://example.test', 0, 0, NULL, NULL, NULL, 'fixture-source', NULL,
+                  ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+        """,
+        (item_id, policy_id, content_sha256, "f" * 64, stamp, stamp, stamp),
+    )
+    # The state machine insists an attempt is born creating and settles in order.
+    connection.execute(
+        """
+        UPDATE source_item_extractions
+        SET status = 'submitted', batch_submission_request_id = 'submit-fixture',
+            provider_batch_id = 'batch-fixture', provider_custom_id = 'custom-fixture'
+        WHERE extraction_id = 'extract-fixture'
+        """
+    )
+    connection.execute(
+        """
+        UPDATE source_item_extractions
+        SET status = 'settling', provider_message_id = 'message-fixture',
+            output_json = '{}', output_sha256 = ?, input_tokens = 1, output_tokens = 1,
+            cost_nanos_usd = 0
+        WHERE extraction_id = 'extract-fixture'
+        """,
+        ("a" * 64,),
+    )
+    connection.execute(
+        "UPDATE source_item_extractions SET status = 'succeeded' "
+        "WHERE extraction_id = 'extract-fixture'"
+    )
+
+
 def _never_called(*args: object, **kwargs: object) -> Any:
     raise AssertionError("this step must not run")
 
@@ -688,6 +759,100 @@ def test_episode_step_skips_without_a_successful_extraction_and_records_builder_
     failed_step = failed.step("episodes")
     assert failed_step is not None and failed_step.status == "failed"
     assert "Stage 2 fixture refusal" in str(failed_step.error_text)
+
+
+def test_item_failures_fail_the_step_by_count_but_do_not_hide_successful_extractions(
+    tmp_path: Path,
+) -> None:
+    """The 2026-09-05 production run: 606 items succeeded beside 227 refused outputs, and
+    the episodes step still said no extraction had ever succeeded."""
+
+    config = _config(tmp_path, monthly_llm_budget_usd="50.00")
+
+    def run_extraction(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            run_id="stage1-fixture",
+            selected_items=4,
+            submitted_items=4,
+            succeeded_items=1,
+            claims_stored=2,
+            flagged_item_ids=(),
+            errors=(
+                SimpleNamespace(source_item_id=44, code="evidence_validation_error"),
+                SimpleNamespace(source_item_id=65, code="schema_violation"),
+                SimpleNamespace(source_item_id=71, code="evidence_validation_error"),
+            ),
+            ineligible=(),
+            ok=False,
+            pending=False,
+        )
+
+    def refusing_episodes(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        raise EpisodeError("Stage 2 fixture refusal")
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_player(connection)
+        _seed_source_item(connection)
+        connection.commit()
+        report = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(
+                run_extraction=run_extraction,
+                provider_factory=lambda: SimpleNamespace(),
+                build_episodes=refusing_episodes,
+            ),
+        )
+
+    extract = report.step("extract")
+    assert extract is not None and extract.status == "failed"
+    assert "3 item failure(s) beside 1 succeeded" in str(extract.error_text)
+    assert "2 evidence_validation_error, 1 schema_violation" in str(extract.error_text)
+    assert "item 44" not in str(extract.error_text)
+    assert extract.summary["item_errors_by_code"] == {
+        "evidence_validation_error": 2,
+        "schema_violation": 1,
+    }
+    assert extract.summary["item_error_ids"] == [44, 65, 71]
+    # No succeeded row exists in this fixture store (the stub wrote none), so the gate
+    # still skips honestly; the next test proves the store-side witness.
+    episodes = report.step("episodes")
+    assert episodes is not None and episodes.status == "skipped"
+
+
+def test_a_succeeded_extraction_row_is_enough_to_build_episodes(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    def refusing_episodes(connection: sqlite3.Connection, **kwargs: Any) -> Any:
+        raise EpisodeError("Stage 2 fixture refusal")
+
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        # A clean extract step is not required; one succeeded row in the store is.
+        record_ops_run(
+            connection,
+            batch_run_id="prior-stage1",
+            step="extract",
+            status="failed",
+            started_at=NOW - timedelta(hours=2),
+            finished_at=NOW - timedelta(hours=1),
+            summary={"succeeded_items": 606, "item_errors": 227},
+            error_text="extraction reported 227 item failure(s) beside 606 succeeded",
+        )
+        _seed_succeeded_extraction(connection)
+        connection.commit()
+        report = run_batch(
+            connection,
+            config=config,
+            now=NOW,
+            dependencies=_dependencies(build_episodes=refusing_episodes),
+        )
+
+    episodes = report.step("episodes")
+    assert episodes is not None and episodes.status == "failed"
+    assert "Stage 2 fixture refusal" in str(episodes.error_text)
 
 
 def test_keychain_credential_is_ephemeral_and_never_reaches_operator_outputs(

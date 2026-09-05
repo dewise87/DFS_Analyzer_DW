@@ -21,6 +21,7 @@ from narrative_alpha.ingest import (
     ParsedOwnership,
     ParsedProjection,
     ProjectionParseResult,
+    StokasticStatsLoadReport,
 )
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.ops import (
@@ -60,9 +61,9 @@ KICKOFF = datetime(2026, 9, 13, 17, 0, tzinfo=UTC)
 # The lane ingests as of now, so the decision instant is now: a cutoff before the
 # ingest could not see what the ingest just wrote.
 NOW = DECISION_AT
-# The lane fixture captures its projections the evening before the decision, so the one
-# threshold it must excuse is freshness. Odds and weather are measured, not required.
-ACCEPTED_READINESS = ("projection_age",)
+# The lane fixture captures its projections the evening before the decision, so the
+# thresholds it must excuse are freshness and its deliberately absent game feeds.
+ACCEPTED_READINESS = ("projection_age", "odds_coverage", "weather_coverage")
 
 # Four real matchups, so the export's `AWAY@HOME` field and the crosswalk both behave as
 # they will on a real Sunday.
@@ -355,7 +356,7 @@ def _run(
         "now": NOW,
         # This fixture is a capture fixture: it stages the salary and vendor files a real
         # Saturday produces and nothing else. There is no odds or weather feed in the
-        # repository yet, and its projections are deliberately captured the evening before
+        # fixture, and its projections are deliberately captured the evening before
         # the decision, so three readiness thresholds genuinely miss. Naming them here is
         # what an operator would do, and it exercises the acceptance path end to end —
         # the manifest and the memo both record them. `test_the_lane_refuses_a_slate_that_
@@ -379,6 +380,9 @@ def test_lane_goes_from_captures_to_upload_csv_and_memo(week: Any, tmp_path: Pat
     assert report.ok, [step.error_text for step in report.steps if not step.ok]
     assert [step.step for step in report.steps] == [
         "slate_salaries",
+        "slate_stats",
+        "slate_odds",
+        "slate_weather",
         "slate_projections",
         "slate_episodes",
         "slate_features",
@@ -394,6 +398,8 @@ def test_lane_goes_from_captures_to_upload_csv_and_memo(week: Any, tmp_path: Pat
     assert report.decision_snapshot_id in report.replay_command
     # The upload CSV is the frozen artifact, not a second rendering of it.
     assert report.upload_csv_path.name == "generated_lineups.csv"
+    stats = report.step("slate_stats")
+    assert stats is not None and stats.status == "skipped"
 
     with connect_database(week.database) as connection:
         recorded = {
@@ -406,19 +412,65 @@ def test_lane_goes_from_captures_to_upload_csv_and_memo(week: Any, tmp_path: Pat
 
     assert set(recorded) == {
         "slate_salaries",
+        "slate_stats",
+        "slate_odds",
+        "slate_weather",
         "slate_projections",
         "slate_episodes",
         "slate_features",
         "slate_build",
         "slate_memo",
     }
-    assert all(status == "succeeded" for status, _ in recorded.values())
+    assert all(
+        status
+        == ("skipped" if step in {"slate_stats", "slate_odds", "slate_weather"} else "succeeded")
+        for step, (status, _) in recorded.items()
+    )
     # decision_at is written into *every* step's summary, so the run replays from one cutoff.
     assert {summary["decision_at"] for _, summary in recorded.values()} == {
         utc_timestamp(DECISION_AT)
     }
     assert len(snapshots) == 1
     assert str(snapshots[0]["decision_at"]) == utc_timestamp(DECISION_AT)
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_stats_capture_outcomes_do_not_block_the_slate_build(
+    week: Any, tmp_path: Path, held: bool
+) -> None:
+    base = SlateDependencies(source_formats=(FixtureVendor(),))
+    stats_report = StokasticStatsLoadReport(
+        capture_path=tmp_path / "stats-capture",
+        season=SEASON,
+        week=WEEK,
+        source="stokastic",
+        files_seen=3,
+        rows_seen=36,
+        players_seen=12,
+        players_written=0,
+        stat_rows_inserted=0,
+        duplicate_stat_rows=0,
+        unresolved_fraction=0.5 if held else 0.0,
+        max_unresolved_fraction=0.0,
+        held=held,
+        out_of_slate_rows=0,
+        slate_team_count=0,
+        receptions_are_vendor_placeholder=True,
+        placeholder_note="fixture placeholder",
+    )
+    dependencies = replace(
+        base,
+        newest_stats_capture=lambda *_: stats_report.capture_path,
+        load_stokastic_stats_capture=lambda *_args, **_kwargs: stats_report,
+    )
+
+    report = _run(week, tmp_path=tmp_path, dependencies=dependencies)
+
+    stats = report.step("slate_stats")
+    assert stats is not None
+    assert stats.status == ("failed" if held else "succeeded")
+    build = report.step("slate_build")
+    assert build is not None and build.status == "succeeded"
 
 
 def test_lane_builds_showdown_without_new_operator_flags(tmp_path: Path) -> None:
@@ -1222,6 +1274,9 @@ def test_status_renders_the_slate_section_on_an_empty_store(tmp_path: Path) -> N
     assert payload["slate"] is None
     assert [step["step"] for step in payload["slate_steps"]] == [  # type: ignore[index]
         "slate_salaries",
+        "slate_stats",
+        "slate_odds",
+        "slate_weather",
         "slate_projections",
         "slate_episodes",
         "slate_features",
@@ -1336,6 +1391,9 @@ def test_cli_runs_the_lane_and_prints_the_paths(
     assert payload["replay_command"].startswith("na-replay --database ")
     assert [step["step"] for step in payload["steps"]] == [
         "slate_salaries",
+        "slate_stats",
+        "slate_odds",
+        "slate_weather",
         "slate_projections",
         "slate_episodes",
         "slate_features",

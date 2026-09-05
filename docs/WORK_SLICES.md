@@ -3428,9 +3428,28 @@ shapes (`ODDS_API_URL`, `WEATHER_API_URL`, `WEATHER_SOURCE`, `_weather_params`).
 > store — wait: production has no `games` rows yet (no salary export has been ingested),
 > so say so and load into the seeded test store instead. Gates green.
 
-**Status note (2026-09-05):** prompted; not started. Needs no vendor login. Production has
-no `games` rows until the first salary export is ingested, so the real-capture acceptance
-waits for Week 1's DraftKings file even though the code does not.
+**Implementation status (2026-09-05):** landed. `ingest/game_inputs.py` (shared capture
+verification, report, insert-only writes), `ingest/odds.py` (The Odds API v4 spreads and
+totals, one row per event × bookmaker, refuses asynchronous market timestamps and
+inconsistent pairs), `ingest/weather.py` (Open-Meteo single runs, kickoff floored to its
+UTC hour, units checked, precipitation probability NULL when the source omits it),
+`na-slate load-odds` / `load-weather`, `slate_odds` / `slate_weather` lane steps
+(migration 0023), the status ingest table keyed per table's hash column, the stadium
+name-to-code table moved into `identity/normalization.py`, `config/readiness.toml`
+`2026-09-05.3` with odds and weather required, and real-file goldens. Finding recorded in
+the decision log: the 2026-09-01 weather bodies end on 2026-09-08 05:00 UTC, before their
+kickoffs — Open-Meteo's run horizon is about a week, so the Saturday/Sunday fetches in the
+runbook are the ones that count.
+
+**Review outcome (2026-09-05):** accepted with one correction and one repair. (1) An odds
+event that matches no ingested game was a rejection, which made the step "skipped" and the
+CLI exit 1 on every real week: the feed carries every upcoming NFL game (272 events in the
+9/1 file) and the store only has the games a salary export created. Such events are now a
+counted note (`unmatched_rows`), and only ambiguous matches, bad bookmakers, and capture
+errors are rejections. (2) The delivered tree had four failing tests because Slice 49's
+migration 0024 landed after Slice 48's 0023 without the store and doctor tests following;
+fixed. Suite 908 → 914 (two batch-lane tests and one odds test added in review).
+
 
 ### Slice 49 — Stats read scoped to a slate, stats capture in the lane and status (small)
 
@@ -3462,7 +3481,72 @@ waits for Week 1's DraftKings file even though the code does not.
 > 4. Tests for each: the slate filter on a seeded store, the lane step's three outcomes,
 >    and the status row. Gates green; never the production database.
 
-**Status note (2026-09-05):** prompted; not started.
+**Implementation status (2026-09-05):** landed with Slice 48. `na-slate stats --slate-id`
+filters the derived read to the slate's teams and reports the rows outside it; a
+`slate_stats` lane step (migration 0024) loads the week's newest stats capture, skips when
+none exists, and fails without stopping the lane when the capture is held; the status
+ingest table counts the `stats` kind on `file_sha256`. Reviewed clean.
+
+### Slice 50 — Stage 1 refusals become evidence (keep the output, name the mismatch)
+
+**Goal:** the first real batch settled on 2026-09-05: 606 items succeeded, 176 were refused
+for `evidence_validation_error`, 51 for `schema_violation`, 9 flagged. That is a 27% refusal
+rate, and nothing can be learned from it, because a refused attempt stores **no output**
+and a one-line generic message ("provider evidence or entity text did not match the
+canonical source item"; "strict Stage 1 schema violation (string_too_short, too_short)").
+Before anyone tunes the prompt or the validator, the refusals have to be inspectable.
+
+**Design doc:** §5.2 (Stage 1 is deterministic-validated; a model output is evidence only
+when it quotes the source), §5.9, Slice 19's review ("model-counted evidence offsets are
+unreliable; the validator locates extracts"), the retention rules in `config/` (raw model
+output is redactable content like any other).
+
+**Model:** Claude **Fable 5 / Opus 5** · ChatGPT **GPT-5.1 Pro or Thinking (max)**.
+Frontier: the diagnosis on real outputs is the deliverable; the code change is small.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; gates are
+> `uv run --frozen ruff check .`, `uv run --frozen mypy src/narrative_alpha`,
+> `uv run --frozen pytest -q`). Read `src/narrative_alpha/narrative/extraction.py`
+> (`_validate_provider_envelope`, `_repair_evidence_offsets`, `_validate_claim_source`,
+> and where a refused attempt is written with `error_code`), `extraction_models.py` (the
+> strict schema — `verbatim_extract` 1–512, `name_raw` 1–64, the `min_length` tuples),
+> `docs/schema.md` for `source_item_extractions` (`output_json`, `output_sha256`,
+> `output_redacted_at`, the purge rules), migration 0007's state-machine triggers, and
+> `docs/DECISIONS.md`. Copy the production database to a scratch path first; never read it
+> in place.
+>
+> 1. **Refused attempts keep their output.** A `failed` attempt with a provider response
+>    stores `output_json` and `output_sha256` exactly as a succeeded one does, under the
+>    same redaction and purge rules, so a refusal can be examined later. Adjust the 0007
+>    transition rule that forbids it (new migration; the rule for `succeeded` is unchanged)
+>    and the writer. Cost and tokens are already stored.
+> 2. **The message names the mismatch.** For evidence failures: which claim, which
+>    evidence ref, the model's `verbatim_extract` (first 80 chars), and the closest
+>    substring the validator found in the canonical text with its similarity, so a
+>    whitespace/quote/ellipsis problem is distinguishable from an invented quote. For schema
+>    failures: the field path and the offending value's length. Keep `error_code` stable;
+>    add the detail to `error_message` and a structured `error_detail_json` column.
+> 3. **Diagnose the 227.** Their outputs are gone, so re-run exactly those source items
+>    through a new attempt under a new `prompt_version_id` only if step 1 has landed and
+>    Daniel says go (budget guard applies; expect under a dollar). Then, in the PR, classify
+>    every refusal into named buckets with counts (e.g. "extract differs only in
+>    whitespace/quotes", "extract spans a headline the canonical text drops", "model
+>    paraphrased", "entity name has a suffix", "empty verbatim_extract for a
+>    no-claim article") and say for each bucket whether the fix belongs in the validator
+>    (normalize before compare), the prompt (instruct), or the schema (allow an explicit
+>    empty-claims output instead of a too-short string).
+> 4. **Fix only what the buckets justify**, one bucket per commit, each with a test built
+>    from a real (anonymized) refused output. Do not loosen the validator's core rule: a
+>    quote that is not in the source is still refused.
+> 5. `na-extract review` lists refused attempts by bucket with counts, and `na-ops status`'s
+>    Stage 1 block shows refusals by code for the last run.
+>
+> Gates green; never the production database. Report the before/after refusal rate on the
+> re-run and the cost.
+
+**Status note (2026-09-05):** prompted; step 3 needs Daniel's go-ahead for a paid re-run.
 
 ### Queued, not yet prompted (in order)
 
@@ -3473,6 +3557,10 @@ waits for Week 1's DraftKings file even though the code does not.
   Week 1 to be capture-only for that source.
 - **Slice 13 — wire distributions into the build path** (§6.2) stays blocked on the same
   real vendor export as Slice 9.
+- **Slice 38 — Stage 2/3 hardening** unblocks once episodes exist: the batch lane's
+  episodes gate was fixed 2026-09-05 (it read a clean extract *step* rather than the
+  store, so 606 succeeded extractions still produced no episode). The next `na-ops batch`
+  builds the first snapshot; two live weeks of episodes remain the honest prerequisite.
 - **Slice 39 — Fast-lane item eligibility from the ledger** (§7.4): once Slice 34 has a
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.

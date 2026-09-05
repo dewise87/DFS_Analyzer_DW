@@ -14,6 +14,7 @@ from narrative_alpha.ingest import (
     read_derived_projection_means,
 )
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.ops.status import _capture_ingest_status
 from narrative_alpha.slate_cli import main as slate_main
 from narrative_alpha.snapshots import CaptureKind, load_manifest
 from narrative_alpha.snapshots.cli import main as snapshot_main
@@ -171,6 +172,10 @@ def test_capture_load_joins_qb_is_idempotent_and_derives_hand_scored_dk_mean(
         derived = read_derived_projection_means(
             connection, season=2026, week=1, site="dk", config_path=CONFIG
         )
+        captures = {
+            item.kind: item
+            for item in _capture_ingest_status(connection, snapshot_root, 2026, 1)
+        }
 
     expected = 266 * 0.04 + 1.30 * 4 - 0.52 + 7 * 0.1 + 0.05 * 6
     avery = next(row for row in derived if row.canonical_name == "Avery Archer")
@@ -187,6 +192,7 @@ def test_capture_load_joins_qb_is_idempotent_and_derives_hand_scored_dk_mean(
     assert avery.projection_mean == pytest.approx(expected)
     assert avery.source == "stokastic-stats-derived"
     assert avery.source_version == hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+    assert (captures["stats"].files_captured, captures["stats"].files_ingested) == (3, 3)
 
     assert (
         slate_main(
@@ -233,6 +239,85 @@ def test_capture_load_joins_qb_is_idempotent_and_derives_hand_scored_dk_mean(
     assert "stokastic-stats-derived" in output
     assert "Avery Archer" in output
     assert "bonuses        excluded" in output
+
+
+def test_stats_slate_filter_limits_derived_players_and_reports_excluded_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "store.sqlite3"
+    stamp = utc_timestamp(OBSERVED)
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        arizona = _insert_player(connection, "Arizona Player", "ARI")
+        buffalo = _insert_player(connection, "Buffalo Player", "BUF")
+        for abbreviation in ("ARI", "BUF"):
+            connection.execute(
+                """
+                INSERT INTO teams(
+                    team_key, abbreviation, canonical_name, source, published_at, observed_at,
+                    ingested_at, effective_at, valid_from, valid_to, source_version, run_id
+                ) VALUES (?, ?, ?, 'fixture', NULL, ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+                """,
+                (f"fixture:{abbreviation}", abbreviation, abbreviation, stamp, stamp, stamp),
+            )
+        cursor = connection.execute(
+            """
+            INSERT INTO slates(
+                external_slate_id, site, slate_type, season, week, name, starts_at, locks_at,
+                source, published_at, observed_at, ingested_at, effective_at, valid_from,
+                valid_to, source_version, run_id
+            ) VALUES ('fixture-slate', 'draftkings', 'classic', 2026, 1, 'fixture', ?, ?,
+                      'fixture', NULL, ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+            """,
+            (stamp, stamp, stamp, stamp, stamp),
+        )
+        assert cursor.lastrowid is not None
+        slate_id = int(cursor.lastrowid)
+        arizona_team = int(
+            connection.execute("SELECT team_id FROM teams WHERE abbreviation = 'ARI'").fetchone()[0]
+        )
+        connection.execute(
+            """
+            INSERT INTO salaries(
+                slate_id, player_id, game_id, team_id, opponent_team_id, site_player_id,
+                roster_positions_json, salary, player_status, source_file_sha256, source,
+                published_at, observed_at, ingested_at, effective_at, valid_from, valid_to,
+                source_version, run_id
+            ) VALUES (?, ?, NULL, ?, NULL, 'fixture-player', '["QB"]', 7000, NULL, ?,
+                      'fixture', NULL, ?, ?, NULL, ?, NULL, 'fixture-v1', NULL)
+            """,
+            (slate_id, arizona, arizona_team, "a" * 64, stamp, stamp, stamp),
+        )
+        for player_id, file_hash in ((arizona, "b" * 64), (buffalo, "c" * 64)):
+            connection.execute(
+                """
+                INSERT INTO projected_stats(
+                    source, season, week, player_id, stat, value, file_sha256, published_at,
+                    observed_at, ingested_at, effective_at, valid_from, valid_to, source_version,
+                    run_id
+                ) VALUES ('stokastic', 2026, 1, ?, 'pass_yds', 250, ?, NULL, ?, ?, NULL, ?,
+                          NULL, 'stokastic-stats-v1', NULL)
+                """,
+                (player_id, file_hash, stamp, stamp, stamp),
+            )
+        filtered = read_derived_projection_means(
+            connection, season=2026, week=1, site="dk", config_path=CONFIG, slate_id=slate_id
+        )
+
+    assert [row.canonical_name for row in filtered] == ["Arizona Player"]
+    assert (
+        slate_main(
+            [
+                "stats", "--database", str(database), "--season", "2026", "--week", "1",
+                "--site", "dk", "--slate-id", str(slate_id), "--config", str(CONFIG),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "1 export row(s) outside the slate" in output
+    assert "Arizona Player" in output
+    assert "Buffalo Player" not in output
 
 
 def test_unresolved_identity_is_queued_and_threshold_holds_entire_capture(

@@ -45,6 +45,10 @@ RECEPTION_PLACEHOLDER_TOLERANCE = 0.080001
 RECEIVING_YARDS_TOLERANCE = 1.150001
 
 
+class MissingStatsCapture(SourceFormatError):
+    """The week has no captured Stokastic Stats export yet."""
+
+
 class ProjectedStat(StrEnum):
     """Closed vocabulary represented by the three real export schemas."""
 
@@ -333,7 +337,7 @@ def newest_stats_capture(snapshot_root: Path, season: int, week: int) -> Path:
 
     week_path = snapshot_week_path(snapshot_root, season, week)
     if not week_path.is_dir():
-        raise SourceFormatError(f"snapshot week does not exist: {week_path}")
+        raise MissingStatsCapture(f"snapshot week does not exist: {week_path}")
     captures = sorted((path for path in week_path.iterdir() if path.is_dir()), reverse=True)
     for capture_path in captures:
         manifest_path = capture_path / MANIFEST_FILENAME
@@ -342,7 +346,7 @@ def newest_stats_capture(snapshot_root: Path, season: int, week: int) -> Path:
         manifest = load_manifest(manifest_path)
         if any(record.kind is CaptureKind.STATS for record in manifest.files):
             return capture_path
-    raise SourceFormatError(
+    raise MissingStatsCapture(
         f"no capture under {week_path} manifests a '{CaptureKind.STATS.value}' file; capture "
         "the three Stokastic Stats exports first with `na-snapshot capture --kind stats`"
     )
@@ -595,6 +599,7 @@ def read_derived_projection_means(
     source: str = STOKASTIC_SOURCE,
     config_path: Path = DEFAULT_DERIVED_SCORING_PATH,
     as_of: datetime | None = None,
+    slate_id: int | None = None,
 ) -> tuple[DerivedProjectionMean, ...]:
     """Score latest component means without bonuses or ambiguous fumble deductions."""
 
@@ -621,6 +626,13 @@ def read_derived_projection_means(
             "AND (valid_to IS NULL OR valid_to > ?)"
         )
         parameters.extend([cutoff_text, cutoff_text, cutoff_text, cutoff_text])
+    slate_teams = (
+        None
+        if slate_id is None
+        else _slate_teams(
+            connection, season=season, week=week, site=canonical_site, slate_id=slate_id
+        )
+    )
     rows = connection.execute(
         f"""
         WITH eligible AS (
@@ -671,17 +683,36 @@ def read_derived_projection_means(
             observed_at=observations[player_id],
         )
         for player_id, mean in totals.items()
+        if slate_teams is None
+        or _player_team(
+            connection,
+            player_id=player_id,
+            season=season,
+            week=week,
+            as_of=cutoff_text,
+        )
+        in slate_teams
     ]
     return tuple(sorted(derived, key=lambda item: (-item.projection_mean, item.canonical_name)))
 
 
 def render_derived_projection_means(
-    rows: tuple[DerivedProjectionMean, ...], *, season: int, week: int, site: str
+    rows: tuple[DerivedProjectionMean, ...],
+    *,
+    season: int,
+    week: int,
+    site: str,
+    slate_id: int | None = None,
+    out_of_slate_rows: int | None = None,
 ) -> str:
     """Render the read-only operator comparison with its derived-source labels."""
 
     canonical_site = normalize_site(site).value
     header = f"STOKASTIC DERIVED STATS — {season} week {week:02d} {canonical_site}"
+    if slate_id is not None:
+        header += (
+            f" — slate {slate_id}; {out_of_slate_rows or 0} export row(s) outside the slate"
+        )
     if not rows:
         return f"{header}\n  no projected stats loaded\n"
     lines = [

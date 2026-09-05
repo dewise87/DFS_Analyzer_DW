@@ -12,6 +12,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from narrative_alpha.identity import CrosswalkError
+from narrative_alpha.ingest.game_inputs import newest_game_input_capture, render_game_input_load
+from narrative_alpha.ingest.odds import load_odds_capture
 from narrative_alpha.ingest.slates import (
     SlateIngestError,
     SlateLoadReport,
@@ -29,6 +31,8 @@ from narrative_alpha.ingest.stokastic_stats import (
     render_stats_load,
 )
 from narrative_alpha.ingest.timestamps import utc_timestamp
+from narrative_alpha.ingest.weather import load_weather_capture
+from narrative_alpha.snapshots import CaptureKind
 from narrative_alpha.snapshots.core import DEFAULT_SNAPSHOT_ROOT
 from narrative_alpha.store import (
     MigrationError,
@@ -76,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    for kind in ("odds", "weather"):
+        loader = subparsers.add_parser(f"load-{kind}", help=f"load captured {kind} by game")
+        _add_common_arguments(loader)
+        loader.add_argument("--capture", type=Path)
+        loader.add_argument("--root", type=Path, default=DEFAULT_SNAPSHOT_ROOT)
+
     listing = subparsers.add_parser("list", help="show the week's slates and their ids")
     _add_common_arguments(listing)
     listing.add_argument("--site", choices=("dk", "fd"), default=None)
@@ -121,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_arguments(stats)
     stats.add_argument("--site", choices=("dk", "fd"), required=True)
     stats.add_argument(
+        "--slate-id",
+        type=int,
+        help="limit displayed players to teams in this ingested slate",
+    )
+    stats.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_DERIVED_SCORING_PATH,
@@ -139,6 +154,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         with connect_database(arguments.database) as connection:
             apply_migrations(connection)
+            if arguments.command in {"load-odds", "load-weather"}:
+                kind = CaptureKind(arguments.command.removeprefix("load-"))
+                capture = arguments.capture or newest_game_input_capture(
+                    arguments.root, arguments.season, arguments.week, kind
+                )
+                load = load_odds_capture if kind is CaptureKind.ODDS else load_weather_capture
+                report = load(connection, capture, season=arguments.season, week=arguments.week)
+                print(render_game_input_load(report), end="")
+                return 0 if report.ok else 1
             if arguments.command == "ingest":
                 return _ingest(connection, arguments)
             if arguments.command == "load-stats":
@@ -166,13 +190,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     site=arguments.site,
                     config_path=arguments.config,
                     as_of=arguments.as_of,
+                    slate_id=arguments.slate_id,
                 )
+                out_of_slate_rows = None
+                if arguments.slate_id is not None:
+                    all_rows = read_derived_projection_means(
+                        connection,
+                        season=arguments.season,
+                        week=arguments.week,
+                        site=arguments.site,
+                        config_path=arguments.config,
+                        as_of=arguments.as_of,
+                    )
+                    out_of_slate_rows = len(all_rows) - len(rows)
                 print(
                     render_derived_projection_means(
                         rows,
                         season=arguments.season,
                         week=arguments.week,
                         site=arguments.site,
+                        slate_id=arguments.slate_id,
+                        out_of_slate_rows=out_of_slate_rows,
                     ),
                     end="",
                 )

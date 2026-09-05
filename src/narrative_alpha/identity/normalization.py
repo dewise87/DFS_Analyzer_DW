@@ -116,3 +116,45 @@ def team_code_variants(value: str) -> tuple[str, ...]:
     canonical = normalize_team_code(value)
     variants = sorted(alias for alias, target in TEAM_CODE_ALIASES.items() if target == canonical)
     return (canonical, *variants)
+
+
+TEAM_CODES_BY_NAME = {
+    "arizona cardinals": "ARI",
+    "atlanta falcons": "ATL",
+    "baltimore ravens": "BAL",
+    "buffalo bills": "BUF",
+    "carolina panthers": "CAR",
+    "chicago bears": "CHI",
+    "cincinnati bengals": "CIN",
+    "cleveland browns": "CLE",
+    "dallas cowboys": "DAL",
+    "denver broncos": "DEN",
+    "detroit lions": "DET",
+    "green bay packers": "GB",
+    "houston texans": "HOU",
+    "indianapolis colts": "IND",
+    "jacksonville jaguars": "JAX",
+    "kansas city chiefs": "KC",
+    "las vegas raiders": "LV",
+    "los angeles chargers": "LAC",
+    "los angeles rams": "LAR",
+    "miami dolphins": "MIA",
+    "minnesota vikings": "MIN",
+    "new england patriots": "NE",
+    "new orleans saints": "NO",
+    "new york giants": "NYG",
+    "new york jets": "NYJ",
+    "philadelphia eagles": "PHI",
+    "pittsburgh steelers": "PIT",
+    "san francisco 49ers": "SF",
+    "seattle seahawks": "SEA",
+    "tampa bay buccaneers": "TB",
+    "tennessee titans": "TEN",
+    "washington commanders": "WAS",
+}
+
+
+def team_code_from_name(value: str) -> str | None:
+    """Resolve only a maintained NFL full name; never infer a franchise."""
+
+    return TEAM_CODES_BY_NAME.get(" ".join(value.casefold().split()))

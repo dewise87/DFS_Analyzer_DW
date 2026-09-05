@@ -1877,6 +1877,9 @@ class OpsRunRow(StoreRow):
         "episodes",
         # Slate lane (`na-ops slate`), Saturday and Sunday.
         "slate_salaries",
+        "slate_stats",
+        "slate_odds",
+        "slate_weather",
         "slate_projections",
         "slate_episodes",
         "slate_features",

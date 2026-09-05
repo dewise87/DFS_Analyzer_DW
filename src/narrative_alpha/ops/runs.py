@@ -22,6 +22,9 @@ from narrative_alpha.store import OpsRunRow
 OpsBatchStep = Literal["collect", "purge", "extract", "nflverse_refresh", "episodes"]
 OpsSlateStep = Literal[
     "slate_salaries",
+    "slate_stats",
+    "slate_odds",
+    "slate_weather",
     "slate_projections",
     "slate_episodes",
     "slate_features",
