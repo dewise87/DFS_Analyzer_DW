@@ -68,3 +68,17 @@ def test_no_named_player_uses_empty_claims_without_weakening_name_minimum() -> N
     payload = json.loads(result.output_json or "")
     payload["claims"] = []
     assert _validate(item, replace(result, output_json=json.dumps(payload))).claims == ()
+
+
+def test_paraphrased_context_stays_refused_but_contiguous_source_quote_is_valid() -> None:
+    item, result = _fixture("paraphrased_context")
+    with pytest.raises(EvidenceValidationError) as caught:
+        _validate(item, result)
+    assert caught.value.detail is not None
+    assert caught.value.detail["bucket"] == "nonverbatim_context"
+    payload = json.loads(result.output_json or "")
+    payload["claims"][0]["disconfirming_context"] = item.source_text[
+        item.source_text.index("The NFL has yet"):
+    ]
+    repaired = _validate(item, replace(result, output_json=json.dumps(payload)))
+    assert repaired.claims[0].disconfirming_context in item.source_text

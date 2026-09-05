@@ -1,0 +1,72 @@
+{
+  "provenance": {
+    "prompt_version_id": "stage1-refusal-diagnostic-20260905-v1",
+    "source_item_id": 3,
+    "original_output_sha256": "b70f10c816c1182feca2986aabd2bdb4c71e5968e2b53264a8105e2ba59007c3",
+    "anonymization": "Personal names and selected organization/program names replaced consistently; source_item_id mapped to 1; provider offsets and all other fields preserved."
+  },
+  "source_text": "GM Chris Alexander expects Liam Carter to play for Packers this season The NFL has yet to issue a suspension for Carter, who can't practice or play while on the commissioner exempt list.",
+  "output": {
+    "claims": [
+      {
+        "actionability": 0.8,
+        "ambiguity_flags": [
+          "timeframe"
+        ],
+        "claim_dimension": "active_status",
+        "claim_type": "availability",
+        "disconfirming_context": "Liam Carter is currently on the commissioner exempt list and cannot practice or play; the NFL has yet to issue a suspension.",
+        "evidence_basis": "beat_report",
+        "evidence_class": "B",
+        "evidence_refs": [
+          {
+            "extract_end": 18,
+            "extract_start": 3,
+            "source_item_id": 1,
+            "verbatim_extract": "Chris Alexander"
+          },
+          {
+            "extract_end": 39,
+            "extract_start": 29,
+            "source_item_id": 1,
+            "verbatim_extract": "Liam Carter"
+          },
+          {
+            "extract_end": 56,
+            "extract_start": 49,
+            "source_item_id": 1,
+            "verbatim_extract": "Packers"
+          },
+          {
+            "extract_end": 73,
+            "extract_start": 60,
+            "source_item_id": 1,
+            "verbatim_extract": "this season"
+          }
+        ],
+        "falsifiable": true,
+        "model_confidence": "medium",
+        "novelty": "new",
+        "outcome_direction": "increase",
+        "player_refs": [
+          {
+            "name_raw": "Liam Carter"
+          }
+        ],
+        "roster_behavior_direction": "unknown",
+        "specificity": 0.7,
+        "suggested_channels": [
+          "availability"
+        ],
+        "team_refs": [
+          "Packers"
+        ],
+        "uncertainty_flags": [
+          "conditional"
+        ]
+      }
+    ],
+    "prompt_injection_detected": false,
+    "schema_version": "stage1-extraction-v1"
+  }
+}
