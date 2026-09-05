@@ -2,6 +2,36 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Stokastic component stats stay raw; site points are a labeled read
+
+- **The three Stats exports are one capture and one observation.** Passing, rushing, and
+  receiving headers are matched exactly to the reviewed 2026-09-05 schemas. Header drift is
+  refused with missing and unexpected columns; percentages require an explicit `%` in both the
+  reviewed header and cell. The loader never infers a percentage from magnitude.
+- **Component facts are full-week, insert-only observations.** `projected_stats` stores every
+  resolved player regardless of the requested slate; slate membership is measured and reported,
+  not used as a write filter. `Fum` remains three distinct facts (`pass_fumbles`,
+  `rush_fumbles`, `rec_fumbles`) because the files do not say whether a fumble was lost. A
+  database trigger requires canonical UTC-Z timestamps, and update/delete triggers preserve the
+  point-in-time history without any connection-registered SQL function.
+- **The receiving line documents its own placeholder.** `Catch %` and `YPC` are validation
+  columns, not facts. The parser requires the 75% catch-rate placeholder, verifies rounded
+  `Rec ~= 0.75 * Tgt` within 0.080001 receptions and `Rec Yds ~= Rec * YPC` within 1.150001
+  yards, and the load report explicitly labels receptions a vendor placeholder.
+- **Identity is name plus team, with a visible capture-level stop.** The files have neither
+  position nor site player ID, so only exact/alias/suffix name-and-team crosswalk paths can
+  resolve automatically; fuzzy matching remains disabled by the crosswalk contract. Unresolved
+  identities are queued once across the three files. The default maximum unresolved fraction is
+  10% of unique `(name, team)` identities, configured in `config/derived_scoring.toml`; above it,
+  no component facts from the capture are written.
+- **Site points are derived, bonus-free, and never a projection snapshot.** DraftKings and
+  FanDuel per-stat weights live in byte-hashed `config/derived_scoring.toml`. The read labels its
+  source `stokastic-stats-derived` and its `source_version` is the exact config SHA-256. DK
+  yardage bonuses are excluded because a threshold expectation cannot be recovered from an
+  expected yardage total; all fumble deductions are excluded because the vendor's unit is
+  unknown. These means do not enter `projection_snapshots` or candidate selection; Slice 9b owns
+  any future blend decision.
+
 ## 2026-09-05 — Repository review: enforce the decision contract independently
 
 - **Current site rules belong to this project, not the legacy optimizer package.** FanDuel

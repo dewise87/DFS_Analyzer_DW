@@ -20,6 +20,14 @@ from narrative_alpha.ingest.slates import (
     newest_salary_capture,
     render_slates,
 )
+from narrative_alpha.ingest.stokastic_stats import (
+    DEFAULT_DERIVED_SCORING_PATH,
+    load_stokastic_stats_capture,
+    newest_stats_capture,
+    read_derived_projection_means,
+    render_derived_projection_means,
+    render_stats_load,
+)
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.snapshots.core import DEFAULT_SNAPSHOT_ROOT
 from narrative_alpha.store import (
@@ -71,6 +79,58 @@ def build_parser() -> argparse.ArgumentParser:
     listing = subparsers.add_parser("list", help="show the week's slates and their ids")
     _add_common_arguments(listing)
     listing.add_argument("--site", choices=("dk", "fd"), default=None)
+
+    load_stats = subparsers.add_parser(
+        "load-stats",
+        help=(
+            "load a week's three-file Stokastic Stats capture into projected_stats "
+            "(exit 0 clean, 1 identities queued, 2 held or refused)"
+        ),
+    )
+    _add_common_arguments(load_stats)
+    load_stats.add_argument(
+        "--site",
+        choices=("dk", "fd"),
+        required=True,
+        help="site whose ingested slates scope the out-of-slate count",
+    )
+    load_stats.add_argument(
+        "--capture",
+        type=Path,
+        help="capture directory (default: the newest stats capture for the week)",
+    )
+    load_stats.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_SNAPSHOT_ROOT,
+        help=f"snapshot root directory (default: {DEFAULT_SNAPSHOT_ROOT})",
+    )
+    load_stats.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_DERIVED_SCORING_PATH,
+        help=(
+            "derived scoring config with the unresolved limit "
+            f"(default: {DEFAULT_DERIVED_SCORING_PATH})"
+        ),
+    )
+
+    stats = subparsers.add_parser(
+        "stats", help="print bonus-free points derived from loaded component projections"
+    )
+    _add_common_arguments(stats)
+    stats.add_argument("--site", choices=("dk", "fd"), required=True)
+    stats.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_DERIVED_SCORING_PATH,
+        help=f"derived scoring config (default: {DEFAULT_DERIVED_SCORING_PATH})",
+    )
+    stats.add_argument(
+        "--as-of",
+        type=_timestamp,
+        help="optional point-in-time availability cutoff",
+    )
     return parser
 
 
@@ -81,6 +141,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             apply_migrations(connection)
             if arguments.command == "ingest":
                 return _ingest(connection, arguments)
+            if arguments.command == "load-stats":
+                return _load_stats(connection, arguments)
             if arguments.command == "list":  # pragma: no branch - argparse constrains this
                 print(
                     render_slates(
@@ -92,6 +154,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ),
                         season=arguments.season,
                         week=arguments.week,
+                    ),
+                    end="",
+                )
+                return 0
+            if arguments.command == "stats":  # pragma: no branch - argparse constrains this
+                rows = read_derived_projection_means(
+                    connection,
+                    season=arguments.season,
+                    week=arguments.week,
+                    site=arguments.site,
+                    config_path=arguments.config,
+                    as_of=arguments.as_of,
+                )
+                print(
+                    render_derived_projection_means(
+                        rows,
+                        season=arguments.season,
+                        week=arguments.week,
+                        site=arguments.site,
                     ),
                     end="",
                 )
@@ -128,6 +209,24 @@ def _ingest(connection: sqlite3.Connection, arguments: argparse.Namespace) -> in
     )
     print(render_ingest(report), end="")
     return 0 if report.ok else 1
+
+
+def _load_stats(connection: sqlite3.Connection, arguments: argparse.Namespace) -> int:
+    capture_path = arguments.capture or newest_stats_capture(
+        arguments.root, arguments.season, arguments.week
+    )
+    report = load_stokastic_stats_capture(
+        connection,
+        capture_path,
+        season=arguments.season,
+        week=arguments.week,
+        site=arguments.site,
+        config_path=arguments.config,
+    )
+    print(render_stats_load(report), end="")
+    if report.held:
+        return 2
+    return 1 if report.unresolved else 0
 
 
 def render_ingest(report: SlateLoadReport) -> str:

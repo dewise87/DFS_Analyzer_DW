@@ -519,6 +519,23 @@ crosswalk, and inserts immutable point-in-time rows. Reprocessing the same captu
 a later observation remains a distinct row. Vendor adapters are intentionally schema-specific—no
 format guessing or silent fallback is allowed.
 
+Stokastic's Data Hub **Stats** page exports three component files (passing, rushing, receiving)
+with no fantasy points, salary, position, or ownership. Capture all three together and load them
+into the append-only `projected_stats` table; the receiving line's constant 75% catch rate is a
+vendor placeholder and is recorded as such. `na-slate stats` prints bonus-free DraftKings or
+FanDuel points derived from the components under the byte-hashed `config/derived_scoring.toml`,
+labeled `stokastic-stats-derived`; those means never enter `projection_snapshots` or a build.
+
+```bash
+uv run na-snapshot capture --season 2026 --week 1 --kind stats --source stokastic Stats_Passing.csv Stats_Rushing.csv Stats_Receiving.csv
+uv run na-slate load-stats --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk
+uv run na-slate stats --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk
+```
+
+`load-stats` exits 0 when clean, 1 when identities were queued for `na-crosswalk resolve`, and 2
+when more than the configured fraction of identities is unresolved, in which case nothing is
+written.
+
 ## Lineup generation and upload
 
 `OptimizationRequest` is solver-independent and carries every design-doc §6.5 control. The Phase

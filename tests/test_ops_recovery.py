@@ -290,12 +290,12 @@ def test_doctor_pending_migration_and_expired_rules_are_failures(tmp_path: Path)
     fixture = _doctor_fixture(tmp_path)
     migrations = tmp_path / "migrations"
     shutil.copytree(DEFAULT_MIGRATIONS_PATH, migrations)
-    (migrations / "0022_fixture_pending.sql").write_text(
+    (migrations / "0023_fixture_pending.sql").write_text(
         "CREATE TABLE fixture_pending(value TEXT) STRICT;\n", encoding="utf-8"
     )
     pending = fixture.run(migrations_path=migrations)
     migration = _check(pending, "database migrations")
-    assert migration.level == "FAIL" and "0022_fixture_pending.sql" in migration.detail
+    assert migration.level == "FAIL" and "0023_fixture_pending.sql" in migration.detail
 
     expired_path = tmp_path / "expired-rules.yaml"
     expired = fixture.config_paths["fast_lane_rules.yaml"].read_text(encoding="utf-8")

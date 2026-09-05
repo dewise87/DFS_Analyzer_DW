@@ -138,6 +138,7 @@ def test_status_marks_a_missing_kind(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "2026 week_01" in output
     assert "salaries: 2026-09-05T22:00:00.000000Z" in output
     assert "ownership: MISSING" in output
+    assert "stats: MISSING" in output
 
 
 def test_odds_fetch_preserves_raw_body_quota_headers_and_redacts_key(

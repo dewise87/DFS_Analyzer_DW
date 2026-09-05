@@ -1,0 +1,30 @@
+config_version = "derived-scoring-v1"
+
+[ingest]
+# The complete three-file capture is held when more than this fraction of unique
+# (player name, team) identities cannot be resolved through the crosswalk.
+max_unresolved_fraction = 0.10
+
+[sites.draftkings]
+pass_yds = 0.04
+pass_td = 4.0
+pass_int = -1.0
+rush_yds = 0.10
+rush_td = 6.0
+receptions = 1.0
+rec_yds = 0.10
+rec_td = 6.0
+
+[sites.fanduel]
+pass_yds = 0.04
+pass_td = 4.0
+pass_int = -1.0
+rush_yds = 0.10
+rush_td = 6.0
+receptions = 0.5
+rec_yds = 0.10
+rec_td = 6.0
+
+[excluded]
+yardage_bonuses = "excluded: an expected threshold bonus cannot be inferred from expected yardage"
+fumbles = "excluded: the vendor does not identify fumbles lost, so the scoring unit is unknown"

@@ -104,6 +104,19 @@ Rows are immutable slate/player observations with the full §3.2 block for exact
 Stores each vendor independently: player mean, optional floor/ceiling, and optional ownership view.  
 Vendor, slate, player, observed time, file hash, and §3.2 fields prevent later files replacing earlier ones.
 
+## `projected_stats`
+
+Stores Stokastic's full-week component projections independently of any slate: passing attempts,
+completions, yards, touchdowns and interceptions; rushing attempts, yards and touchdowns; targets,
+target share, placeholder receptions, receiving yards and touchdowns; and separate passing,
+rushing and receiving fumble fields. `Catch %` and `YPC` validate the vendor's rounded receiving
+line but are not facts. The source/season/week/player/stat/observation key is unique, every row
+retains its exact file SHA-256 and complete §3.2 provenance, canonical UTC-Z is enforced on insert,
+and updates/deletes are forbidden. Site-scored means are a read labeled
+`stokastic-stats-derived`; they use the exact byte hash of `config/derived_scoring.toml` as their
+version and exclude DK threshold bonuses and all fumble deductions. They are never written to
+`projection_snapshots` or consumed by candidate selection.
+
 ## `player_distributions`
 
 Stores activity/full-role gates and fitted zero-location log-normal active-outcome parameters.

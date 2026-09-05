@@ -3217,6 +3217,32 @@ coding session on the Mac; the model must read the files from disk.
 > in a scratch path (never the file under `data/db/`); report players written, unresolved
 > names, out-of-slate rows, and the ten highest derived DraftKings means. Gates green.
 
+**Implementation status (2026-09-05):** landed. `CaptureKind.STATS`, migration 0022
+(`projected_stats`, append-only with canonical-UTC triggers), `ingest/stokastic_stats.py`
+(exact-header detection for the three files, `%`-syntax percentages, the receiving line's
+placeholder relationships verified and refused on drift, name+team identity through the
+crosswalk with a capture-level hold above `max_unresolved_fraction`), byte-hashed
+`config/derived_scoring.toml` (DK/FD weights; bonuses and fumbles stated as excluded), the
+`stokastic-stats-derived` read behind `na-slate stats`, golden fixtures, and doctor coverage
+of the new config. Derived means never touch `projection_snapshots` or candidate selection.
+Suite 838 → 850.
+
+**Review outcome (2026-09-05):** accepted with one addition. The slice shipped no operator
+path to load a capture — only a library call — so the review added `na-slate load-stats`
+(newest stats capture for the week by default; exit 0 clean, 1 identities queued, 2 held or
+refused) with its report renderer and CLI tests. Verified on the real 2026-09-04 capture
+against a scratch copy of the production store: 3 files, 510 rows, 384 identities, 377
+players and 2,744 stat rows written, 7 unresolved (1.8%, queued: Cedric Tillman NO, Drew
+Ogletree IND, Emari Demercado DAL, Hollywood Brown PHI, Joshua Palmer BUF, Nick Singleton
+TEN, Pierre Strong Jr. GB), and a second load inserted nothing. Top derived DK means read
+sensibly (Gibbs 22.1, Herbert 21.2, Chase 20.7). Open items: (1) the derived read prints
+every team in the export — add a slate filter when a real slate exists; (2) when Slice 9
+lands, its `stokastic` `SourceFormat` must also implement `parse_stats` so one registry
+entry serves all three exports (today the stats loader uses its own registry); (3) the
+capture hold fires only above 10% unresolved, so the seven names above still need
+`na-crosswalk resolve` before their facts exist. Migrations 0021/0022 apply to production on
+the next command. Suite stays at 850; the CLI checks live inside the existing capture tests.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until the Data Hub

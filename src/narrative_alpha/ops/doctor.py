@@ -29,6 +29,10 @@ from narrative_alpha.ingest.nflverse_stats import (
     PinnedStatsRelease,
     load_workload_stats_config,
 )
+from narrative_alpha.ingest.stokastic_stats import (
+    DEFAULT_DERIVED_SCORING_PATH,
+    load_derived_scoring_config,
+)
 from narrative_alpha.narrative import (
     DEFAULT_HEAT_CONFIG_PATH,
     DEFAULT_PRICING_PATH,
@@ -62,6 +66,7 @@ CONFIG_FILENAMES = (
     "contest_policies.toml",
     "claim_grading.toml",
     "workload_stats.toml",
+    "derived_scoring.toml",
     "fast_lane_rules.yaml",
     "narrative_sources.toml",
     "model_pricing.toml",
@@ -317,6 +322,7 @@ def _config_specs() -> tuple[_ConfigSpec, ...]:
         _ConfigSpec("contest policies", "contest_policies.toml", load_contest_policies),
         _ConfigSpec("claim grading", "claim_grading.toml", load_grading_config),
         _ConfigSpec("workload stats", "workload_stats.toml", load_workload_stats_config),
+        _ConfigSpec("derived scoring", "derived_scoring.toml", load_derived_scoring_config),
         _ConfigSpec("fast lane", "fast_lane_rules.yaml", inactive_rules),
         _ConfigSpec("narrative sources", "narrative_sources.toml", load_source_catalog),
         _ConfigSpec("model pricing", "model_pricing.toml", pricing),
@@ -336,6 +342,7 @@ def _config_paths(
         "contest_policies.toml": repository / DEFAULT_CONTEST_POLICIES_PATH,
         "claim_grading.toml": repository / DEFAULT_GRADING_CONFIG_PATH,
         "workload_stats.toml": repository / DEFAULT_WORKLOAD_STATS_CONFIG_PATH,
+        "derived_scoring.toml": repository / DEFAULT_DERIVED_SCORING_PATH,
         "fast_lane_rules.yaml": repository / DEFAULT_FAST_LANE_RULES_PATH,
         "narrative_sources.toml": repository / DEFAULT_SOURCE_CATALOG_PATH,
         "model_pricing.toml": repository / DEFAULT_PRICING_PATH,

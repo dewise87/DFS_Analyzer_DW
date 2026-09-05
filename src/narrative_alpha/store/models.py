@@ -355,6 +355,35 @@ class ProjectionSnapshotRow(PointInTimeRow):
         return self
 
 
+class ProjectedStatRow(PointInTimeRow):
+    """One immutable vendor component projection."""
+
+    projected_stat_id: int
+    season: int = Field(ge=1)
+    week: int = Field(ge=1, le=99)
+    player_id: int
+    stat: Literal[
+        "pass_att",
+        "pass_cmp",
+        "pass_yds",
+        "pass_td",
+        "pass_int",
+        "rush_att",
+        "rush_yds",
+        "rush_td",
+        "targets",
+        "target_share",
+        "receptions",
+        "rec_yds",
+        "rec_td",
+        "pass_fumbles",
+        "rush_fumbles",
+        "rec_fumbles",
+    ]
+    value: float = Field(allow_inf_nan=False)
+    file_sha256: Sha256
+
+
 class PlayerDistributionSourceRef(StoreRow):
     """One exact projection snapshot contributing to a fitted source-set."""
 
