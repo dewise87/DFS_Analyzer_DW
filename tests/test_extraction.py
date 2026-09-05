@@ -5616,3 +5616,48 @@ def test_review_and_last_run_counts_are_scoped_and_survive_redaction(
         )
         latest = last_extraction_refusals(connection)
         assert latest is not None and latest.run_id == "new-run" and latest.by_code == {}
+
+
+def test_explicit_cohort_and_new_prompt_do_not_select_unrelated_items(tmp_path: Path) -> None:
+    from narrative_alpha.store import prompt_version_sha256
+
+    with connect_database(tmp_path / "store.sqlite3") as connection:
+        apply_migrations(connection)
+        ids = tuple(
+            _seed_source_item(connection, title=f"WAS update {i}", external_item_id=f"cohort-{i}")
+            for i in range(3)
+        )
+        selected = (ids[0], ids[2])
+        provider = FakeProvider({
+            "schema_version": "stage1-extraction-v1",
+            "prompt_injection_detected": False, "claims": [],
+        })
+        report = run_extraction_batch(
+            connection, window_start=WINDOW_START, window_end=WINDOW_END,
+            provider=provider, pricing=load_batch_pricing(PRICING_PATH),
+            source_item_ids=selected,
+        )
+        assert report.succeeded_items == 2
+        assert tuple(item.source_item_id for item in provider.calls[0]) == selected
+        prompt = default_prompt_version()
+        system = prompt.system_prompt + "\n"
+        alternate = prompt.model_copy(update={
+            "prompt_version_id": "diagnostic-cohort-fixture",
+            "system_prompt": system,
+            "prompt_sha256": prompt_version_sha256(
+                stage=prompt.stage, schema_version=prompt.schema_version, system_prompt=system,
+                user_prompt_template=prompt.user_prompt_template,
+                output_schema=prompt.output_schema_json,
+            ),
+        })
+        plan = plan_extraction(
+            connection, window_start=WINDOW_START, window_end=WINDOW_END,
+            pricing=load_batch_pricing(PRICING_PATH), source_item_ids=selected,
+            prompt_version=alternate,
+        )
+        assert plan.prompt_version_id == alternate.prompt_version_id
+        assert tuple(item.source_item_id for item in plan.ready) == selected
+        assert all(item.system_prompt == system for item in plan.ready)
+        assert connection.execute(
+            "SELECT count(*) FROM source_item_extractions WHERE source_item_id = ?", (ids[1],)
+        ).fetchone()[0] == 0

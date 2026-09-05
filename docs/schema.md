@@ -299,6 +299,21 @@ flag does not reopen the item; a new prompt version does. `na-extract abandon` m
 item retryable. The planner lists an item as ineligible after three `failed` attempts so a
 deterministic provider failure is never billed indefinitely.
 
+Migration 0025 extends `source_item_extractions` to retain failed provider responses.
+`output_json` uses canonical object JSON (sorted keys, compact separators, Unicode preserved),
+and `output_sha256` hashes those UTF-8 bytes. A malformed or non-object response is retained
+losslessly as `{"raw_output": "<original response>"}`. Successful output and its state rules
+are unchanged. Transport failures without output keep both columns NULL.
+
+`error_detail_json` contains schema field paths, value lengths/types, or the original provider
+claim/ref indexes, extract preview (80 characters), closest canonical substring and diagnostic
+similarity. Similarity never authorizes evidence. `error_message` provides the same explanation;
+`error_code` remains stable. `refusal_bucket` is a content-free category for review counts.
+Failed output and diagnostics are immutable until source tombstoning, which clears `output_json`,
+`error_message`, and `error_detail_json`, sets `output_redacted_at` when an output hash exists,
+and retains hashes, bucket/code, tokens, cost, and lineage. The same source retention/deletion
+rules apply to succeeded and failed outputs. Security/policy quarantine remains text-free.
+
 ## `stage1_execution_leases`
 
 Operational (not external point-in-time) leases serialize the non-idempotent batch-create window and
@@ -398,18 +413,3 @@ players the routing held at the vendor baseline for lack of an episode (`held_at
 and the reason in words (`reason`). Immutable. The memo and `na-ops status` print this
 reason, because a replay can only re-derive "the manifest carries no set" for an unrouted
 decision and that is not why.
-
-Migration 0025 extends `source_item_extractions` to retain failed provider responses.
-`output_json` uses canonical object JSON (sorted keys, compact separators, Unicode preserved),
-and `output_sha256` hashes those UTF-8 bytes. A malformed or non-object response is retained
-losslessly as `{"raw_output": "<original response>"}`. Successful output and its state rules
-are unchanged. Transport failures without output keep both columns NULL.
-
-`error_detail_json` contains schema field paths, value lengths/types, or the original provider
-claim/ref indexes, extract preview (80 characters), closest canonical substring and diagnostic
-similarity. Similarity never authorizes evidence. `error_message` provides the same explanation;
-`error_code` remains stable. `refusal_bucket` is a content-free category for review counts.
-Failed output and diagnostics are immutable until source tombstoning, which clears `output_json`,
-`error_message`, and `error_detail_json`, sets `output_redacted_at` when an output hash exists,
-and retains hashes, bucket/code, tokens, cost, and lineage. The same source retention/deletion
-rules apply to succeeded and failed outputs. Security/policy quarantine remains text-free.

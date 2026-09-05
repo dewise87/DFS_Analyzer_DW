@@ -163,13 +163,12 @@ def apply_migrations(
                     _format_utc(applied_at),
                 ),
             )
+            connection.commit()
         except Exception as error:
             connection.rollback()
             if isinstance(error, MigrationError):
                 raise
             raise MigrationError(f"migration {migration.name} failed: {error}") from error
-        else:
-            connection.commit()
         finally:
             if rebuild:
                 connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")

@@ -1390,3 +1390,35 @@ def test_rebuild_migration_rolls_back_bad_foreign_keys_and_restores_enforcement(
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("SELECT id FROM parent").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM applied_migrations").fetchone()[0] == 1
+
+
+def test_rebuild_commit_failure_restores_foreign_keys_after_rollback(tmp_path: Path) -> None:
+    from narrative_alpha.store.migrations import MigrationError
+
+    class CommitFailureConnection(sqlite3.Connection):
+        fail_commit = False
+
+        def commit(self) -> None:
+            if self.fail_commit and self.in_transaction:
+                raise sqlite3.OperationalError("simulated commit failure")
+            super().commit()
+
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    (directory / "0001_rebuild.sql").write_text(
+        "-- rebuild_with_foreign_keys_off\nCREATE TABLE fixture(value TEXT);\n"
+    )
+    connection = sqlite3.connect(tmp_path / "store.sqlite3", factory=CommitFailureConnection)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.fail_commit = True
+        with pytest.raises(MigrationError, match="simulated commit failure"):
+            apply_migrations(connection, directory)
+        assert not connection.in_transaction
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM applied_migrations").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name = 'fixture'"
+        ).fetchone() is None
+    finally:
+        connection.close()

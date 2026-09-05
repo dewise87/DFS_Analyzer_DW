@@ -356,8 +356,9 @@ Exit codes: `0` done (review flags are an expected outcome, not a failure); `3` 
 batch is still processing after `--timeout-seconds` (default one hour; Message Batches can take
 up to 24 hours) — rerun the identical command and it resumes the accepted batch without
 re-billing; `2` an error. A missing `ANTHROPIC_API_KEY` is refused before the database is
-touched. `na-extract review` lists pending review flags (injection markers, prohibited output)
-any in-flight attempt, and every held lease with its owner run's status;
+touched. `na-extract review` lists refused attempts by bucket with counts and mismatch details
+(`--prompt-version-id` filters that list), pending review flags, in-flight attempts, and held
+leases. `na-ops status` shows the latest Stage 1 run's refusals by code;
 `na-extract abandon --extraction-id ID --reason "..."` turns a stuck attempt into a
 retryable failure — the only sanctioned way out of an attempt whose provider outcome is
 unknown. A process killed while polling (power loss, a terminated terminal) leaves its run
