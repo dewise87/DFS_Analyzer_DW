@@ -3546,7 +3546,33 @@ Frontier: the diagnosis on real outputs is the deliverable; the code change is s
 > Gates green; never the production database. Report the before/after refusal rate on the
 > re-run and the cost.
 
-**Status note (2026-09-05):** prompted; step 3 needs Daniel's go-ahead for a paid re-run.
+**Implementation status (2026-09-05):** landed as eight commits (46d77ab … eadbd1d).
+Migration 0025 rebuilds `source_item_extractions` so a failed attempt keeps its output,
+hash, a structured `error_detail_json`, and a `refusal_bucket`, all cleared by the same
+source tombstone that redacts succeeded output; the migration runner learned a
+`-- rebuild_with_foreign_keys_off` header (foreign keys off before BEGIN, checked before
+COMMIT, restored after). `extraction_diagnostics.py` names the field path, the model's
+extract, and the closest source substring with a similarity that is explanation only.
+The 227 historical refusals map to 144 items; a diagnostic re-run on a scratch copy
+reproduced 106 refusals, all classified: 78 non-NFL stories, 19 placeholder or missing
+player names, 4 paraphrased disconfirming context, 3 `none` combined with another flag, 2
+inferred team codes. Every evidence quote was locatable, so no validator or schema rule was
+loosened; five prompt instructions became `stage1-extraction-v2` (one commit and one real
+anonymized fixture each), and the same 144 items then produced zero refusals. Cost of both
+paid passes: $0.55. Report with full mapping: `docs/reports/stage1-refusal-diagnosis-2026-09-05.md`.
+Suite 914 → 928.
+
+**Review outcome (2026-09-05):** accepted clean; nothing changed in review. Verified
+independently: migration 0025 on a copy of the production store leaves every row count
+unchanged (1,042 attempts, 346 claims, 168 episodes), `integrity_check` ok, no foreign-key
+violations, foreign-key enforcement restored. Two cautions carried forward: (1) the
+diagnostic cohort was failure-selected, and 125 of 144 v2 outputs were empty — zero
+refusals is not recall; the labeled Stage 1 evaluation (Slice 19's `na-extract sample` →
+`eval`) is the instrument that must be run on v2 before its claim counts are trusted, and
+the report already names one probable recall regression (a mock-draft item). (2) The status
+screen's "last run" reads batch-lane runs only; a fast-lane extraction (`stage_1_extraction_fast`)
+is not counted there. Production is at migration 24; 0025 applies on the next command, and
+the next `na-ops batch` extracts new items under v2.
 
 ### Queued, not yet prompted (in order)
 
