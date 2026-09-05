@@ -5568,3 +5568,51 @@ def test_failed_malformed_output_is_preserved_losslessly() -> None:
     stored = _failed_output_json(result)
     assert stored is not None
     assert json.loads(stored) == {"raw_output": result.output_json}
+
+
+def test_review_and_last_run_counts_are_scoped_and_survive_redaction(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from narrative_alpha.narrative.extraction_diagnostics import last_extraction_refusals
+    from narrative_alpha.ops.config import load_ops_config
+    from narrative_alpha.ops.status import collect_ops_status, render_status, status_payload
+
+    database = tmp_path / "store.sqlite3"
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        assert last_extraction_refusals(connection) is None
+        item_id = _seed_source_item(connection)
+        report = run_extraction_batch(
+            connection, window_start=WINDOW_START, window_end=WINDOW_END,
+            provider=FakeProvider({"claims": []}), pricing=load_batch_pricing(PRICING_PATH),
+            run_at=RUN_TIME,
+        )
+        counts = last_extraction_refusals(connection)
+        assert counts is not None and counts.run_id == report.run_id
+        assert counts.by_code == {"schema_violation": 1}
+        status = collect_ops_status(
+            connection, config=load_ops_config(), database=database, now=datetime.now(UTC),
+        )
+        assert "schema_violation=1" in render_status(status)
+        extraction = status_payload(status)["extraction"]
+        assert isinstance(extraction, dict)
+        assert extraction["last_run_refusals_by_code"] == {"schema_violation": 1}
+        tombstone_removed_item(connection, item_id, reported_at=RUN_TIME + timedelta(minutes=1))
+    assert extract_main(["review", "--database", str(database)]) == 0
+    reviewed = json.loads(capsys.readouterr().out)
+    assert reviewed["refused_attempt_count"] == 1
+    group = reviewed["refused_attempts_by_bucket"][0]
+    assert group["bucket"] == "schema_violation" and group["count"] == 1
+    assert group["attempts"][0]["error_detail_json"] is None
+    assert extract_main([
+        "review", "--database", str(database), "--prompt-version-id", "unrelated",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["refused_attempt_count"] == 0
+    with connect_database(database) as connection:
+        stamp = _timestamp(datetime.now(UTC) + timedelta(minutes=1))
+        connection.execute(
+            "INSERT INTO model_runs(run_id,run_type,started_at,status,code_version,created_at) "
+            "VALUES ('new-run','stage_1_extraction',?,'running','test',?)", (stamp, stamp),
+        )
+        latest = last_extraction_refusals(connection)
+        assert latest is not None and latest.run_id == "new-run" and latest.by_code == {}

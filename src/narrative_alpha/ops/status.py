@@ -36,6 +36,10 @@ from narrative_alpha.narrative import (
 )
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import DEFAULT_PRICING_PATH
+from narrative_alpha.narrative.extraction_diagnostics import (
+    LastExtractionRefusals,
+    last_extraction_refusals,
+)
 from narrative_alpha.ops.backup import DEFAULT_BACKUP_DIRECTORY, newest_backup
 from narrative_alpha.ops.config import NANOS_PER_USD, OpsConfig
 from narrative_alpha.ops.results import label_cohorts, weeks_with_labels
@@ -289,6 +293,7 @@ class OpsStatus:
     warnings: tuple[str, ...]
     monthly_report: MonthlyReportStatus | None
     newest_backup: BackupStatus | None
+    last_extraction_refusals: LastExtractionRefusals | None = None
 
     @property
     def manual_actions(self) -> tuple[str, ...]:
@@ -471,6 +476,7 @@ def collect_ops_status(
         extraction_backlog=backlog,
         extraction_backlog_cost_usd=backlog_cost,
         extraction_backlog_note=backlog_note,
+        last_extraction_refusals=last_extraction_refusals(connection),
         pending_review_flags=review_flags,
         inflight_attempts=len(list_inflight_extractions(connection)),
         pending_accepted_receipts=receipts,
@@ -1113,6 +1119,23 @@ def render_status(status: OpsStatus) -> str:
             *_render_fast_lane_rules(status.fast_lane_rules),
             "",
             "STAGE 1 EXTRACTION",
+            "  last run                 "
+            + (
+                "none"
+                if status.last_extraction_refusals is None
+                else f"{status.last_extraction_refusals.run_id} "
+                f"({status.last_extraction_refusals.status})"
+            ),
+            "  refusals in last run     "
+            + (
+                "no run"
+                if status.last_extraction_refusals is None
+                else ", ".join(
+                    f"{code}={count}"
+                    for code, count in status.last_extraction_refusals.by_code.items()
+                )
+                or "0"
+            ),
             f"  backlog (eligible now)   {status.extraction_backlog}"
             + (
                 ""
@@ -1483,6 +1506,21 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
             "items_collected_last_7_days": status.items_collected_last_7_days,
         },
         "extraction": {
+            "last_run_id": (
+                None
+                if status.last_extraction_refusals is None
+                else status.last_extraction_refusals.run_id
+            ),
+            "last_run_status": (
+                None
+                if status.last_extraction_refusals is None
+                else status.last_extraction_refusals.status
+            ),
+            "last_run_refusals_by_code": (
+                {}
+                if status.last_extraction_refusals is None
+                else status.last_extraction_refusals.by_code
+            ),
             "backlog": status.extraction_backlog,
             "backlog_worst_case_cost_usd": status.extraction_backlog_cost_usd,
             "backlog_note": status.extraction_backlog_note,
