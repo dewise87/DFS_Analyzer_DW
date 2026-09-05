@@ -94,3 +94,16 @@ def test_none_cannot_contradict_an_explicit_ambiguity_flag() -> None:
     payload["claims"][0]["ambiguity_flags"] = ["scope"]
     repaired = _validate(item, replace(result, output_json=json.dumps(payload)))
     assert repaired.claims[0].ambiguity_flags == ("scope",)
+
+
+def test_known_team_affiliation_is_not_source_evidence() -> None:
+    item, result = _fixture("inferred_team")
+    with pytest.raises(EvidenceValidationError) as caught:
+        _validate(item, result)
+    assert caught.value.detail is not None
+    assert caught.value.detail["bucket"] == "team_reference_not_in_source"
+    payload = json.loads(result.output_json or "")
+    payload["claims"][0]["team_refs"] = []
+    repaired = _validate(item, replace(result, output_json=json.dumps(payload)))
+    assert repaired.claims[0].team_refs == ()
+    assert len(repaired.claims[0].player_refs) == 2

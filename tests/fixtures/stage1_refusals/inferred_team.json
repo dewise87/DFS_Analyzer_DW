@@ -1,0 +1,55 @@
+{
+  "provenance": {
+    "prompt_version_id": "stage1-refusal-diagnostic-20260905-v1",
+    "source_item_id": 559,
+    "original_output_sha256": "2d645b81f7b9ce127636f655939e0c62949e2c475b0a473ee4d667a5de802977",
+    "anonymization": "Personal names and selected organization/program names replaced consistently; source_item_id mapped to 1; provider offsets and all other fields preserved."
+  },
+  "source_text": "Will Paul Hartley let Calvin Ross cook? Why 2026 could be the QB's time to shine Hartley recently said Ross is \"the best I've been around in terms of protections and adjustments.\"",
+  "output": {
+    "claims": [
+      {
+        "actionability": 0.4,
+        "ambiguity_flags": [
+          "scope"
+        ],
+        "claim_dimension": "none",
+        "claim_type": "performance_observation",
+        "disconfirming_context": null,
+        "evidence_basis": "direct_quote",
+        "evidence_class": "B",
+        "evidence_refs": [
+          {
+            "extract_end": 147,
+            "extract_start": 85,
+            "source_item_id": 1,
+            "verbatim_extract": "the best I've been around in terms of protections and adjustments"
+          }
+        ],
+        "falsifiable": true,
+        "model_confidence": "high",
+        "novelty": "new",
+        "outcome_direction": "increase",
+        "player_refs": [
+          {
+            "name_raw": "Calvin Ross"
+          },
+          {
+            "name_raw": "Paul Hartley"
+          }
+        ],
+        "roster_behavior_direction": "neutral",
+        "specificity": 0.6,
+        "suggested_channels": [],
+        "team_refs": [
+          "Green Bay"
+        ],
+        "uncertainty_flags": [
+          "source_hedging"
+        ]
+      }
+    ],
+    "prompt_injection_detected": false,
+    "schema_version": "stage1-extraction-v1"
+  }
+}
