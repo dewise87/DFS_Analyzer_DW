@@ -82,3 +82,15 @@ def test_paraphrased_context_stays_refused_but_contiguous_source_quote_is_valid(
     ]
     repaired = _validate(item, replace(result, output_json=json.dumps(payload)))
     assert repaired.claims[0].disconfirming_context in item.source_text
+
+
+def test_none_cannot_contradict_an_explicit_ambiguity_flag() -> None:
+    item, result = _fixture("contradictory_flags")
+    with pytest.raises(ExtractionSchemaError) as caught:
+        _validate(item, result)
+    assert caught.value.detail is not None
+    assert caught.value.detail["bucket"] == "invalid_ambiguity_flags"
+    payload = json.loads(result.output_json or "")
+    payload["claims"][0]["ambiguity_flags"] = ["scope"]
+    repaired = _validate(item, replace(result, output_json=json.dumps(payload)))
+    assert repaired.claims[0].ambiguity_flags == ("scope",)
