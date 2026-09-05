@@ -3574,6 +3574,84 @@ screen's "last run" reads batch-lane runs only; a fast-lane extraction (`stage_1
 is not counted there. Production is at migration 24; 0025 applies on the next command, and
 the next `na-ops batch` extracts new items under v2.
 
+### Slice 51 — Week 1 runbook refresh (documentation only)
+
+**Goal:** `docs/WEEK_1_RUNBOOK.md` was written on 2026-09-03 for the code of that day. Since
+then Slices 46–50 added the stats capture kind and `na-slate load-stats`, `na-slate
+load-odds` / `load-weather` and their lane steps, the readiness gate with
+`--accept-readiness`, `na-ops readiness`, refusal buckets in `na-extract review`, the
+labeled Stage 1 evaluation, and prompt v2; the roster pin, fast-lane rules, and workload
+stats pin all have review dates that matter this week; and Slice 9 has still not landed,
+which changes what Saturday and Sunday can actually produce. The runbook must describe the
+week the operator will have, not the one planned on 9/3. Documentation only: no code, no
+tests, no config.
+
+**Design doc:** §1.6 (two-hour weekly budget; the runbook is how that budget is kept), §6.8
+(artifacts per slate), the repository review's acceptance milestones.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse, not cheap tier:
+every command in this file will be typed by a person at 09:00 on a Sunday and must be
+exactly right.
+
+**Prompt:**
+
+> You are working in `DFS_Analyzer_DW`. Read `docs/WEEK_1_RUNBOOK.md` as it stands, then
+> the README sections on the slate lane, readiness, stats/odds/weather loading, Stage 1
+> review and evaluation, and the fast lane; `docs/WORK_SLICES.md` status and review notes
+> for Slices 46, 47, 48, 49, and 50; `docs/DECISIONS.md` entries dated 2026-09-05; and the
+> `--help` of `na-snapshot`, `na-slate`, `na-ops`, `na-extract`, `na-crosswalk`, and
+> `na-fast` (run them with `uv run <command> --help`; do not quote a flag you have not seen
+> printed). Keep the runbook's existing shape: New York time, one checkbox per action,
+> each with Command / Done / Fail, and literal lane texts under the failure-actions block.
+> Keep it under about 70 lines; it is read on a phone.
+>
+> Rewrite it so that it is true for the week of 2026-09-10:
+>
+> 1. **What this week can and cannot produce.** Slice 9 (the Stokastic projections and
+>    ownership adapter) does not exist, so no vendor projection loads and the readiness
+>    gate refuses every build for `projection_coverage`. Say plainly at the top that Week
+>    1 is capture-only unless Slice 9 lands by Saturday, list what still gets exercised
+>    (salary ingest, stats/odds/weather loads, readiness reports, the batch lane, the
+>    results lane on Tuesday), and give the exact command that shows the refusal:
+>    `na-ops readiness --slate-id N`. If Slice 9 does land, the rest of the runbook applies
+>    unchanged; mark those steps.
+> 2. **Captures, with the horizon facts.** Data Hub Stats exports on Saturday
+>    (`--kind stats`, three files, one command). Odds and weather fetches belong on
+>    Saturday 18:00 and Sunday 09:00 only: Open-Meteo's run horizon is about a week, and a
+>    fetch made earlier will not cover kickoff and will be skipped by name. Say what the
+>    readiness report's `weather_coverage` line looks like when that happens.
+> 3. **The readiness gate.** Sunday's build needs a projection capture from that morning
+>    (6-hour bound) or `--accept-readiness projection_age`; every acceptance is frozen into
+>    the decision and shown in the memo. List the seven check names and which one each
+>    likely failure maps to.
+> 4. **Pins and signatures, with dates.** The roster pin drifts daily in cutdown week
+>    (review-and-paste routine, one line); the fast-lane rules are model-dated 9/1 and
+>    expire 9/30 — re-sign before the first Sunday `na-fast` use; the workload stats pin
+>    can only be reviewed after Week 1's games (Tuesday), so Tuesday's `results_stats`
+>    step skips until then and every usage claim stays ungradable.
+> 5. **Stage 1 in the batch lane.** The extract step "fails" whenever any item is refused;
+>    that is normal. Give the Done condition as "succeeded items > 0 and episodes
+>    succeeded", and the review command for refusals by bucket. Note that the next batch
+>    extracts under prompt v2 and that the labeled evaluation (`na-extract sample` →
+>    label → `na-extract eval`) should be repeated on v2 output once; link the v1 baseline
+>    numbers from the WORK_SLICES note.
+> 6. **Thursday's showdown.** FanDuel single game is six players with a 1.5× MVP salary
+>    (repository review); DraftKings CPT/FLEX exports with distinct IDs per role are not
+>    yet supported — the Done condition for the first real DK showdown export is "ingest
+>    succeeds or names the distinct-ID refusal", and the refusal is retained, not worked
+>    around.
+> 7. **Failure texts.** Every quoted lane text must be the current one. Reproduce each by
+>    running the command against a scratch copy of the production database (copy it first;
+>    never read it in place) or from the tests' fixtures, and paste what was printed.
+>    Delete texts that no longer exist (the Slice 9 "no SourceFormat adapter" wording may
+>    have changed — check).
+>
+> Finish with a table of every command in the runbook and the file:line in the README that
+> documents it, so a stale command is caught next time. Gates are `ruff`/`mypy`/`pytest`
+> unchanged since no code moves; `git diff --check` clean.
+
+**Status note (2026-09-05):** prompted; not started. Should land before Thursday 9/10.
+
 ### Queued, not yet prompted (in order)
 
 - **Slice 9 — Stokastic adapter** (prompt above) stays open until the Data Hub
@@ -3591,6 +3669,15 @@ the next `na-ops batch` extracts new items under v2.
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.
 - **Late swap MVP** (§6.7, Phase 3): after Week 1 shows what in-slate captures look like.
+- **Slice 52 — Stage 1 model comparison harness** (after the v2 evaluation exists):
+  `na-extract sample --items-from <earlier sample csv>` so the same 50 items are drawn
+  under a new (prompt, model) pair; `na-extract run` accepting `--model` and
+  `--source-item-ids`; `na-extract compare` printing two `model_evals` rows side by side.
+  Then a paid run of the labeled items under `claude-sonnet-5` (well under a dollar at
+  batch rates) decides whether a two-tier Stage 1 (Haiku triage → stronger model on
+  claim-bearing items) earns a slice. A second provider (an OpenAI adapter behind the
+  existing `ExtractionProvider` protocol) is its own later slice; the harness must not
+  assume one vendor.
 - **Operator chore, not a slice — paste the reviewed roster pin.** `na-crosswalk
   nflverse-refresh --season 2026 --reviewed-at <today>` succeeds again (upstream restored
   the `week` column on 2026-09-05); Daniel reads the status-change diff it prints and
