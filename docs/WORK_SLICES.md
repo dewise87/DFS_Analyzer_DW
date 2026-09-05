@@ -3650,7 +3650,25 @@ exactly right.
 > documents it, so a stale command is caught next time. Gates are `ruff`/`mypy`/`pytest`
 > unchanged since no code moves; `git diff --check` clean.
 
-**Status note (2026-09-05):** prompted; not started. Should land before Thursday 9/10.
+**Implementation status (2026-09-05):** landed as a rewrite of `docs/WEEK_1_RUNBOOK.md`
+(43 → 90 lines): a capture-only preamble with the exact readiness refusal, the seven check
+names mapped to their likely causes, Stats/odds/weather captures with the Open-Meteo
+horizon and the skip text it produces, the v2 labeled evaluation with the v1 baseline
+numbers inline, the roster/fast-lane/workload pin dates, the DK distinct-ID showdown
+behavior stated as "stop, retain the CSV", and a command-to-README-line table.
+
+**Review outcome (2026-09-05):** accepted, with one code fix found by the review itself.
+Every runbook command's subcommand and flags were checked against live `--help` (55
+commands, all present) and every quoted lane text against the source (all 22 fragments
+present, several across line breaks). Checking `na-contest add` — the runbook's Tuesday
+remedy — crashed the interpreter: a circular import (`contests` → `ingest.timestamps` →
+`ingest/__init__` → `ingest.results` → `contests`) that only fires when `contests` is the
+first module imported, which is exactly what the `na-contest` entry point does. Fixed with
+a function-local import in `ingest/results.py` and a fresh-interpreter regression test.
+`na-ops doctor` on the live store confirmed the runbook's claim that the 09-05 roster pin
+was pasted but never seeded (`na-crosswalk seed --season 2026 --as-of 2026-09-05`), and
+also reports missing `data/decisions` and `data/reports` directories and no backup —
+operator items for Thursday's preflight, which the doctor names with remedies.
 
 ### Queued, not yet prompted (in order)
 

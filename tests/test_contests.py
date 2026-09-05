@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -108,9 +110,7 @@ def test_cli_add_and_typed_reload(tmp_path: Path, capsys: pytest.CaptureFixture[
     }
     with connect_database(database) as connection:
         contest = load_contest(connection, contest_id=payload["contest_id"])
-        payouts = load_contest_payouts(
-            connection, payout_curve_id="dk-manual-1-payouts"
-        )
+        payouts = load_contest_payouts(connection, payout_curve_id="dk-manual-1-payouts")
 
     assert contest.external_contest_id == "dk-manual-1"
     assert contest.total_prizes_cents == 9_000
@@ -242,3 +242,16 @@ def test_unknown_payout_curve_reads_as_empty(tmp_path: Path) -> None:
 
     with connect_database(database) as connection:
         assert load_contest_payouts(connection, payout_curve_id="missing") == ()
+
+
+def test_na_contest_imports_cleanly_in_a_fresh_interpreter() -> None:
+    """The CLI's first import is `contests`; it must not trip the ingest package cycle."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "from narrative_alpha.contest_cli import main; print('ok')"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"

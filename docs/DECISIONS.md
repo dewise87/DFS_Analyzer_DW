@@ -2,6 +2,14 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Every console entry point must import in a fresh interpreter
+
+- `na-contest` crashed on a circular import that no test caught because the suite always
+  had `narrative_alpha.ingest` loaded before `contests`. Package `__init__` re-exports make
+  the first import order matter; the entry points are where that order is fixed and
+  untested. The cross-package reference now lives inside the function that needs it, and a
+  test imports the CLI module in a subprocess. Apply the same test to any new console script.
+
 ## 2026-09-05 — The refusal cohort justified five prompt fixes, no validator relaxation
 
 - The same 144 items went from 106/144 refused (73.61%) under the diagnostic v1 artifact

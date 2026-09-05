@@ -16,7 +16,6 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from narrative_alpha.contests import load_contest_payouts
 from narrative_alpha.identity import PlayerCrosswalk, PlayerIdentityInput
 from narrative_alpha.identity.normalization import name_without_suffix, normalize_name
 from narrative_alpha.ingest.salaries import SalarySite, SalarySlateType
@@ -591,6 +590,13 @@ def _settle_ledger_entries(
             f"contest {metadata.contest_id} has ledger entries but no payout table; "
             "add the contest payout curve with `na-contest add`, then rerun `na-ops results`"
         )
+    # Imported here, not at module top: `narrative_alpha.contests` imports
+    # `ingest.timestamps`, which initializes the `ingest` package, which imports this
+    # module. With a top-level import, `na-contest` (whose first import is `contests`)
+    # died on a partially initialized module while every other entry point survived
+    # only because it happened to import `ingest` first.
+    from narrative_alpha.contests import load_contest_payouts
+
     payouts = load_contest_payouts(
         connection, payout_curve_id=metadata.payout_curve_id, as_of=metadata.observed_at
     )
