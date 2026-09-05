@@ -2,6 +2,37 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — The refusal cohort justified five prompt fixes, no validator relaxation
+
+- The same 144 items went from 106/144 refused (73.61%) under the diagnostic v1 artifact
+  to 0/144 under v2. Both paid passes together cost $0.5507685. All 227 historical failed
+  attempts are mapped to these 144 items; 38 did not reproduce a failure on the diagnostic
+  pass, so new classifications are not represented as recovered historical causes.
+- Primary failures: 78 non-NFL team references, 19 invalid/placeholder player references,
+  four paraphrased contexts, three contradictory flags, and two inferred team references.
+  Each prompt correction has its own commit and real anonymized refusal fixture. Every
+  evidence quote was locatable under existing rules. The schema already permits empty claims.
+- New prompt v2 is immutable; Stage 2 follows that default while historical artifacts remain
+  version-pinned. Refusal reduction is not a recall score: one named-player mock-draft item
+  became empty and one response still included a coach. Keep the labeled quality evaluation
+  separate from this failure-selected diagnostic result.
+- See [the complete report](reports/stage1-refusal-diagnosis-2026-09-05.md), including all
+  item/attempt mappings, denominators, cost, retention instructions, and remaining limitations.
+
+## 2026-09-05 — Refusal output and diagnostics are retained until tombstoning
+
+- Failed provider responses now retain canonical output JSON and its hash; malformed/non-object
+  text is wrapped losslessly. The succeeded state rules are unchanged. Content-bearing error
+  messages and structured diagnostics are redacted with the source, while code, bucket, hashes,
+  tokens, cost, and lineage remain immutable. Similarity is diagnostic only.
+- Evidence diagnostics use provider claim/ref order, before canonical sorting. Schema diagnostics
+  name the field path and offending value length. Empty claims already satisfy the strict envelope;
+  no schema or quote acceptance change is justified before examining the diagnostic cohort.
+- The historical 227 failures represent 144 distinct source items (44 later succeeded). The scratch
+  diagnostic rerun selects those 144 once, under a new whitespace-only prompt artifact, and retains
+  the mapping back to all 227 historical attempts. Historical outputs cannot be reconstructed from
+  newly sampled responses; comparisons must identify their denominator.
+
 ## 2026-09-05 — Batch lane: episodes gate on the store, refusals are counted by code
 
 - **The episodes step asks the store whether Stage 1 has ever succeeded, not the run

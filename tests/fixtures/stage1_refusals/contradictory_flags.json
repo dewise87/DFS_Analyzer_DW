@@ -1,0 +1,54 @@
+{
+  "provenance": {
+    "prompt_version_id": "stage1-refusal-diagnostic-20260905-v1",
+    "source_item_id": 17,
+    "original_output_sha256": "0bdf0290cb9ebd63576692b5e984c2476eea08f5546223c352949c6ce7d0d9fa",
+    "anonymization": "Personal names and selected organization/program names replaced consistently; source_item_id mapped to 1; provider offsets and all other fields preserved."
+  },
+  "source_text": "Mason Brooks makes Rams bigger Super Bowl favorites — but history isn't in their favor The Rams' Super Bowl odds are on the move. Here's a look at the shift, plus how teams in their position have done historically.",
+  "output": {
+    "claims": [
+      {
+        "actionability": 0.2,
+        "ambiguity_flags": [
+          "scope",
+          "none"
+        ],
+        "claim_dimension": "none",
+        "claim_type": "team_context",
+        "disconfirming_context": null,
+        "evidence_basis": "beat_report",
+        "evidence_class": "B",
+        "evidence_refs": [
+          {
+            "extract_end": 51,
+            "extract_start": 0,
+            "source_item_id": 1,
+            "verbatim_extract": "Mason Brooks makes Rams bigger Super Bowl favorites"
+          }
+        ],
+        "falsifiable": true,
+        "model_confidence": "medium",
+        "novelty": "new",
+        "outcome_direction": "increase",
+        "player_refs": [
+          {
+            "name_raw": "Mason Brooks"
+          }
+        ],
+        "roster_behavior_direction": "neutral",
+        "specificity": 0.3,
+        "suggested_channels": [],
+        "team_refs": [
+          "Rams"
+        ],
+        "uncertainty_flags": [
+          "source_hedging",
+          "scope_unclear"
+        ]
+      }
+    ],
+    "prompt_injection_detected": false,
+    "schema_version": "stage1-extraction-v1"
+  }
+}

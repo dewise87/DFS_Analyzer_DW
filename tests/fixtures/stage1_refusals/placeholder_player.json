@@ -1,0 +1,58 @@
+{
+  "provenance": {
+    "prompt_version_id": "stage1-refusal-diagnostic-20260905-v1",
+    "source_item_id": 67,
+    "original_output_sha256": "b1f21882aa42c655f8876f68e543c4f70d63f0e6a8b6eec17c181a4414cf3a40",
+    "anonymization": "Personal names and selected organization/program names replaced consistently; source_item_id mapped to 1; provider offsets and all other fields preserved."
+  },
+  "source_text": "Offseason edition of ‘Behind Pads’ is returning, will focus on a division The New York Giants are the only team to have previously participated in an offseason edition, which focused on free agency and the draft.",
+  "output": {
+    "claims": [
+      {
+        "actionability": 0.0,
+        "ambiguity_flags": [
+          "none"
+        ],
+        "claim_dimension": "none",
+        "claim_type": "narrative",
+        "disconfirming_context": null,
+        "evidence_basis": "official",
+        "evidence_class": "A",
+        "evidence_refs": [
+          {
+            "extract_end": 62,
+            "extract_start": 0,
+            "source_item_id": 1,
+            "verbatim_extract": "Offseason edition of 'Behind Pads' is returning, will focus"
+          },
+          {
+            "extract_end": 172,
+            "extract_start": 65,
+            "source_item_id": 1,
+            "verbatim_extract": "The New York Giants are the only team to have previously participated in an offseason edition"
+          }
+        ],
+        "falsifiable": true,
+        "model_confidence": "high",
+        "novelty": "new",
+        "outcome_direction": "neutral",
+        "player_refs": [
+          {
+            "name_raw": ""
+          }
+        ],
+        "roster_behavior_direction": "neutral",
+        "specificity": 0.6,
+        "suggested_channels": [],
+        "team_refs": [
+          "New York Giants"
+        ],
+        "uncertainty_flags": [
+          "none"
+        ]
+      }
+    ],
+    "prompt_injection_detected": false,
+    "schema_version": "stage1-extraction-v1"
+  }
+}

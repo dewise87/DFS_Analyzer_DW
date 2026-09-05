@@ -41,6 +41,7 @@ from narrative_alpha.narrative.extraction import (
     release_dead_run,
     run_extraction_batch,
 )
+from narrative_alpha.narrative.extraction_diagnostics import list_refused_attempts
 from narrative_alpha.narrative.extraction_models import (
     ExtractionItemError,
     ExtractionPlan,
@@ -211,9 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = commands.add_parser(
         "review",
-        help="list pending review flags, in-flight attempts, and held leases",
+        help="list refusals by bucket, pending review flags, in-flight attempts, and held leases",
     )
     review.add_argument("--database", type=Path, default=DEFAULT_DATABASE_PATH)
+    review.add_argument(
+        "--prompt-version-id", help="filter refused attempts to this prompt version"
+    )
 
     sample = commands.add_parser(
         "sample",
@@ -371,9 +375,12 @@ def _review(arguments: argparse.Namespace) -> int:
         flags = list_pending_review_flags(connection)
         inflight = list_inflight_extractions(connection)
         leases = list_execution_leases(connection)
+        refusals = list_refused_attempts(connection, prompt_version_id=arguments.prompt_version_id)
     print(
         json.dumps(
             {
+                "refused_attempts_by_bucket": list(refusals),
+                "refused_attempt_count": sum(int(str(group["count"])) for group in refusals),
                 "pending_review_flags": list(flags),
                 "pending_review_flag_count": len(flags),
                 "inflight_attempts": list(inflight),

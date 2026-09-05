@@ -1,0 +1,78 @@
+{
+  "attempt_mapping_file": "stage1-refusal-diagnosis-2026-09-05.csv",
+  "classification_limit": "Historical outputs are unavailable. Buckets describe fresh diagnostic observations, not recovered historical causes. All 227 old attempts are mapped below.",
+  "database_scope": "Filesystem copy of production database plus WAL/SHM; all SQLite reads and writes on scratch only.",
+  "date": "2026-09-05",
+  "diagnostic_buckets": {
+    "invalid_ambiguity_flags": 3,
+    "invalid_player_reference": 19,
+    "non_nfl_team_reference": 78,
+    "nonverbatim_context": 4,
+    "not_reproduced": 38,
+    "team_reference_not_in_source": 2
+  },
+  "distinct_source_hashes": 57,
+  "fix_layer_by_bucket": {
+    "invalid_ambiguity_flags": "prompt",
+    "invalid_player_reference": "prompt",
+    "non_nfl_team_reference": "prompt",
+    "nonverbatim_context": "prompt",
+    "team_reference_not_in_source": "prompt"
+  },
+  "historical_attempts_mapped_to_diagnostic_buckets": {
+    "invalid_ambiguity_flags": 5,
+    "invalid_player_reference": 31,
+    "non_nfl_team_reference": 135,
+    "nonverbatim_context": 7,
+    "not_reproduced": 46,
+    "team_reference_not_in_source": 3
+  },
+  "historical_failed_attempts": 227,
+  "historical_failure_codes": {
+    "evidence_validation_error": 176,
+    "schema_violation": 51
+  },
+  "historical_overall_refusal_denominator": {
+    "excluded_flagged": 9,
+    "excluded_submitted": 200,
+    "failed": 227,
+    "succeeded": 606
+  },
+  "historical_unique_items_with_later_success": 44,
+  "historical_unique_source_items": 144,
+  "metrics": {
+    "stage1-extraction-v2": {
+      "attempts": 144,
+      "cost_nanos_usd": 254975500,
+      "empty_claims": 125,
+      "flagged": 0,
+      "input_tokens": 464881,
+      "items_with_stored_claims": 19,
+      "output_tokens": 9014,
+      "prompt_sha256": "b261b601404e4c6bb4175453b4e58bef0c361f05f844a8d624b2404c4c8c74d9",
+      "provider_batch_ids": [
+        "msgbatch_012VW7p832ZPHL5G5K1Z6Dz4"
+      ],
+      "refused": 0,
+      "stored_claims": 25,
+      "succeeded": 144
+    },
+    "stage1-refusal-diagnostic-20260905-v1": {
+      "attempts": 144,
+      "cost_nanos_usd": 295793000,
+      "empty_claims": 17,
+      "flagged": 0,
+      "input_tokens": 417361,
+      "items_with_stored_claims": 21,
+      "output_tokens": 34845,
+      "prompt_sha256": "395e7a032673d471928f5c04e721c4876887d6e54b3c5d0559a09a9f712c9bbe",
+      "provider_batch_ids": [
+        "msgbatch_01H14Ukw4RBhpPR79opnc8yP"
+      ],
+      "refused": 106,
+      "stored_claims": 31,
+      "succeeded": 38
+    }
+  },
+  "retention_commit": "46d77ab"
+}

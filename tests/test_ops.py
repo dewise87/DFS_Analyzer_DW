@@ -13,6 +13,7 @@ import pytest
 
 from narrative_alpha.identity.nflverse import RosterHashError
 from narrative_alpha.narrative import (
+    PROMPT_VERSION_ID,
     CollectionError,
     CollectionReport,
     CollectionRunReport,
@@ -703,7 +704,7 @@ def test_batch_builds_the_shared_episode_snapshot_at_its_start_timestamp(
     snapshot = status.narrative.newest_episode_snapshot
     assert snapshot is not None
     assert snapshot.as_of == NOW
-    assert snapshot.prompt_version_id == "stage1-extraction-v1"
+    assert snapshot.prompt_version_id == PROMPT_VERSION_ID
     assert snapshot.episode_count == 1
     payload = status_payload(status)
     assert payload["narrative"] == {
@@ -713,7 +714,7 @@ def test_batch_builds_the_shared_episode_snapshot_at_its_start_timestamp(
         "claims_recorded": 1,
         "newest_episode_snapshot": {
             "as_of": _timestamp(NOW),
-            "prompt_version_id": "stage1-extraction-v1",
+            "prompt_version_id": PROMPT_VERSION_ID,
             "method_version": "deterministic-token-set-jaccard-v1",
             "episode_count": 1,
         },
@@ -722,7 +723,7 @@ def test_batch_builds_the_shared_episode_snapshot_at_its_start_timestamp(
     rendered = render_status(status)
     assert "NARRATIVE" in rendered
     assert "items extracted/awaiting 1 / 0" in rendered
-    assert "stage1-extraction-v1" in rendered
+    assert PROMPT_VERSION_ID in rendered
 
 
 def test_episode_step_skips_without_a_successful_extraction_and_records_builder_failure(

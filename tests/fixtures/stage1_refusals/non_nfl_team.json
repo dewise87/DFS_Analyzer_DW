@@ -1,0 +1,60 @@
+{
+  "provenance": {
+    "prompt_version_id": "stage1-refusal-diagnostic-20260905-v1",
+    "source_item_id": 144,
+    "original_output_sha256": "b21dd963f8f84df66defda204c19480a012ce8e8a67e5ee734429d6b9dff11d1",
+    "anonymization": "Personal names and selected organization/program names replaced consistently; source_item_id mapped to 1; provider offsets and all other fields preserved."
+  },
+  "source_text": "Comets sign 7-foot-6 center West to camp deal The River City Comets have signed Blake West, Calvin Archer Jr. and Avery Turner to Exhibit 10 contracts.",
+  "output": {
+    "claims": [
+      {
+        "actionability": 0.7,
+        "ambiguity_flags": [
+          "none"
+        ],
+        "claim_dimension": "active_status",
+        "claim_type": "availability",
+        "disconfirming_context": null,
+        "evidence_basis": "official",
+        "evidence_class": "A",
+        "evidence_refs": [
+          {
+            "extract_end": 118,
+            "extract_start": 25,
+            "source_item_id": 1,
+            "verbatim_extract": "The River City Comets have signed Blake West, Calvin Archer Jr. and Avery Turner to Exhibit 10 contracts."
+          }
+        ],
+        "falsifiable": true,
+        "model_confidence": "high",
+        "novelty": "new",
+        "outcome_direction": "increase",
+        "player_refs": [
+          {
+            "name_raw": "Blake West"
+          },
+          {
+            "name_raw": "Calvin Archer Jr."
+          },
+          {
+            "name_raw": "Avery Turner"
+          }
+        ],
+        "roster_behavior_direction": "increase",
+        "specificity": 0.85,
+        "suggested_channels": [
+          "availability"
+        ],
+        "team_refs": [
+          "River City Comets"
+        ],
+        "uncertainty_flags": [
+          "none"
+        ]
+      }
+    ],
+    "prompt_injection_detected": false,
+    "schema_version": "stage1-extraction-v1"
+  }
+}

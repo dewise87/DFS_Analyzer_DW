@@ -18,6 +18,7 @@ from narrative_alpha import __version__
 from narrative_alpha.identity.normalization import CANONICAL_TEAM_CODES, normalize_team_code
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
 from narrative_alpha.narrative.collectors import normalize_item_text
+from narrative_alpha.narrative.extraction import PROMPT_VERSION_ID
 from narrative_alpha.store import EpisodeClaimRow, ModelRunRow, NarrativeEpisodeRow
 
 METHOD_VERSION = "deterministic-token-set-jaccard-v1"
@@ -30,7 +31,7 @@ DEFAULT_LOOKBACK = timedelta(hours=336)
 LINK_SIMILARITY_THRESHOLD = 0.35
 DERIVATIVE_SIMILARITY_THRESHOLD = 0.8
 DERIVATION_SOURCE = "narrative_alpha.episodes"
-DEFAULT_PROMPT_VERSION_ID = "stage1-extraction-v1"
+DEFAULT_PROMPT_VERSION_ID = PROMPT_VERSION_ID
 # Headline boilerplate dominates token-set Jaccard on 50-150 character items. Function
 # words and team references carry no story identity and are dropped before comparison.
 _STOP_WORDS = frozenset(
