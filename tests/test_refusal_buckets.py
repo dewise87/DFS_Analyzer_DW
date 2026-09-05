@@ -10,6 +10,7 @@ import pytest
 from narrative_alpha.narrative.anthropic_provider import DEFAULT_MODEL_ID
 from narrative_alpha.narrative.extraction import (
     EvidenceValidationError,
+    ExtractionSchemaError,
     _validate_provider_envelope,
 )
 from narrative_alpha.narrative.extraction_models import (
@@ -52,6 +53,18 @@ def test_other_sport_names_remain_refused_and_explicit_empty_claims_are_valid() 
     assert caught.value.detail is not None
     assert caught.value.detail["bucket"] == "non_nfl_team_reference"
     assert caught.value.detail["similarity"] == 1.0  # Verbatim, but outside the NFL lexicon.
+    payload = json.loads(result.output_json or "")
+    payload["claims"] = []
+    assert _validate(item, replace(result, output_json=json.dumps(payload))).claims == ()
+
+
+def test_no_named_player_uses_empty_claims_without_weakening_name_minimum() -> None:
+    item, result = _fixture("placeholder_player")
+    with pytest.raises(ExtractionSchemaError) as caught:
+        _validate(item, result)
+    assert caught.value.detail is not None
+    assert caught.value.detail["bucket"] == "invalid_player_reference"
+    assert "value_length=0" in str(caught.value)
     payload = json.loads(result.output_json or "")
     payload["claims"] = []
     assert _validate(item, replace(result, output_json=json.dumps(payload))).claims == ()
