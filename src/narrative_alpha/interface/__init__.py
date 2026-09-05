@@ -15,6 +15,7 @@ from narrative_alpha.interface.slate_memo import (
     SlateMemoInputArtifact,
     SlateMemoLineup,
     SlateMemoOwnershipRouting,
+    SlateMemoReadiness,
     build_slate_memo,
     render_slate_memo,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "SlateMemoInputArtifact",
     "SlateMemoLineup",
     "SlateMemoOwnershipRouting",
+    "SlateMemoReadiness",
     "build_red_team_review",
     "build_slate_memo",
     "render_red_team_review",

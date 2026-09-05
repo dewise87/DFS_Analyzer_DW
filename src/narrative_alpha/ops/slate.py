@@ -207,6 +207,7 @@ def run_slate(
     simulation_seed: int | None = None,
     simulation_independent: bool = False,
     simulation_config_path: Path = DEFAULT_SIMULATION_CONFIG_PATH,
+    accepted_readiness_failures: tuple[str, ...] = (),
     dependencies: SlateDependencies = DEFAULT_SLATE_DEPENDENCIES,
     now: datetime | None = None,
 ) -> SlateReport:
@@ -352,6 +353,7 @@ def run_slate(
             number_of_lineups=number_of_lineups,
             contest_archetype=build_archetype,
             upload_entries=upload_entries,
+            accepted_readiness_failures=accepted_readiness_failures,
             into=built,
         ),
     )
@@ -775,6 +777,7 @@ def _build_decision(
     number_of_lineups: int,
     contest_archetype: ContestArchetype | str,
     upload_entries: tuple[UploadEntry, ...],
+    accepted_readiness_failures: tuple[str, ...],
     into: list[BuildResult],
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     summary: dict[str, object] = {
@@ -786,6 +789,7 @@ def _build_decision(
             if isinstance(contest_archetype, ContestArchetype)
             else contest_archetype
         ),
+        "accepted_readiness_failures": list(accepted_readiness_failures),
     }
     _require_resolved_identities(connection, site=site, summary=summary)
     _require_projections(
@@ -815,6 +819,7 @@ def _build_decision(
             number_of_lineups=number_of_lineups,
             contest_archetype=contest_archetype,
             upload_entries=upload_entries,
+            accepted_readiness_failures=accepted_readiness_failures,
         )
         reused = False
     except BuildDuplicateError as duplicate:
@@ -855,6 +860,7 @@ def _build_decision(
             "replay_verified": result.replay.report.output_matches,
             "reused_existing": reused,
             "contest_entry_rows_inserted": ledger_rows,
+            "readiness": None if result.readiness is None else result.readiness.summary_line,
         },
         None,
     )

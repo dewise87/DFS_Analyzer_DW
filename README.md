@@ -147,6 +147,29 @@ whole batch, records the refusal as a failed step, and prints the numbers. There
 partial "submit what fits": that would make the covered window a function of the budget,
 which no later replay could reconstruct.
 
+**Check the slate's inputs** before you build anything:
+
+```bash
+uv run na-ops readiness --slate-id 1
+```
+
+It answers one question — can this slate be built — at one explicit instant (default now,
+`--as-of` for the decision instant). For every active salaried player it reports projection
+coverage per source, ownership coverage per role split into dedicated baselines and
+ownership embedded in a projection file, odds per game and weather for the games that are
+not in a dome (both measured, neither required until an ingest writes them to the store),
+and `projected_stats` coverage as an informational line. It names every salaried
+player the build would silently drop for want of a projection, dearest first. The thresholds
+live in `config/readiness.toml`; every one of them is a first guess awaiting recalibration
+on a real pool, and each miss is a named failure carrying the number that missed it.
+
+`na-build` and `na-ops slate` run the same read at their decision instant and refuse on any
+failed threshold, writing nothing. `--accept-readiness <check>` builds anyway with that one
+named failure excused; the acceptance is frozen into the decision manifest, so the memo and
+every replay show which input you chose to build without. `na-ops status` and the dashboard
+carry the same line per slate, and the dashboard's `/readiness?slate_id=N` page holds the
+whole report.
+
 **Run the slate** on Saturday and on Sunday, after the captures:
 
 ```bash

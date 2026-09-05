@@ -294,7 +294,7 @@ def seeded_client(seeded: Any) -> Iterator[_Client]:
 # The read pages
 # --------------------------------------------------------------------------------------
 
-PAGES = ("/", "/queues", "/runs", "/memo", "/audit")
+PAGES = ("/", "/queues", "/runs", "/memo", "/audit", "/readiness")
 
 
 @pytest.mark.parametrize("path", PAGES)

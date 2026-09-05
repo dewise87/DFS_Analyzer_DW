@@ -48,6 +48,12 @@ from narrative_alpha.ops.runs import (
     last_run_any_status,
 )
 from narrative_alpha.ops.spend import month_start_utc, month_to_date_spend_nanos
+from narrative_alpha.readiness import (
+    ReadinessError,
+    SlateReadiness,
+    collect_slate_readiness,
+    readiness_payload,
+)
 from narrative_alpha.snapshots import MANIFEST_FILENAME, load_manifest
 from narrative_alpha.snapshots.core import collect_status, snapshot_week_path
 from narrative_alpha.snapshots.models import CaptureKind
@@ -107,6 +113,17 @@ class SlateStatus:
     decision_snapshot_id: str | None
     decision_at: datetime | None
     contest_policy_version: str | None
+    # Read at the screen's own instant, not at the last decision's: the question this
+    # answers is "can I build now". None when the read itself failed, and then
+    # ``readiness_error`` says why rather than the screen showing a healthy blank.
+    readiness: SlateReadiness | None = None
+    readiness_error: str | None = None
+
+    @property
+    def readiness_line(self) -> str:
+        if self.readiness is not None:
+            return self.readiness.summary_line
+        return f"UNREADABLE — {self.readiness_error or 'no readiness read was attempted'}"
 
 
 @dataclass(frozen=True)
@@ -325,6 +342,13 @@ class OpsStatus:
             actions.append(
                 "capture this week's pre-lock snapshots — no snapshot week is initialized"
             )
+        for row in () if self.slate is None else self.slate.slates:
+            if row.readiness is None or not row.readiness.ready:
+                actions.append(
+                    f"slate {row.slate_id} ({row.site} {row.slate_type}) is not ready to "
+                    f"build: {row.readiness_line} — `na-ops readiness "
+                    f"--slate-id {row.slate_id}`"
+                )
         return tuple(actions)
 
 
@@ -390,7 +414,7 @@ def collect_ops_status(
     warnings.extend(snapshot_problems)
 
     slate, slate_problems = _slate_status(
-        connection, snapshot_root=config.snapshot_root, week=snapshot_week
+        connection, snapshot_root=config.snapshot_root, week=snapshot_week, as_of=as_of
     )
     warnings.extend(slate_problems)
     # Counted once: the COLLECTION and STAGE 1 blocks and the NARRATIVE block share them.
@@ -682,6 +706,7 @@ def _slate_status(
     *,
     snapshot_root: Path,
     week: SnapshotWeekStatus | None,
+    as_of: datetime,
 ) -> tuple[SlateLaneStatus | None, tuple[str, ...]]:
     """The slate lane's week. Reads only; a gap is stated, never inferred away."""
 
@@ -703,7 +728,7 @@ def _slate_status(
         )
     )
     slates = tuple(
-        _slate_row(connection, summary, decision_at=decision_at)
+        _slate_row(connection, summary, decision_at=decision_at, as_of=as_of)
         for summary in list_slates(connection, season=week.season, week=week.week)
     )
     return (
@@ -724,6 +749,7 @@ def _slate_row(
     summary: SlateSummary,
     *,
     decision_at: datetime | None,
+    as_of: datetime,
 ) -> SlateStatus:
     decision = connection.execute(
         """
@@ -754,6 +780,16 @@ def _slate_row(
             if item.artifact_kind == "contest_policy" and item.source
         ]
     )
+    readiness: SlateReadiness | None = None
+    readiness_error: str | None = None
+    try:
+        readiness = collect_slate_readiness(
+            connection, slate_id=summary.slate_id, as_of=as_of
+        )
+    except (ReadinessError, sqlite3.Error) as error:
+        # A screen that cannot read readiness says so on the slate's own line. It must not
+        # take down the rest of the status, and it must not read as ready.
+        readiness_error = str(error)
     return SlateStatus(
         slate_id=summary.slate_id,
         external_slate_id=summary.external_slate_id,
@@ -770,6 +806,8 @@ def _slate_row(
         decision_snapshot_id=None if decision is None else str(decision["decision_snapshot_id"]),
         decision_at=decided_at,
         contest_policy_version=policy_versions[0] if len(policy_versions) == 1 else None,
+        readiness=readiness,
+        readiness_error=readiness_error,
     )
 
 
@@ -1247,6 +1285,7 @@ def _render_slate_week(status: OpsStatus) -> list[str]:
         )
         policy = row.contest_policy_version or "unavailable"
         lines.append(f"      decision  {decision}  policy {policy}")
+        lines.append(f"      readiness {row.readiness_line}")
     return lines
 
 
@@ -1357,6 +1396,13 @@ def status_payload(status: OpsStatus) -> dict[str, object]:
                     "decision_snapshot_id": row.decision_snapshot_id,
                     "decision_at": _optional_stamp(row.decision_at),
                     "contest_policy_version": row.contest_policy_version,
+                    "readiness_summary": row.readiness_line,
+                    # The whole report, so `na-mcp` and the dashboard read this payload
+                    # rather than opening a second path to the store.
+                    "readiness": (
+                        None if row.readiness is None else readiness_payload(row.readiness)
+                    ),
+                    "readiness_error": row.readiness_error,
                 }
                 for row in status.slate.slates
             ],

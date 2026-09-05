@@ -3316,7 +3316,27 @@ render conventions exist. No vendor file is needed — every fixture is syntheti
 >    readiness summary; the dashboard page renders and the payload carries the entry.
 >    Gates green; never the production database.
 
-**Status note (2026-09-05):** prompted; not started. Depends on nothing outside the repo.
+**Status note (2026-09-05):** landed. `src/narrative_alpha/readiness.py` (a leaf, not
+`ops/readiness.py` — `build` consults it and `ops.__init__` reaches `build`, so an `ops`
+module would be a circular import and an L5→L6 inversion), `config/readiness.toml`,
+`na-ops readiness`, `--accept-readiness` on `na-build` and `na-ops slate`, a `readiness`
+manifest artifact and `readiness.json` beside each decision, the status line and payload
+entry per slate, and the dashboard's `/readiness?slate_id=N` page. Replay reports a drift
+between the frozen report and a fresh measurement rather than refusing on it — see the
+[decision log](DECISIONS.md). The shipped thresholds are first guesses; the review
+recalibrates them on real pools. 887 tests pass, Ruff and strict mypy clean.
+
+**Review outcome (2026-09-05):** accepted with one correction. The slice shipped odds and
+weather as required checks, but nothing in `src/` writes `odds_snapshots` or
+`weather_snapshots` (Slice 2 captures raw files only), so every real build would have
+refused on two checks no capture could satisfy — the lane's own fixture had to accept both
+to build at all. The prompt's default was wrong, not the implementation. `config/readiness.toml`
+now ships `odds_required = false` and `weather_required = false` (version `2026-09-05.2`)
+with the reason inline; both inputs are still measured and their missing games named; the
+lane fixture accepts only `projection_age`. Operational consequence to remember: a Sunday
+build needs a projection capture from that morning (the 6 h bound) or an explicit
+`--accept-readiness projection_age`. Follow-on queued: odds/weather ingestion from the
+Slice 2 captures, at which point the two flags flip to true. Suite 887.
 
 ### Queued, not yet prompted (in order)
 

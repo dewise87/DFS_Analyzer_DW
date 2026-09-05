@@ -14,6 +14,7 @@ from narrative_alpha.build import BuildError, build_decision
 from narrative_alpha.identity import CrosswalkError
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.portfolio import ContestArchetype, DfsSite, OptimizerError
+from narrative_alpha.readiness import READINESS_CHECK_NAMES
 from narrative_alpha.store import MigrationError, StoreConfigurationError
 
 DEFAULT_DATABASE_PATH = Path("data/db/narrative_alpha.sqlite3")
@@ -39,6 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(archetype.value for archetype in ContestArchetype),
         default=ContestArchetype.CASH.value,
     )
+    parser.add_argument(
+        "--accept-readiness",
+        action="append",
+        default=[],
+        metavar="CHECK",
+        choices=sorted(READINESS_CHECK_NAMES),
+        help=(
+            "build even though this named readiness check fails; repeatable. The "
+            "acceptance is frozen into the decision manifest, so the memo and every replay "
+            "show which input the operator chose to build without "
+            "(`na-ops readiness --slate-id N` names them)"
+        ),
+    )
     return parser
 
 
@@ -56,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact_directory=arguments.artifact_directory,
             number_of_lineups=arguments.number_of_lineups,
             contest_archetype=arguments.contest_archetype,
+            accepted_readiness_failures=tuple(arguments.accept_readiness),
         )
     except BuildError as error:
         _print_error(error.structured())
@@ -71,6 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     payload = {
+        "accepted_readiness_failures": list(result.accepted_readiness_failures),
         "artifact_directory": str(result.artifact_directory),
         "decision_at": utc_timestamp(result.snapshot.decision_at),
         "decision_snapshot_id": result.snapshot.decision_snapshot_id,
@@ -80,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "manifest_hash_set_sha256": result.snapshot.manifest_hash_set_sha256,
         "optimizer_request": str(result.optimizer_request_path),
         "output_sha256": result.replay.report.actual_output_sha256,
+        "readiness": None if result.readiness is None else result.readiness.summary_line,
         "replay_verified": result.replay.report.output_matches,
         "run_id": result.snapshot.run_id,
     }

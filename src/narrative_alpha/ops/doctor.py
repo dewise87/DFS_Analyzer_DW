@@ -55,6 +55,7 @@ from narrative_alpha.ops.secrets import keychain_item_readable
 from narrative_alpha.ops.status import OpsStatus, collect_ops_status
 from narrative_alpha.ownership_config import load_ownership_config
 from narrative_alpha.portfolio import DEFAULT_CONTEST_POLICIES_PATH, load_contest_policies
+from narrative_alpha.readiness import load_readiness_config
 from narrative_alpha.report_cli import DEFAULT_REPORT_DIRECTORY
 from narrative_alpha.store import DEFAULT_MIGRATIONS_PATH, inspect_migrations
 
@@ -64,6 +65,7 @@ CONFIG_FILENAMES = (
     "heat.toml",
     "ownership_model.toml",
     "contest_policies.toml",
+    "readiness.toml",
     "claim_grading.toml",
     "workload_stats.toml",
     "derived_scoring.toml",
@@ -320,6 +322,7 @@ def _config_specs() -> tuple[_ConfigSpec, ...]:
         _ConfigSpec("heat", "heat.toml", load_heat_config),
         _ConfigSpec("ownership", "ownership_model.toml", load_ownership_config),
         _ConfigSpec("contest policies", "contest_policies.toml", load_contest_policies),
+        _ConfigSpec("slate readiness", "readiness.toml", load_readiness_config),
         _ConfigSpec("claim grading", "claim_grading.toml", load_grading_config),
         _ConfigSpec("workload stats", "workload_stats.toml", load_workload_stats_config),
         _ConfigSpec("derived scoring", "derived_scoring.toml", load_derived_scoring_config),
@@ -340,6 +343,7 @@ def _config_paths(
         "heat.toml": repository / DEFAULT_HEAT_CONFIG_PATH,
         "ownership_model.toml": repository / Path("config/ownership_model.toml"),
         "contest_policies.toml": repository / DEFAULT_CONTEST_POLICIES_PATH,
+        "readiness.toml": repository / Path("config/readiness.toml"),
         "claim_grading.toml": repository / DEFAULT_GRADING_CONFIG_PATH,
         "workload_stats.toml": repository / DEFAULT_WORKLOAD_STATS_CONFIG_PATH,
         "derived_scoring.toml": repository / DEFAULT_DERIVED_SCORING_PATH,

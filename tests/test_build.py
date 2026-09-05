@@ -10,7 +10,12 @@ import pytest
 
 import narrative_alpha.build as build_module
 import narrative_alpha.replay as replay_module
-from narrative_alpha.build import BuildDataError, BuildSelfVerificationError, build_decision
+from narrative_alpha.build import (
+    BuildDataError,
+    BuildReadinessError,
+    BuildSelfVerificationError,
+    build_decision,
+)
 from narrative_alpha.identity import CrosswalkError
 from narrative_alpha.ingest.timestamps import utc_timestamp
 from narrative_alpha.interface import build_slate_memo, render_slate_memo
@@ -31,8 +36,11 @@ from narrative_alpha.store import (
 
 DATA_AT = datetime(2026, 9, 13, 12, tzinfo=UTC)
 DECISION_AT = datetime(2026, 9, 13, 16, 55, tzinfo=UTC)
+SHOWDOWN_DATA_AT = datetime(2026, 9, 13, 15, 55, tzinfo=UTC)
 SALARY_HASH = "a" * 64
 PROJECTION_HASH = "b" * 64
+ODDS_HASH = "c" * 64
+WEATHER_HASH = "d" * 64
 
 
 def test_build_then_replay_is_byte_identical_and_commits_run(tmp_path: Path) -> None:
@@ -162,6 +170,18 @@ def test_showdown_build_refuses_a_missing_ownership_role(tmp_path: Path) -> None
             "DELETE FROM ownership_baselines WHERE player_id = 6 AND role = 'captain'"
         )
 
+    # Readiness sees the same hole first and refuses on its own threshold. Accepting
+    # that named failure proves the deeper guard is not merely shadowed by it: candidate
+    # selection still refuses a showdown pool missing a role baseline.
+    with pytest.raises(BuildReadinessError, match=r"ownership_coverage_captain"):
+        build_decision(
+            database,
+            slate_id=1,
+            site=DfsSite.DRAFTKINGS,
+            decision_at=DECISION_AT,
+            artifact_directory=tmp_path / "artifacts",
+            contest_archetype=ContestArchetype.SHOWDOWN,
+        )
     with pytest.raises(BuildDataError, match=r"player 6 captain"):
         build_decision(
             database,
@@ -170,6 +190,7 @@ def test_showdown_build_refuses_a_missing_ownership_role(tmp_path: Path) -> None
             decision_at=DECISION_AT,
             artifact_directory=tmp_path / "artifacts",
             contest_archetype=ContestArchetype.SHOWDOWN,
+            accepted_readiness_failures=("ownership_coverage_captain",),
         )
 
 
@@ -325,6 +346,15 @@ def _seed_showdown_database(
             "UPDATE slates SET slate_type = 'showdown', name = 'AAA at BBB Showdown' "
             "WHERE slate_id = 1"
         )
+        # A showdown slate's projections may be at most three hours old at the decision
+        # instant (`config/readiness.toml`), so this fixture's are an hour old rather than
+        # the classic fixture's five.
+        fresh = utc_timestamp(SHOWDOWN_DATA_AT)
+        connection.execute(
+            "UPDATE projection_snapshots SET observed_at = ?, ingested_at = ?, "
+            "valid_from = ? WHERE slate_id = 1",
+            (fresh, fresh, fresh),
+        )
         for player in players:
             for role, ownership in (("captain", 1 / 6), ("flex", 5 / 6)):
                 _insert(
@@ -430,6 +460,43 @@ def _seed_candidate_pool(
                 "stadium_name": "Fixture Stadium",
                 "game_status": "scheduled",
                 **_pit("fixture"),
+            },
+        )
+        # Odds and weather are readiness inputs (Slice 47): a fixture slate that omits
+        # them is an incomplete slate, and the build now says so. Every game gets both, so
+        # these fixtures stand for a slate whose inputs are actually all present.
+        _insert(
+            connection,
+            "odds_snapshots",
+            {
+                "game_id": game_index + 1,
+                "sportsbook": "fixture-book",
+                "home_spread": -3.0,
+                "away_spread": 3.0,
+                "total": 44.5,
+                "response_file_sha256": ODDS_HASH,
+                **_pit("fixture-odds", source_version="odds-v1"),
+            },
+        )
+        _insert(
+            connection,
+            "weather_snapshots",
+            {
+                "game_id": game_index + 1,
+                "stadium_name": "Fixture Stadium",
+                "forecast_model": "fixture-model",
+                "forecast_run_at": utc_timestamp(DATA_AT),
+                "forecast_for_at": utc_timestamp(
+                    datetime(2026, 9, 13, 17 + game_index, tzinfo=UTC)
+                ),
+                "lead_time_seconds": 3600,
+                "temperature_c": 18.0,
+                "precipitation_probability": 0.1,
+                "wind_speed_kph": 12.0,
+                "wind_gust_kph": 20.0,
+                "weather_code": 1,
+                "response_file_sha256": WEATHER_HASH,
+                **_pit("fixture-weather", source_version="weather-v1"),
             },
         )
     _insert(

@@ -3,7 +3,7 @@ as_of=2026-09-13T16:55:00.000000Z
 decision_at=2026-09-13T16:55:00.000000Z
 decision_snapshot_id=decision-d10838896e27f028ee27e813bf087c6df94f3eb544beb675106b949f736ebeab
 run_id=na-build-d10838896e27f028ee27e813bf087c6df94f3eb544beb675106b949f736ebeab
-manifest_hash_set_sha256=bac61197fa4e548f3c0d59efde811dce1199be2dd80795c535b610a69908c18f
+manifest_hash_set_sha256=14befd001624d480e985e1bf93cd10a290af95d21ecb910d6029b70b52195bc7
 slate_id=1
 external_slate_id=dk-main
 site=draftkings
@@ -24,6 +24,16 @@ objective=projection
 ownership_sum_points=none
 lineup_uniqueness=1
 max_player_exposure=1.000000
+
+INPUT READINESS
+readiness_config_version=2026-09-05.2
+readiness_config_sha256=89ec03fe3182c3358f0fcdef2484bfc422fca12e577bc0561d2f993d8b102c50
+readiness=READY
+active_salaried_players=9
+projection_coverage=9 of 9
+failed_checks=none
+accepted_failures=none
+store_still_measures_the_same=yes
 
 INPUT PROVENANCE
 artifact_kind,source,sha256,logical_path

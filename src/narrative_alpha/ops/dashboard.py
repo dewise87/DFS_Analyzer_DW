@@ -80,7 +80,8 @@ from narrative_alpha.ops.slate import (
     SlateReport,
     run_slate,
 )
-from narrative_alpha.ops.status import collect_ops_status, status_payload
+from narrative_alpha.ops.status import OpsStatus, collect_ops_status, status_payload
+from narrative_alpha.readiness import readiness_payload
 from narrative_alpha.report_cli import DEFAULT_REPORT_DIRECTORY
 from narrative_alpha.store import (
     UnresolvedPlayerMatchRow,
@@ -396,6 +397,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._html(_memo_page(self.context))
             elif path == "/audit":
                 self._html(_audit_page(self.context, parse_qs(urlsplit(self.path).query)))
+            elif path == "/readiness":
+                self._html(_readiness_page(self.context, parse_qs(urlsplit(self.path).query)))
             elif path == "/favicon.ico":
                 # The page has no icon, and a 404 HTML body for every page view would
                 # bury the request log this tool is read through.
@@ -1018,6 +1021,7 @@ NAV = (
     ("/queues", "review queues"),
     ("/runs", "run history"),
     ("/memo", "latest memo"),
+    ("/readiness", "slate readiness"),
 )
 
 
@@ -1075,6 +1079,7 @@ def _status_page(context: DashboardContext) -> str:
     week = status.snapshot_week
     body = [
         _status_strip(payload),
+        _readiness_section(status),
         _lane_section(context, recorded),
         _actions_section(
             context,
@@ -1095,6 +1100,25 @@ def _status_page(context: DashboardContext) -> str:
         rendered_at=now,
         page="status",
     )
+
+
+def _readiness_section(status: OpsStatus) -> str:
+    """The slate block's readiness line, one per slate, each linking to its own report.
+
+    The same sentence `na-ops status` prints and `na-ops readiness` decides on — this is
+    `SlateStatus.readiness_line`, not a second judgement made here.
+    """
+
+    rows = () if status.slate is None else status.slate.slates
+    if not rows:
+        return ""
+    items = "".join(
+        f'<li><a href="/readiness?slate_id={row.slate_id}">slate {row.slate_id}</a> '
+        f"({escape(row.site)} {escape(row.slate_type)}): "
+        f"<strong>{escape(row.readiness_line)}</strong></li>"
+        for row in rows
+    )
+    return f"<section><h2>Slate input readiness</h2><ul>{items}</ul></section>"
 
 
 def _status_strip(payload: Mapping[str, object]) -> str:
@@ -1670,6 +1694,80 @@ def _query_value(query: Mapping[str, list[str]], key: str) -> str | None:
     return value or None
 
 
+def _readiness_page(context: DashboardContext, query: Mapping[str, list[str]]) -> str:
+    """`/readiness?slate_id=N` — the slate's whole input readiness report.
+
+    Rendered from `status_payload`'s own `readiness` entry, so this page and the line on
+    the status page and `na-ops readiness` are one read: there is no second path into the
+    store that could disagree with the first.
+    """
+
+    raw = _query_value(query, "slate_id")
+    now = context.clock()
+    with connect_database(context.database) as connection:
+        status = collect_ops_status(
+            connection,
+            config=context.config,
+            database=context.database,
+            now=now,
+        )
+    rows = [] if status.slate is None else list(status.slate.slates)
+    if raw is None:
+        links = "".join(
+            f'<li><a href="/readiness?slate_id={row.slate_id}">slate {row.slate_id} — '
+            f"{escape(row.site)} {escape(row.slate_type)}</a>: "
+            f"{escape(row.readiness_line)}</li>"
+            for row in rows
+        )
+        body = (
+            "<section><h2>Slate input readiness</h2>"
+            + (
+                f"<ul>{links}</ul>"
+                if links
+                else "<p>No slate is ingested for the current snapshot week.</p>"
+            )
+            + "</section>"
+        )
+        return _page("slate readiness", body, rendered_at=now, page="readiness")
+    try:
+        slate_id = _positive(raw, "slate_id")
+    except DashboardError:
+        raise
+    found = next((row for row in rows if row.slate_id == slate_id), None)
+    if found is None:
+        known = ", ".join(str(row.slate_id) for row in rows) or "none"
+        return _page(
+            "slate readiness",
+            "<section><h2>Slate input readiness</h2><p>No slate "
+            f"<code>{escape(str(slate_id))}</code> is ingested for the current snapshot "
+            f"week. Ingested slates: {escape(known)}.</p></section>",
+            rendered_at=now,
+            page="readiness",
+        )
+    if found.readiness is None:
+        return _page(
+            "slate readiness",
+            f"<section><h2>Slate {slate_id}</h2><p>The readiness read failed: "
+            f"<code>{escape(found.readiness_error or 'no reason recorded')}</code></p>"
+            "</section>",
+            rendered_at=now,
+            page="readiness",
+        )
+    payload = readiness_payload(found.readiness)
+    heading = (
+        f"<section><h2>Slate {slate_id} — {escape(found.readiness_line)}</h2>"
+        f"<p>Thresholds <span class=\"mono\">{escape(found.readiness.config_version)}</span> "
+        f"(<span class=\"mono\">{escape(found.readiness.config_sha256)}</span>), measured at "
+        f"<span class=\"mono\">{escape(utc_timestamp(found.readiness.as_of))}</span>.</p>"
+        "</section>"
+    )
+    sections = "".join(
+        f"<section><h2>{escape(_label(key))}</h2>{_render(value)}</section>"
+        for key, value in payload.items()
+    )
+    return _page("slate readiness", heading + sections, rendered_at=now, page="readiness")
+
+
 def _not_found_page(path: str) -> str:
     links = "".join(f'<li><a href="{href}">{escape(label)}</a></li>' for href, label in NAV)
     return _page(
@@ -1677,7 +1775,9 @@ def _not_found_page(path: str) -> str:
         f"<section><h2>No such page</h2><p>There is no <code>{escape(path)}</code>. "
         f"The dashboard has these pages:</p><ul>{links}"
         '<li><a href="/audit">signal and evidence audit</a> — reached from a memo, for '
-        "one player at one decision</li></ul></section>",
+        "one player at one decision</li>"
+        '<li><a href="/readiness">slate input readiness</a> — whether a slate can be '
+        "built, and what is missing if not</li></ul></section>",
         page="notfound",
     )
 

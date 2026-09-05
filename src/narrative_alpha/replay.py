@@ -54,6 +54,12 @@ from narrative_alpha.portfolio import (
     site_rules,
     validate_portfolio,
 )
+from narrative_alpha.readiness import (
+    READINESS_ARTIFACT_KIND,
+    FrozenReadiness,
+    ReadinessError,
+    frozen_readiness,
+)
 from narrative_alpha.store import DecisionManifestHash, DecisionSnapshotRow, SlateRow
 
 
@@ -97,6 +103,9 @@ class ReplayResult:
     lineups: tuple[Lineup, ...]
     ownership_routing: OwnershipRouting
     contest_policy: ContestPolicies
+    # None only for a decision frozen before readiness artifacts existed; every build
+    # since Slice 47 writes one, and replay recomputes and re-verifies it.
+    readiness: FrozenReadiness | None = None
 
 
 class PointInTimeSession:
@@ -238,6 +247,12 @@ def replay_decision(
     availability_artifacts = _source_artifacts(snapshot, "availability", required=False)
     ownership_artifacts = _source_artifacts(snapshot, "ownership", required=False)
     contest_policy = _contest_policy(snapshot, artifact_root)
+    readiness = _frozen_readiness(
+        connection,
+        snapshot=snapshot,
+        artifact_root=artifact_root,
+        decision_at=cutoff,
+    )
 
     request_bytes = _read_verified_artifact(artifact_root, request_artifact)
     expected_output_bytes = _read_verified_artifact(artifact_root, expected_output)
@@ -353,7 +368,50 @@ def replay_decision(
         lineups=lineups,
         ownership_routing=routed.routing,
         contest_policy=contest_policy,
+        readiness=readiness,
     )
+
+
+def _frozen_readiness(
+    connection: sqlite3.Connection,
+    *,
+    snapshot: DecisionSnapshotRow,
+    artifact_root: Path,
+    decision_at: datetime,
+) -> FrozenReadiness | None:
+    """Read the decision's frozen readiness, verified by hash, and re-measure the instant.
+
+    The artifact carries the thresholds that were in force, so a decision is judged forever
+    by the ruleset it was built under and never by whatever `config/readiness.toml` says
+    today. A decision from before Slice 47 has no such artifact and is replayed without one.
+    A drift between the frozen report and a fresh measurement is carried on the result, not
+    refused — see :func:`narrative_alpha.readiness.frozen_readiness`.
+    """
+
+    artifacts = tuple(
+        item
+        for item in snapshot.manifest_hashes_json
+        if item.artifact_kind == READINESS_ARTIFACT_KIND
+    )
+    if not artifacts:
+        return None
+    if len(artifacts) != 1:
+        raise ReplayArtifactError("decision manifest carries more than one readiness artifact")
+    raw = _read_verified_artifact(artifact_root, artifacts[0])
+    try:
+        frozen = frozen_readiness(
+            connection,
+            slate_id=snapshot.slate_id,
+            as_of=decision_at,
+            artifact_bytes=raw,
+        )
+    except ReadinessError as error:
+        raise ReplayArtifactError(str(error)) from error
+    if artifacts[0].source != frozen.config.config_version:
+        raise ReplayArtifactError(
+            "readiness manifest version does not match the frozen readiness artifact"
+        )
+    return frozen
 
 
 @dataclass(frozen=True)

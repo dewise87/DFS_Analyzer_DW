@@ -60,6 +60,9 @@ KICKOFF = datetime(2026, 9, 13, 17, 0, tzinfo=UTC)
 # The lane ingests as of now, so the decision instant is now: a cutoff before the
 # ingest could not see what the ingest just wrote.
 NOW = DECISION_AT
+# The lane fixture captures its projections the evening before the decision, so the one
+# threshold it must excuse is freshness. Odds and weather are measured, not required.
+ACCEPTED_READINESS = ("projection_age",)
 
 # Four real matchups, so the export's `AWAY@HOME` field and the crosswalk both behave as
 # they will on a real Sunday.
@@ -350,6 +353,14 @@ def _run(
         "report_directory": tmp_path / "reports",
         "dependencies": dependencies or SlateDependencies(source_formats=(FixtureVendor(),)),
         "now": NOW,
+        # This fixture is a capture fixture: it stages the salary and vendor files a real
+        # Saturday produces and nothing else. There is no odds or weather feed in the
+        # repository yet, and its projections are deliberately captured the evening before
+        # the decision, so three readiness thresholds genuinely miss. Naming them here is
+        # what an operator would do, and it exercises the acceptance path end to end —
+        # the manifest and the memo both record them. `test_the_lane_refuses_a_slate_that_
+        # is_not_ready` covers the refusal these names suppress.
+        "accepted_readiness_failures": ACCEPTED_READINESS,
     }
     arguments |= overrides
     with connect_database(config.database) as connection:
@@ -1255,6 +1266,41 @@ def test_status_shows_captures_ingested_features_and_the_decision(
     assert payload["slate"]["slates"][0]["contest_policy_version"] == "contest-policy-v2"  # type: ignore[index]
 
 
+def test_the_lane_refuses_a_slate_that_is_not_ready_and_names_the_flag(
+    week: Any, tmp_path: Path
+) -> None:
+    """Without the acceptances the fixture's own gaps stop the build, by name."""
+
+    report = _run(week, tmp_path=tmp_path, accepted_readiness_failures=())
+
+    build = report.step("slate_build")
+    assert build is not None and build.status == "failed"
+    assert build.error_text is not None
+    assert "is not ready to build" in build.error_text
+    for name in ACCEPTED_READINESS:
+        assert f"--accept-readiness {name}" in build.error_text
+    # A refusal writes nothing, so the memo has nothing to write about either.
+    assert report.decision_snapshot_id is None
+    memo = report.step("slate_memo")
+    assert memo is not None and memo.status == "skipped"
+
+
+def test_an_accepted_readiness_failure_reaches_the_step_summary_and_the_memo(
+    week: Any, tmp_path: Path
+) -> None:
+    report = _run(week, tmp_path=tmp_path)
+
+    build = report.step("slate_build")
+    assert build is not None and build.status == "succeeded"
+    assert build.summary["accepted_readiness_failures"] == list(ACCEPTED_READINESS)
+    assert str(build.summary["readiness"]).startswith("NOT READY — projection_age")
+    assert report.memo_path is not None
+    memo = report.memo_path.read_text(encoding="utf-8")
+    assert "INPUT READINESS" in memo
+    for name in ACCEPTED_READINESS:
+        assert name in memo
+
+
 def test_cli_runs_the_lane_and_prints_the_paths(
     week: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1275,6 +1321,7 @@ def test_cli_runs_the_lane_and_prints_the_paths(
             str(tmp_path / "decisions"),
             "--report-directory",
             str(tmp_path / "reports"),
+            *[argument for name in ACCEPTED_READINESS for argument in ("--accept-readiness", name)],
             "--json",
         ],
         slate_dependencies=SlateDependencies(source_formats=(FixtureVendor(),)),

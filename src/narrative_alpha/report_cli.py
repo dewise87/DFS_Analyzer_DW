@@ -527,6 +527,11 @@ def _reconstructed_build_result(
         replay=replay,
         ownership_routing=_stored_reason(connection, snapshot, replay.ownership_routing),
         contest_policy=replay.contest_policy,
+        # Verified by the replay above, or absent because this decision predates Slice 47.
+        readiness=None if replay.readiness is None else replay.readiness.measured,
+        accepted_readiness_failures=(
+            () if replay.readiness is None else replay.readiness.accepted_failures
+        ),
         artifact_root=artifact_root,
         artifact_directory=artifact_directory,
         optimizer_request_path=request_path,
@@ -534,6 +539,11 @@ def _reconstructed_build_result(
         manifest_path=manifest_path,
         contest_policy_path=_safe_artifact_path(
             artifact_root, _single_artifact(snapshot, "contest_policy")
+        ),
+        readiness_path=(
+            None
+            if replay.readiness is None
+            else _safe_artifact_path(artifact_root, _single_artifact(snapshot, "readiness"))
         ),
     )
 
@@ -555,7 +565,9 @@ def _stored_reason(
 
 def _single_artifact(
     snapshot: DecisionSnapshotRow,
-    artifact_kind: Literal["optimizer_request", "generated_lineups", "contest_policy"],
+    artifact_kind: Literal[
+        "optimizer_request", "generated_lineups", "contest_policy", "readiness"
+    ],
 ) -> DecisionManifestHash:
     values = tuple(
         item for item in snapshot.manifest_hashes_json if item.artifact_kind == artifact_kind

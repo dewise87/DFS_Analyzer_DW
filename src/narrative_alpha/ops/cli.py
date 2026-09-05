@@ -64,6 +64,13 @@ from narrative_alpha.ops.slate import (
 )
 from narrative_alpha.ops.status import collect_ops_status, render_status, status_payload
 from narrative_alpha.portfolio import ContestArchetype, DfsSite, parse_upload_entries
+from narrative_alpha.readiness import (
+    READINESS_CHECK_NAMES,
+    ReadinessError,
+    collect_slate_readiness,
+    readiness_payload,
+    render_readiness,
+)
 from narrative_alpha.report_cli import DEFAULT_REPORT_DIRECTORY
 from narrative_alpha.store import (
     MigrationError,
@@ -184,6 +191,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("config/simulation.toml"),
     )
     slate.add_argument(
+        "--accept-readiness",
+        action="append",
+        default=[],
+        metavar="CHECK",
+        choices=sorted(READINESS_CHECK_NAMES),
+        help=(
+            "build even though this named readiness check fails; repeatable. The "
+            "acceptance is frozen into the decision manifest and shown in the memo "
+            "(`na-ops readiness --slate-id N` names the failing checks)"
+        ),
+    )
+    slate.add_argument(
         "--upload-template",
         type=Path,
         help="site reserved-entry CSV; freezes entry IDs and writes the entry ledger",
@@ -251,6 +270,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_BACKUP_DIRECTORY,
     )
+
+    readiness = commands.add_parser(
+        "readiness",
+        help="can this slate be built: coverage, freshness, and every threshold it misses",
+    )
+    readiness.add_argument("--slate-id", type=_positive_int, required=True)
+    readiness.add_argument(
+        "--as-of",
+        type=_timestamp,
+        help=(
+            "the instant to measure at (default: now). Use the decision instant to see "
+            "exactly what the build will see"
+        ),
+    )
+    readiness.add_argument("--json", action="store_true")
 
     doctor = commands.add_parser("doctor", help="read-only preflight of every live-week dependency")
     doctor.add_argument("--repository", type=Path, default=Path.cwd())
@@ -337,6 +371,8 @@ def main(
             return _results(arguments, config, results_dependencies)
         if arguments.command == "dashboard":
             return _dashboard(arguments, config, dashboard_dependencies)
+        if arguments.command == "readiness":
+            return _readiness(arguments, config)
         if arguments.command == "doctor":
             return _doctor(arguments, config)
         if arguments.command == "backup":
@@ -350,6 +386,7 @@ def main(
         MigrationError,
         OpsConfigError,
         OSError,
+        ReadinessError,
         ScheduleError,
         SlateIngestError,
         StoreConfigurationError,
@@ -423,6 +460,7 @@ def _slate(
             simulation_seed=arguments.simulation_seed,
             simulation_independent=arguments.simulation_independent,
             simulation_config_path=arguments.simulation_config,
+            accepted_readiness_failures=tuple(arguments.accept_readiness),
             dependencies=dependencies,
         )
     if arguments.json:
@@ -499,6 +537,25 @@ def _status(arguments: argparse.Namespace, config: OpsConfig) -> int:
     else:
         print(render_status(status), end="")
     return EXIT_OK
+
+
+def _readiness(arguments: argparse.Namespace, config: OpsConfig) -> int:
+    """One slate's inputs at one instant. A read; it never fixes and never builds."""
+
+    database = _database(arguments, config)
+    as_of = arguments.as_of or datetime.now(UTC)
+    with connect_database(database) as connection:
+        apply_migrations(connection)
+        report = collect_slate_readiness(
+            connection,
+            slate_id=arguments.slate_id,
+            as_of=as_of,
+        )
+    if arguments.json:
+        print(json.dumps(readiness_payload(report), indent=2, sort_keys=True))
+    else:
+        print(render_readiness(report), end="")
+    return EXIT_OK if report.ready else EXIT_STEP_FAILED
 
 
 def _doctor(arguments: argparse.Namespace, config: OpsConfig) -> int:

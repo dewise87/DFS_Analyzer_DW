@@ -1,0 +1,45 @@
+# Slate input readiness thresholds.
+#
+# These are the bounds `na-ops readiness` reports against and the build refuses on. They
+# are deliberately in this file rather than in code: the repository review will recalibrate
+# every one of them on real pools, and nothing below is evidence-backed yet. Change a
+# number here, rerun `na-ops readiness --slate-id N`, and the decision manifest records the
+# exact bytes that were in force.
+#
+# Bump `config_version` whenever a value changes, so a frozen decision names the ruleset it
+# was judged under rather than only its hash.
+config_version = "2026-09-05.2"
+
+[coverage]
+# A build silently drops every salaried player with no projection row (the JOIN in
+# `select_candidate_scenario`). 0.95 says at most one active player in twenty may vanish
+# that way before the operator has to look at the pool and say so out loud.
+minimum_projection_coverage = 0.95
+
+# Ownership feeds the contest policy's ownership-sum band, and the build fills gaps from
+# ownership embedded in a projection file. 0.90 is looser than projections because a
+# missing ownership number costs a constraint, not a candidate.
+minimum_ownership_coverage = 0.90
+
+[freshness]
+# Projections observed more than this long before the decision instant are stale. Six
+# hours covers a Sunday morning refresh feeding an afternoon lock on a main slate.
+maximum_projection_age_minutes = 360
+
+# A showdown slate is one game: news moves its whole pool, and there is no second game to
+# absorb a wrong number, so half the main-slate allowance.
+maximum_projection_age_minutes_showdown = 180
+
+[market]
+# Odds and weather are reported per game, but neither is *required* yet: Slice 2 captures
+# both as raw files under data/snapshots, and nothing ingests them into `odds_snapshots` or
+# `weather_snapshots`. A required check that no ingestion can satisfy is not a threshold, it
+# is a permanent excuse — the operator would pass `--accept-readiness` by reflex and the gate
+# would stop meaning anything. Flip these to true in the same change that lands the ingest.
+odds_required = false
+weather_required = false
+
+# When weather becomes required, restrict it to outdoor venues. A venue this repository's
+# stadium table cannot classify is treated as outdoor: an unrecognized name is not evidence
+# of a roof, and the readiness report names it so the table can be fixed.
+weather_outdoor_only = true

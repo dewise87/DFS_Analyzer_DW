@@ -103,6 +103,29 @@ class SlateMemoAppliedDelta(BaseModel):
     evidence_refs: tuple[str, ...]
 
 
+class SlateMemoReadiness(BaseModel):
+    """What the slate's inputs looked like when this decision was frozen (Slice 47).
+
+    Reproduced from the decision's own readiness artifact by the replay that verified it,
+    so an accepted failure cannot be quietly dropped from the memo: if the artifact and
+    the store disagree, the replay refuses before a memo is written at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config_version: str
+    config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ready: bool
+    summary: str
+    active_players: int
+    projection_coverage: str
+    accepted_failures: tuple[str, ...] = ()
+    failed_checks: tuple[str, ...] = ()
+    # False once rows were backfilled into the store at instants the decision predates:
+    # the decision is unchanged, but the pool no longer measures the same at its cutoff.
+    store_still_matches: bool = True
+
+
 class SlateMemoOwnershipRouting(BaseModel):
     """Stage 4's verdict for this decision: applied or vendor baseline, and why."""
 
@@ -199,6 +222,8 @@ class SlateMemo(BaseModel):
     ] = SLATE_MEMO_NOTICE
     ownership_routing: SlateMemoOwnershipRouting
     contest_policy: SlateMemoContestPolicy
+    # None only for a decision frozen before readiness artifacts existed.
+    readiness: SlateMemoReadiness | None = None
     attached_contest: ContestRow | None = None
     heuristic_report: HeuristicReport | None = None
 
@@ -299,8 +324,28 @@ def build_slate_memo(
             policy_sha256=build_result.contest_policy.sha256,
             contest_archetype=build_result.request.contest_archetype.value,
         ),
+        readiness=_memo_readiness(build_result),
         attached_contest=contest,
         heuristic_report=heuristic,
+    )
+
+
+def _memo_readiness(build_result: BuildResult) -> SlateMemoReadiness | None:
+    """The frozen readiness the verifying replay read back, or None before Slice 47."""
+
+    frozen = build_result.replay.readiness
+    if frozen is None:
+        return None
+    return SlateMemoReadiness(
+        config_version=frozen.config.config_version,
+        config_sha256=frozen.config.config_sha256,
+        ready=frozen.ready,
+        summary=frozen.summary,
+        active_players=frozen.active_players,
+        projection_coverage=frozen.projection_coverage,
+        accepted_failures=frozen.accepted_failures,
+        failed_checks=frozen.failed_checks,
+        store_still_matches=frozen.store_matches,
     )
 
 
@@ -341,6 +386,30 @@ def render_slate_memo(memo: SlateMemo) -> str:
         )
     output.write(f"lineup_uniqueness={policy.lineup_uniqueness}\n")
     output.write(f"max_player_exposure={policy.max_player_exposure:.6f}\n\n")
+
+    output.write("INPUT READINESS\n")
+    if memo.readiness is None:
+        output.write(
+            "readiness=unrecorded — this decision predates the slate readiness artifact\n\n"
+        )
+    else:
+        readiness = memo.readiness
+        output.write(f"readiness_config_version={readiness.config_version}\n")
+        output.write(f"readiness_config_sha256={readiness.config_sha256}\n")
+        output.write(f"readiness={readiness.summary}\n")
+        output.write(f"active_salaried_players={readiness.active_players}\n")
+        output.write(f"projection_coverage={readiness.projection_coverage}\n")
+        output.write(
+            "failed_checks=" + (", ".join(readiness.failed_checks) or "none") + "\n"
+        )
+        output.write(
+            "accepted_failures=" + (", ".join(readiness.accepted_failures) or "none") + "\n"
+        )
+        output.write(
+            "store_still_measures_the_same="
+            + ("yes" if readiness.store_still_matches else "NO — rows were backfilled")
+            + "\n\n"
+        )
 
     output.write("INPUT PROVENANCE\n")
     writer = csv.writer(output, lineterminator="\n")

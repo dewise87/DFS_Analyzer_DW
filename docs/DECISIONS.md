@@ -2,6 +2,65 @@
 
 Standing technical decisions. Newest first. Each entry: date, decision, why, revisit-when.
 
+## 2026-09-05 — Slice 47 slate input readiness
+
+- **Readiness is measured, thresholded in configuration, and enforced by the build.**
+  `collect_slate_readiness` counts one slate's inputs at one explicit instant using the same
+  observed/ingested/valid bounds `select_candidate_scenario` uses, so the pool it measures is
+  the pool the build would get. `config/readiness.toml` holds every bound; its bytes are
+  hashed into each decision. The shipped numbers (95% projection coverage, 90% ownership,
+  6 h / 3 h projection age) are first guesses with a one-line rationale each, not evidence.
+  Revisit on the first real pools — that is the review's milestone 3, and recalibration is
+  expected to move all of them.
+- **Odds and weather are measured but not required (review outcome).** The slice shipped
+  both as required, but nothing in the repository ingests odds or weather into
+  `odds_snapshots` or `weather_snapshots` — Slice 2 captures raw files only — so every real
+  build would have refused on two checks no capture could satisfy, and the operator would
+  have learned to type `--accept-readiness` by reflex. A threshold no input can meet is an
+  excuse, not a gate. The report still counts and names the missing games; flip the two
+  flags to true in the same change that lands the odds/weather ingest.
+- **The denominator is the pool the build treats as usable, not the salary file.** A player
+  is excluded when an official availability decision rules them out, and otherwise when the
+  salary-feed status is inactive — the same precedence `_candidate_from_rows` applies, in the
+  same direction, so an official "available" overrides a vendor OUT here too. A player the
+  build would drop for that reason is not counted as a coverage gap; a player it would drop
+  for want of a projection is, and is named by salary, dearest first.
+- **Ownership is reported as two sources, never as one number.** Classic candidate selection
+  prefers a dedicated `ownership_baselines` row and falls back per player to ownership
+  embedded in a projection file, so the report says how many players would get each and names
+  the ones on the fallback. Showdown has no fallback at all — candidate selection refuses
+  without both role baselines — and the report says that rather than implying one exists.
+- **An unrecognized venue is not a dome.** Weather is required for outdoor and unclassified
+  venues alike, and an unclassified one is named so `snapshots/stadiums.py` can be fixed.
+  Odds and weather are covered *games*, not covered players; a missing game is named.
+- **A readiness refusal writes nothing, and an acceptance is frozen.** The gate runs before
+  the crosswalk check and candidate selection, so no artifact directory, run row, or snapshot
+  exists when it refuses. `--accept-readiness <check>` excuses one named failure; the name is
+  written into the decision's `readiness.json` artifact, hashed into the manifest, and shown
+  in the memo. Two decisions over the same rows with different acceptances get different
+  scenario ids: a different excuse is a different decision. An unknown check name is refused
+  as invalid input, so a typo can never silently fail to excuse the failure it meant to.
+- **Replay reproduces the frozen readiness and reports drift; it does not refuse on it.**
+  The artifact is hash-verified and carries the thresholds in force at the time, so a
+  decision is judged forever by its own ruleset. Replay additionally re-measures the store at
+  the same instant and records `store_matches`. A row backfilled afterwards at an instant the
+  decision predates changes that measurement without changing the decision — candidate
+  selection is pinned to its own manifest artifacts — and refusing replay over an unconsumed
+  number would break the replayability of every earlier decision. The memo says
+  `store_still_measures_the_same=NO` instead. What *is* refused is an artifact naming a
+  failed check it never accepted: that could only come from a bypassed build guard.
+- **The read lives in `src/narrative_alpha/readiness.py`, not `ops/readiness.py`.** `build`
+  must consult it, and `narrative_alpha.ops.__init__` reaches `build` through the dashboard
+  and slate lanes, so an `ops` module would be a circular import and a layering inversion
+  (L5 depending on L6). Same reasoning, same shape as `ownership_config.py`. Every operator
+  surface imports this leaf; nothing here imports an operator module.
+- **The test fixtures now seed odds and weather, and `na-ops slate`'s fixture accepts its own
+  gaps.** A fixture slate with no market view was an incomplete slate that the build had no
+  way to notice, which is exactly the defect this slice closes. The store-level fixtures seed
+  both feeds; the capture-level lane fixture has no odds or weather feed to capture and its
+  projections are deliberately captured the evening before, so it names those three
+  acceptances — which also exercises the acceptance path end to end.
+
 ## 2026-09-05 — Stokastic component stats stay raw; site points are a labeled read
 
 - **The three Stats exports are one capture and one observation.** Passing, rushing, and

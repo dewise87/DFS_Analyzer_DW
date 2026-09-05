@@ -7,7 +7,7 @@ import json
 import math
 import shutil
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -54,6 +54,18 @@ from narrative_alpha.portfolio import (
     policy_request_fields,
     site_rules,
     validate_portfolio,
+)
+from narrative_alpha.readiness import (
+    DEFAULT_READINESS_CONFIG_PATH,
+    READINESS_ARTIFACT_FILENAME,
+    READINESS_ARTIFACT_KIND,
+    READINESS_CHECK_NAMES,
+    ReadinessConfig,
+    ReadinessError,
+    SlateReadiness,
+    collect_slate_readiness,
+    load_readiness_config,
+    readiness_artifact_bytes,
 )
 from narrative_alpha.replay import (
     PointInTimeSession,
@@ -122,6 +134,17 @@ class BuildArtifactError(BuildError):
     code = "artifact_write_failed"
 
 
+class BuildReadinessError(BuildError):
+    """Raised when the slate's inputs miss a threshold nobody accepted.
+
+    The refusal happens before any artifact is written or any row inserted, so a slate the
+    operator has not looked at leaves nothing behind. `--accept-readiness <name>` admits one
+    named failure, and the acceptance is frozen into the decision manifest.
+    """
+
+    code = "readiness_refused"
+
+
 class BuildValidationError(BuildError):
     """Raised before exporting output that violates the frozen request or site rules."""
 
@@ -144,12 +167,18 @@ class BuildResult:
     replay: ReplayResult
     ownership_routing: OwnershipRouting
     contest_policy: ContestPolicies
+    # A decision frozen before Slice 47 carries no readiness artifact, so a result
+    # reconstructed from one (`load_build_result`) has none to show. A fresh build always
+    # does: nothing gets past the gate without it.
+    readiness: SlateReadiness | None
+    accepted_readiness_failures: tuple[str, ...]
     artifact_root: Path
     artifact_directory: Path
     optimizer_request_path: Path
     generated_lineups_path: Path
     manifest_path: Path
     contest_policy_path: Path
+    readiness_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -159,6 +188,7 @@ class _WrittenArtifacts:
     lineups_path: Path
     manifest_path: Path
     contest_policy_path: Path
+    readiness_path: Path
 
 
 def build_decision(
@@ -182,6 +212,9 @@ def build_decision(
     contest_policy: ContestPolicies | None = None,
     contest_policy_path: Path = DEFAULT_CONTEST_POLICIES_PATH,
     ownership_config: OwnershipModelConfig | None = None,
+    readiness_config: ReadinessConfig | None = None,
+    readiness_config_path: Path = DEFAULT_READINESS_CONFIG_PATH,
+    accepted_readiness_failures: Sequence[str] = (),
 ) -> BuildResult:
     """Build, freeze, replay, and atomically commit one DFS decision.
 
@@ -199,6 +232,11 @@ def build_decision(
     its own rows and this decision one atomic fact (the fast lane's availability rows
     live or die with the snapshot they justify). On-disk artifacts are still removed
     when the build raises.
+
+    ``accepted_readiness_failures`` names the readiness thresholds this decision is allowed
+    to miss. Every other miss refuses the build before anything is written, and each name
+    passed here is frozen into the decision's readiness artifact whether or not the check
+    actually failed at this instant, so replay and the memo show what was excused.
     """
 
     try:
@@ -214,6 +252,20 @@ def build_decision(
         raise BuildInputError("slate_id must be positive")
     if number_of_lineups < 1 or number_of_lineups > 150:
         raise BuildInputError("number_of_lineups must be between 1 and 150")
+    unknown = tuple(
+        sorted(name for name in accepted_readiness_failures if name not in READINESS_CHECK_NAMES)
+    )
+    if unknown:
+        raise BuildInputError(
+            "--accept-readiness names no such readiness check: "
+            + ", ".join(unknown)
+            + "; the checks are "
+            + ", ".join(sorted(READINESS_CHECK_NAMES))
+        )
+    try:
+        thresholds = readiness_config or load_readiness_config(readiness_config_path)
+    except ReadinessError as error:
+        raise BuildInputError(str(error)) from error
     try:
         policies = contest_policy or load_contest_policies(contest_policy_path)
         selected_policy = policies.for_archetype(requested_archetype)
@@ -256,6 +308,8 @@ def build_decision(
             ownership_routing=ownership_routing,
             contest_policy=policies,
             ownership_config=ownership_config,
+            readiness_config=thresholds,
+            accepted_readiness_failures=tuple(sorted(set(accepted_readiness_failures))),
         )
     with connect_database(database_path) as owned:
         apply_migrations(owned)
@@ -278,6 +332,8 @@ def build_decision(
                 ownership_routing=ownership_routing,
                 contest_policy=policies,
                 ownership_config=ownership_config,
+                readiness_config=thresholds,
+                accepted_readiness_failures=tuple(sorted(set(accepted_readiness_failures))),
             )
         except Exception:
             owned.rollback()
@@ -319,6 +375,8 @@ def _build_in_transaction(
     ownership_routing: PinnedOwnershipRouting | None = None,
     contest_policy: ContestPolicies,
     ownership_config: OwnershipModelConfig | None = None,
+    readiness_config: ReadinessConfig,
+    accepted_readiness_failures: tuple[str, ...],
 ) -> BuildResult:
     session = PointInTimeSession(connection)
     governance = ownership_config or routing_config()
@@ -334,6 +392,29 @@ def _build_in_transaction(
         raise BuildInputError(
             f"decision_at must precede slate lock {utc_timestamp(slate.locks_at)}; "
             "full-slate builds do not support late swap. Use na-replay to inspect a frozen decision"
+        )
+
+    try:
+        readiness = collect_slate_readiness(
+            connection,
+            slate_id=slate_id,
+            as_of=decision_at,
+            config=readiness_config,
+        )
+    except ReadinessError as error:
+        raise BuildReadinessError(str(error)) from error
+    unaccepted = tuple(
+        check for check in readiness.failures if check.name not in accepted_readiness_failures
+    )
+    if unaccepted:
+        # Nothing has been written yet: no artifact directory, no row, no run. A slate the
+        # operator has not looked at leaves the store exactly as it found it.
+        raise BuildReadinessError(
+            f"slate {slate_id} is not ready to build at {utc_timestamp(decision_at)} under "
+            f"readiness thresholds {readiness_config.config_version!r}: "
+            + "; ".join(f"{check.name} — {check.detail}" for check in unaccepted)
+            + ". Fix the input, or rerun with "
+            + " ".join(f"--accept-readiness {check.name}" for check in unaccepted)
         )
 
     # The existing crosswalk guard is intentionally fail-closed. Until unresolved rows
@@ -359,7 +440,14 @@ def _build_in_transaction(
     routing = routed.routing
 
     scenario = CandidatePlayerScenario(
-        scenario_id=_scenario_id(selected, routing, slate_id, site, decision_at),
+        scenario_id=_scenario_id(
+            selected,
+            routing,
+            slate_id,
+            site,
+            decision_at,
+            accepted_readiness_failures,
+        ),
         players=selected.players,
         projection_source_versions=selected.projection_source_versions,
     )
@@ -411,6 +499,11 @@ def _build_in_transaction(
         raise BuildRoutingError(
             "the ownership configuration carries no bytes to freeze beside the decision"
         )
+    readiness_bytes = readiness_artifact_bytes(
+        readiness,
+        accepted_failures=accepted_readiness_failures,
+        config=readiness_config,
+    )
     manifest = _decision_manifest(
         selected,
         routing,
@@ -420,6 +513,8 @@ def _build_in_transaction(
         request_path=request_relative_path,
         lineups_sha256=upload_sha256,
         lineups_path=lineups_relative_path,
+        readiness_sha256=_sha256(readiness_bytes),
+        readiness_version=readiness_config.config_version,
     )
     manifest_bytes = canonical_manifest_hashes(manifest).encode("utf-8")
     written = _write_artifacts(
@@ -429,6 +524,7 @@ def _build_in_transaction(
         lineups_bytes=upload_bytes,
         manifest_bytes=manifest_bytes,
         contest_policy_bytes=contest_policy.raw_bytes,
+        readiness_bytes=readiness_bytes,
         ownership_config_bytes=governance.raw_bytes if routing.applied else None,
     )
     try:
@@ -450,6 +546,8 @@ def _build_in_transaction(
             adapter=adapter,
             routing=routing,
             contest_policy=contest_policy,
+            readiness=readiness,
+            accepted_readiness_failures=accepted_readiness_failures,
         )
     except Exception:
         # The DB transaction rolls back in build_decision; the on-disk artifacts must
@@ -477,6 +575,8 @@ def _commit_and_verify(
     adapter: OptimizerAdapter,
     routing: OwnershipRouting,
     contest_policy: ContestPolicies,
+    readiness: SlateReadiness,
+    accepted_readiness_failures: tuple[str, ...],
 ) -> BuildResult:
     run = ModelRunRow(
         run_id=run_id,
@@ -542,12 +642,15 @@ def _commit_and_verify(
         replay=replay,
         ownership_routing=routing,
         contest_policy=contest_policy,
+        readiness=readiness,
+        accepted_readiness_failures=accepted_readiness_failures,
         artifact_root=artifact_root,
         artifact_directory=written.directory,
         optimizer_request_path=written.request_path,
         generated_lineups_path=written.lineups_path,
         manifest_path=written.manifest_path,
         contest_policy_path=written.contest_policy_path,
+        readiness_path=written.readiness_path,
     )
 
 
@@ -557,6 +660,7 @@ def _scenario_id(
     slate_id: int,
     site: DfsSite,
     decision_at: datetime,
+    accepted_readiness_failures: tuple[str, ...] = (),
 ) -> str:
     payload: dict[str, object] = {
         "decision_at": utc_timestamp(decision_at),
@@ -583,6 +687,8 @@ def _scenario_id(
             {"sha256": artifact.sha256, "source": artifact.source}
             for artifact in selected.ownership_artifacts
         ]
+    if accepted_readiness_failures:
+        payload["accepted_readiness_failures"] = list(accepted_readiness_failures)
     if routing.applied:
         payload["ownership_scenario_set"] = {
             "run_id": routing.scenario_run_id,
@@ -601,6 +707,8 @@ def _decision_manifest(
     request_path: str,
     lineups_sha256: str,
     lineups_path: str,
+    readiness_sha256: str,
+    readiness_version: str,
 ) -> tuple[DecisionManifestHash, ...]:
     salary = tuple(
         _source_manifest_item("salary", artifact) for artifact in selected.salary_artifacts
@@ -641,8 +749,15 @@ def _decision_manifest(
             ),
         )
     )
+    directory = request_path.rsplit("/", 1)[0]
     generated = (
         *frozen_config,
+        DecisionManifestHash(
+            artifact_kind=READINESS_ARTIFACT_KIND,
+            sha256=readiness_sha256,
+            path=f"{directory}/{READINESS_ARTIFACT_FILENAME}",
+            source=readiness_version,
+        ),
         DecisionManifestHash(
             artifact_kind=CONTEST_POLICY_ARTIFACT_KIND,
             sha256=contest_policy.sha256,
@@ -689,6 +804,7 @@ def _write_artifacts(
     lineups_bytes: bytes,
     manifest_bytes: bytes,
     contest_policy_bytes: bytes,
+    readiness_bytes: bytes,
     ownership_config_bytes: bytes | None = None,
 ) -> _WrittenArtifacts:
     directory = artifact_root / decision_snapshot_id
@@ -696,6 +812,7 @@ def _write_artifacts(
     lineups_path = directory / "generated_lineups.csv"
     manifest_path = directory / "manifest.json"
     contest_policy_path = directory / "contest_policy.toml"
+    readiness_path = directory / READINESS_ARTIFACT_FILENAME
     try:
         artifact_root.mkdir(parents=True, exist_ok=True)
         directory.mkdir()
@@ -703,6 +820,7 @@ def _write_artifacts(
         lineups_path.write_bytes(lineups_bytes)
         manifest_path.write_bytes(manifest_bytes)
         contest_policy_path.write_bytes(contest_policy_bytes)
+        readiness_path.write_bytes(readiness_bytes)
         if ownership_config_bytes is not None:
             (directory / "ownership_config.toml").write_bytes(ownership_config_bytes)
     except OSError as error:
@@ -713,6 +831,7 @@ def _write_artifacts(
         lineups_path=lineups_path,
         manifest_path=manifest_path,
         contest_policy_path=contest_policy_path,
+        readiness_path=readiness_path,
     )
 
 

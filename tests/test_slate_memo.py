@@ -22,6 +22,8 @@ DECISION_AT = datetime(2026, 9, 13, 16, 55, tzinfo=UTC)
 EVALUATION_AT = datetime(2026, 9, 14, 12, tzinfo=UTC)
 SALARY_HASH = "a" * 64
 PROJECTION_HASH = "b" * 64
+ODDS_HASH = "c" * 64
+WEATHER_HASH = "d" * 64
 GOLDEN = Path(__file__).with_name("golden") / "slate_memo.txt"
 
 
@@ -267,6 +269,42 @@ def _seed_build_store(database: Path) -> None:
                     "stadium_name": "Fixture Stadium",
                     "game_status": "scheduled",
                     **_pit("fixture"),
+                },
+            )
+            # Odds and weather are slate readiness inputs (Slice 47), so a fixture that
+            # omits them is a slate the build refuses. Both games carry both.
+            _insert(
+                connection,
+                "odds_snapshots",
+                {
+                    "game_id": game_id,
+                    "sportsbook": "fixture-book",
+                    "home_spread": -3.0,
+                    "away_spread": 3.0,
+                    "total": 44.5,
+                    "response_file_sha256": ODDS_HASH,
+                    **_pit("fixture-odds"),
+                },
+            )
+            _insert(
+                connection,
+                "weather_snapshots",
+                {
+                    "game_id": game_id,
+                    "stadium_name": "Fixture Stadium",
+                    "forecast_model": "fixture-model",
+                    "forecast_run_at": _timestamp(DATA_AT),
+                    "forecast_for_at": _timestamp(
+                        datetime(2026, 9, 13, 16 + game_id, tzinfo=UTC)
+                    ),
+                    "lead_time_seconds": 3600,
+                    "temperature_c": 18.0,
+                    "precipitation_probability": 0.1,
+                    "wind_speed_kph": 12.0,
+                    "wind_gust_kph": 20.0,
+                    "weather_code": 1,
+                    "response_file_sha256": WEATHER_HASH,
+                    **_pit("fixture-weather"),
                 },
             )
         _insert(

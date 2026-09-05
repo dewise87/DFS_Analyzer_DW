@@ -1781,6 +1781,9 @@ ManifestArtifactKind = Literal[
     "market",
     "weather",
     "availability",
+    # The slate-input readiness report the build was judged by, including any threshold
+    # failure the operator explicitly accepted (Slice 47).
+    "readiness",
     "signal_features",
     "model_parameters",
     "contest_policy",
