@@ -401,6 +401,169 @@ ChatGPT **GPT-5.1 Thinking** (workhorse — the registry seam already exists).
 so Slice 9 waits for the first real export. Not a project blocker — Slices 10–12 are
 code-first and proceed against seeded fixtures.
 
+**Status note (2026-09-06):** Stokastic's Data Hub **Projections** page opened for the Week 1
+main slate seven days before lock. Daniel captured the real files (see below). The first
+`na-slate ingest --site dk` against the real DK export also failed on header drift, so the
+salary-parser fixes are folded into this slice as a prerequisite part. The prompt below
+**replaces** the 2026-09-01 prompt above.
+
+**Real-file facts the executing model must respect** (captures of 2026-09-06 21:40Z under
+`data/snapshots/2026/week_01/`, raw copies under `data/vendor/{draftkings,fanduel,stokastic}/2026-09-06/`):
+
+- Stokastic exports **one file per site** (`DK_NFL_Main_Data_Hub_Projections.csv`, 745 rows;
+  `FD_NFL_Main_Data_Hub_Projections.csv`, 733 rows), and **projections and ownership are in
+  the same file**. Both files were captured under kind `projections` *and* kind `ownership`
+  in the same capture directory, so one adapter serves both `parse_projections` and
+  `parse_ownership` from the same bytes. Header (no BOM):
+  `Player,Salary,Position,Team,Opponent,Projection,Value,Ownership %,Optimal %,Leverage,Std Dev,Boom,Bust,Ceiling,Floor`.
+- No player id, no game/kickoff column, no vendor timestamp inside the file. Identity is
+  name + team + position through the crosswalk. Defense rows use the nickname as `Player`
+  (`Titans`, `Dolphins`) with position `DST` in the DK file and `D` in the FD file.
+- `Ownership %` is a percentage in [0, 100] (max ≈ 46; each file sums to 900.0 = nine roster
+  slots × 100). Convert to a fraction by the `%` in the header name, never by magnitude.
+- 417 (DK) / 410 (FD) rows have `Projection` = 0 with `Std Dev`, `Boom`, `Bust`, `Ceiling`,
+  `Floor` **blank** (deep bench). These are vendor values, not errors: store mean 0 with no
+  floor/ceiling and count them.
+- One FD row (`Dolphins`, D) has `Ceiling` 7.94 < `Projection` 8.94; `ParsedProjection`
+  rejects that range. Do **not** reject the row: store the mean, drop floor/ceiling for that
+  row only, and count it in the report as `range_dropped` with the name.
+- Team codes are DK-style in both files (`JAX`, `LV`, `LAC`, `WAS`). The real FD salary
+  export spells Jacksonville `JAC`; resolve through the crosswalk's existing team handling —
+  check what the Slice 46 stats loader does with team codes and reuse it; add no new
+  alias table without saying so in the report.
+- The manifest cannot say which file belongs to which site: both are `source=stokastic` in one
+  capture. **Site attribution rule (decided here):** the adapter reads the defense position
+  token — `DST` → draftkings, `D` → fanduel; any other token or a file with no defense rows
+  is a schema refusal naming the file. The loader skips files attributed to the other site and
+  lists them as skipped by name. After load, compare each resolved row's vendor `Salary` with
+  the slate's ingested salary and report mismatches by count and name (a report field, not a
+  refusal — salaries move before lock).
+- Real DK salary export (`DKSalaries.csv`, BOM, 745 rows) carries a trailing **`Status`**
+  column (blank / `Q` / `OUT` / `IR`) that `_DRAFTKINGS_HEADERS` does not allow. Real FD
+  classic export (`FanDuel-NFL-2026-09-13-133104-players-list.csv`, 730 rows) has **three
+  empty header cells** between `Tier` and `Roster Position`, and carries `Roster Position`
+  (`QB`, `RB/FLEX`, …, `DEF`) on a *classic* slate — today that column alone flags showdown.
+  FD ids are `133104-NNNN` (contest-prefixed). Upload templates are in `data/vendor/` only;
+  they are not captures.
+
+**Model:** Claude **Sonnet 5** · ChatGPT **GPT-5.1 Thinking**. Workhorse — the registry
+seam, crosswalk, and Slice 46 loader are the pattern; the one design decision (site
+attribution) is made above.
+
+**Prompt (2026-09-06, ready to paste):**
+
+> You are working in `DFS_Analyzer_DW` (Python 3.12, uv at `~/.local/bin/uv`; run every
+> command as `~/.local/bin/uv run --frozen …`). Read, in this order: `docs/DECISIONS.md`
+> (binding: no silent fallback, no magnitude-inferred units, insert-only point-in-time
+> writes, structured errors that name the file), the "Real-file facts" block for Slice 9 in
+> `docs/WORK_SLICES.md`, `src/narrative_alpha/ingest/projections.py` (the `SourceFormat`
+> protocol, `SourceFormatRegistry`, `ParsedProjection`/`ParsedOwnership`,
+> `load_projection_capture`, `_resolve_player`), `src/narrative_alpha/ingest/stokastic_stats.py`
+> (Slice 46: `StokasticStatsSourceFormat` is already registered under the name `stokastic`
+> and its `parse_projections`/`parse_ownership` raise — this is the adapter you extend),
+> `src/narrative_alpha/ingest/salaries.py`, `src/narrative_alpha/ingest/slates.py`
+> (`newest_salary_capture`, `load_salary_capture`), `src/narrative_alpha/ops/slate.py`
+> (`SlateDependencies.source_formats`, the `slate_projections` step and its S1 message),
+> `src/narrative_alpha/slate_cli.py`, and `docs/WEEK_1_RUNBOOK.md`.
+>
+> The real files are under `data/snapshots/2026/week_01/` (captures stamped
+> `2026-09-06T21:40:11…Z`: DK salaries, FD salaries, Stokastic projections, Stokastic
+> ownership) with raw copies under `data/vendor/…/2026-09-06/`. They are licensed and
+> git-ignored: read them, build against them, never commit them. If they are not present,
+> STOP and say so — do not invent a schema.
+>
+> **Part A — salary ingest against the real exports (prerequisite).**
+>
+> 1. `parse_salary_csv` must accept the real DK export: allow the trailing `Status`
+>    column, parse it into a new optional `status` field on `ParsedSalaryRow` (blank → None;
+>    `Q`, `OUT`, `IR`, `D`, `P` kept verbatim, upper-cased) and store it on the salary row if
+>    the table has a status/availability column, otherwise add one by migration 0026 with
+>    the same insert-only discipline as the other salary columns. Do not act on it anywhere
+>    else in this slice.
+> 2. `parse_salary_csv` must accept the real FD classic export: drop empty header cells
+>    (only empty ones — a duplicated *named* header is still drift), and decide classic vs
+>    showdown for FanDuel from the `Roster Position` **values** (`MVP`/`FLEX` present →
+>    showdown), not from the column's presence — mirror what `_detect_slate_type` already does
+>    for DK. Keep every other drift a refusal.
+> 3. `newest_salary_capture(snapshot_root, season, week)` ignores the site, so
+>    `na-slate ingest --site dk` picked the newer FanDuel capture. Give it a `site` argument
+>    and return the newest capture whose salary file's manifest `source` matches the site
+>    (`draftkings`/`fanduel`, through `normalize_site`); when none matches, the error names
+>    the site and the sources it did find. Update `slate_cli.py`, `ops/slate.py`
+>    (`SlateDependencies.newest_salary_capture`), and any test double. `load_salary_capture`
+>    must also skip, by name, any salary file in the capture whose parsed site is not the
+>    requested one rather than failing the whole capture.
+> 4. Then run, for real, `na-slate ingest --season 2026 --week 1 --site dk` and
+>    `--site fd`, followed by `na-slate list --season 2026 --week 1`. Report exactly what
+>    printed: slates written, rows inserted, rows rejected with reasons, unresolved identity
+>    count and the first ten names. Do not resolve identities yourself — that is Daniel's
+>    queue. If ingest refuses for a reason not covered above, stop and report the message.
+>
+> **Part B — the `stokastic` projections + ownership adapter (Slice 9 proper).**
+>
+> 5. Extend `StokasticStatsSourceFormat` (keep the registered name `stokastic`; rename the
+>    class if you like) so `parse_projections` and `parse_ownership` parse the Data Hub
+>    Projections export. Exact header-set match on the 15 columns listed in the facts block;
+>    anything else raises the existing structured `SourceFormatError`/schema error naming
+>    missing and unexpected columns and the file. A Stats export handed to
+>    `parse_projections` and a Projections export handed to `parse_stats` both refuse by
+>    name, as today.
+> 6. Field mapping. `ParsedProjection`: `name_raw=Player`, `team`, `opponent`,
+>    `position` (`D` → `DST` for the FD file; use the existing defense-position helper),
+>    `projection_mean=Projection`, `projection_floor=Floor`, `projection_ceiling=Ceiling`
+>    (None when blank), `ownership_projection=Ownership % / 100`. Add `vendor_salary: int |
+>    None` to `SourcePlayerFields` and fill it. `source_version` = the format name plus the
+>    file's sha256 prefix is fine; there is no vendor timestamp in the file, so
+>    `published_at` stays None and the capture's `observed_at` is the point-in-time field.
+>    `ParsedOwnership`: `role="classic"` for this export, `ownership=Ownership % / 100`.
+>    Determine the percent unit from the header text `Ownership %` only. Rows whose
+>    `Ownership %` or `Projection` is blank or non-numeric are rejected rows with a reason.
+>    Zero projections are valid rows. Floor/ceiling inconsistent with the mean (the FD
+>    `Dolphins` case): keep the mean, drop both bounds, and count it.
+> 7. Site attribution, as decided in the facts block: `parse_projections`/`parse_ownership`
+>    return the attributed site (add `site: str` to both parse results, derived from the
+>    defense token; no defense rows or a mixed/unknown token → schema refusal naming the
+>    file). `load_projection_capture` skips files attributed to a different site, lists
+>    them as `skipped_files` with the reason, and processes the rest. Passing `site` into
+>    the parser is also acceptable if you prefer the parser to refuse a mismatched file;
+>    either way nothing is guessed from salary magnitudes.
+> 8. `ProjectionLoadReport` gains: `skipped_files`, `zero_projection_rows`,
+>    `range_dropped` (names), `salary_mismatches` (count + up to ten `name: vendor vs
+>    slate`), and keeps the existing unresolved list. `render_*` for the lane and
+>    `na-slate`/`na-ops slate` output must print them. The lane's S1 message must now only
+>    appear for vendors that are genuinely unregistered.
+> 9. Wire the adapter into production: `SlateDependencies.source_formats` defaults to the
+>    registered Stokastic format (one instance serving stats, projections, and ownership),
+>    and whatever `na-slate` command loads projections uses the same default. Update the
+>    `slate_projections` docstring in `ops/slate.py` that says the registry is empty.
+> 10. Golden files: anonymize a dozen rows of each real file (fake names, perturbed numbers,
+>     same columns, same quirks: a zero-projection row with blank bounds, a DST/D row, the
+>     ceiling<mean row, a `JAX` row) into `tests/golden/stokastic_projections_dk.csv` and
+>     `tests/golden/stokastic_projections_fd.csv`; likewise a dozen-row anonymized
+>     `tests/golden/dk_salaries_status.csv` and `tests/golden/fd_salaries_classic_2026.csv`
+>     for Part A. Never commit the full exports.
+> 11. Tests, each exercising the failure mode not just the happy path: DK `Status` column
+>     accepted and stored; FD empty-header cells accepted, a duplicated named header still
+>     refused; FD classic with `Roster Position` detected as classic and an FD showdown
+>     export (build the fixture from the existing FD showdown golden) still showdown;
+>     `newest_salary_capture` picks by site and names sources when none match; projections
+>     header drift refused; percent → fraction; zero rows kept and counted; ceiling<mean
+>     bounds dropped and counted; site attribution DK/FD and the no-defense-rows refusal;
+>     loader skips the other site's file by name; salary mismatch reported; idempotent
+>     reload inserts nothing new; end-to-end `na-ops slate` through `slate_projections` on
+>     a seeded store built from the golden salaries, asserting the readiness
+>     `projection_coverage` and `ownership_coverage` checks now read from these rows.
+> 12. Gates: `ruff check .`, `mypy src/narrative_alpha`, `pytest -q` all green; format
+>     only files you touched. Then run `na-ops readiness --slate-id <dk id>` for real and
+>     paste its output in your report, with the unresolved identity count. Do not run a
+>     build. Update `docs/WEEK_1_RUNBOOK.md` only where a step's literal text changed
+>     (the S1 line, the `[S9]` markers you have now satisfied, the Saturday 18:00 capture
+>     command — one Stokastic export per site, captured under both kinds).
+>
+> Finish with: files changed, migration added (if any), the two real ingest outputs, the
+> readiness output, the unresolved names, and anything in the real files that contradicted
+> the facts block.
+
 ### Slice 10 — Player outcome distributions
 
 **Goal:** turn each player's point estimate into the §6.2 mixture — `P(active)`,
