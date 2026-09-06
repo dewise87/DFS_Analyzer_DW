@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -27,6 +28,9 @@ _DRAFTKINGS_HEADERS = frozenset(
         "AvgPointsPerGame",
     }
 )
+_DRAFTKINGS_OPTIONAL_HEADERS = frozenset({"Status"})
+"""Columns the real export may carry that older exports omit; never required."""
+
 _FANDUEL_CLASSIC_HEADERS = frozenset(
     {
         "Id",
@@ -267,51 +271,62 @@ def parse_salary_csv(
         raise SalaryCsvError(f"salary CSV is not UTF-8: {csv_path}") from error
 
     try:
-        reader = csv.DictReader(io.StringIO(text, newline=""))
-        if reader.fieldnames is None:
-            raise SalarySchemaError(
-                detected_near="unknown",
-                headers=(),
-                missing_columns=tuple(sorted(_DRAFTKINGS_HEADERS)),
-                unexpected_columns=(),
-            )
-        headers = tuple(reader.fieldnames)
-        site, header_showdown = _detect_site(headers)
-        raw_rows = list(reader)
+        headers, raw_rows = _read_rows(text)
     except csv.Error as error:
         raise SalaryCsvError(f"malformed salary CSV: {error}") from error
+    if not headers:
+        raise SalarySchemaError(
+            detected_near="unknown",
+            headers=headers,
+            missing_columns=tuple(sorted(_DRAFTKINGS_HEADERS)),
+            unexpected_columns=(),
+        )
+    site, has_roster_position = _detect_site(headers)
 
-    slate_type = _detect_slate_type(site, header_showdown, raw_rows)
+    slate_type = _detect_slate_type(site, has_roster_position, raw_rows)
     salary_format = SalaryFormat(f"{site.value}_{slate_type.value}")
     parsed_rows: list[ParsedSalaryRow] = []
     rejected_rows: list[RejectedSalaryRow] = []
     for row_number, raw_row in enumerate(raw_rows, start=2):
-        extra_values = raw_row.get(None)
-        if extra_values:
+        if raw_row.extra_values:
             rejected_rows.append(
                 RejectedSalaryRow(
                     row_number=row_number,
-                    site_player_id=_raw_player_id(site, raw_row),
+                    site_player_id=_raw_player_id(site, raw_row.values),
                     reasons=("row has more values than the header",),
                 )
             )
             continue
-        if not any(value and value.strip() for key, value in raw_row.items() if key is not None):
+        if raw_row.unnamed_values:
+            # The empty header cells are dropped, so a value under one would vanish
+            # silently. Refuse the row by name instead of guessing which column it is.
+            rejected_rows.append(
+                RejectedSalaryRow(
+                    row_number=row_number,
+                    site_player_id=_raw_player_id(site, raw_row.values),
+                    reasons=(
+                        "row carries data under an unnamed header column: "
+                        + ", ".join(raw_row.unnamed_values),
+                    ),
+                )
+            )
+            continue
+        if not any(value and value.strip() for value in raw_row.values.values()):
             continue
         try:
             if site is SalarySite.DRAFTKINGS:
                 parsed = _parse_draftkings_row(
-                    raw_row, slate_type, slate_id=slate_id, slate_name=slate_name
+                    raw_row.values, slate_type, slate_id=slate_id, slate_name=slate_name
                 )
             else:
                 parsed = _parse_fanduel_row(
-                    raw_row, slate_type, slate_id=slate_id, slate_name=slate_name
+                    raw_row.values, slate_type, slate_id=slate_id, slate_name=slate_name
                 )
         except (KeyError, ValueError, ValidationError) as error:
             rejected_rows.append(
                 RejectedSalaryRow(
                     row_number=row_number,
-                    site_player_id=_raw_player_id(site, raw_row),
+                    site_player_id=_raw_player_id(site, raw_row.values),
                     reasons=_error_reasons(error),
                 )
             )
@@ -335,7 +350,58 @@ def parse_salary_csv(
     )
 
 
+@dataclass(frozen=True)
+class _RawRow:
+    """One CSV data row split into the named columns and everything else."""
+
+    values: dict[str, str | None]
+    extra_values: tuple[str, ...] = ()
+    """Cells past the width of the header row."""
+    unnamed_values: tuple[str, ...] = field(default=())
+    """Non-empty cells sitting under an empty header cell."""
+
+
+def _read_rows(text: str) -> tuple[tuple[str, ...], tuple[_RawRow, ...]]:
+    """Read the export, dropping the empty header cells the FanDuel export carries.
+
+    Only *empty* header cells are dropped: a duplicated named header is drift and is
+    refused by :func:`_detect_site`. Data found under a dropped column is kept on the
+    row so the caller can refuse it rather than lose it.
+    """
+
+    reader = csv.reader(io.StringIO(text, newline=""))
+    try:
+        raw_headers = next(reader)
+    except StopIteration:
+        return (), ()
+    named = tuple((index, header) for index, header in enumerate(raw_headers) if header.strip())
+    unnamed_indexes = tuple(index for index, header in enumerate(raw_headers) if not header.strip())
+    headers = tuple(header for _, header in named)
+
+    rows: list[_RawRow] = []
+    for cells in reader:
+        if not cells:
+            continue
+        values: dict[str, str | None] = {
+            header: cells[index] if index < len(cells) else None for index, header in named
+        }
+        rows.append(
+            _RawRow(
+                values=values,
+                extra_values=tuple(cells[len(raw_headers) :]),
+                unnamed_values=tuple(
+                    cells[index].strip()
+                    for index in unnamed_indexes
+                    if index < len(cells) and cells[index].strip()
+                ),
+            )
+        )
+    return headers, tuple(rows)
+
+
 def _detect_site(headers: tuple[str, ...]) -> tuple[SalarySite, bool]:
+    """Return the site and whether the export carries a ``Roster Position`` column."""
+
     if len(headers) != len(set(headers)):
         duplicates = sorted(header for header in set(headers) if headers.count(header) > 1)
         raise SalarySchemaError(
@@ -346,8 +412,8 @@ def _detect_site(headers: tuple[str, ...]) -> tuple[SalarySite, bool]:
         )
 
     actual = frozenset(headers)
-    if actual == _DRAFTKINGS_HEADERS:
-        return SalarySite.DRAFTKINGS, False
+    if actual - _DRAFTKINGS_OPTIONAL_HEADERS == _DRAFTKINGS_HEADERS:
+        return SalarySite.DRAFTKINGS, True
     if actual - _FANDUEL_OPTIONAL_HEADERS == _FANDUEL_CLASSIC_HEADERS:
         return SalarySite.FANDUEL, False
     if actual - _FANDUEL_OPTIONAL_HEADERS == _FANDUEL_SHOWDOWN_HEADERS:
@@ -355,6 +421,7 @@ def _detect_site(headers: tuple[str, ...]) -> tuple[SalarySite, bool]:
 
     signatures = (
         ("draftkings", _DRAFTKINGS_HEADERS),
+        ("draftkings", _DRAFTKINGS_HEADERS | _DRAFTKINGS_OPTIONAL_HEADERS),
         ("fanduel_classic", _FANDUEL_CLASSIC_HEADERS),
         ("fanduel_classic", _FANDUEL_CLASSIC_HEADERS | _FANDUEL_OPTIONAL_HEADERS),
         ("fanduel_showdown", _FANDUEL_SHOWDOWN_HEADERS),
@@ -374,17 +441,23 @@ def _detect_site(headers: tuple[str, ...]) -> tuple[SalarySite, bool]:
 
 def _detect_slate_type(
     site: SalarySite,
-    header_showdown: bool,
-    raw_rows: list[dict[str, str | None]],
+    has_roster_position: bool,
+    raw_rows: tuple[_RawRow, ...],
 ) -> SalarySlateType:
-    if header_showdown:
+    """Decide classic vs showdown from the captain slot in the data, never the header.
+
+    Both sites ship ``Roster Position`` on classic exports too (``RB/FLEX``, ``DEF``),
+    so only the site's captain slot — DraftKings ``CPT``, FanDuel ``MVP`` — separates
+    the two.
+    """
+
+    if not has_roster_position:
+        return SalarySlateType.CLASSIC
+    slots = {
+        slot for row in raw_rows for slot in _split_slots(row.values.get("Roster Position") or "")
+    }
+    if slots & _SHOWDOWN_SLOTS:
         return SalarySlateType.SHOWDOWN
-    if site is SalarySite.DRAFTKINGS:
-        slots = {
-            slot for row in raw_rows for slot in _split_slots(row.get("Roster Position") or "")
-        }
-        if slots & _SHOWDOWN_SLOTS:
-            return SalarySlateType.SHOWDOWN
     return SalarySlateType.CLASSIC
 
 
@@ -422,6 +495,7 @@ def _parse_draftkings_row(
         salary=_parse_salary(_required(row, "Salary")),
         game_time=game_time,
         is_home=is_home,
+        player_status=_optional(row, "Status"),
     )
 
 

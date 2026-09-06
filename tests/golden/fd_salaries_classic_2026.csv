@@ -1,0 +1,13 @@
+Id,Position,First Name,Nickname,Last Name,FPPG,Played,Salary,Game,Team,Opponent,Injury Indicator,Injury Details,Tier,,,Roster Position
+133104-6001,QB,Avery,Avery Archer,Archer,20.14,16,8200,CHI@GB,GB,CHI,,,,,,QB
+133104-6002,QB,Blake,Blake Bishop,Bishop,16.02,16,7300,CHI@GB,CHI,GB,Q,Knee,,,,QB
+133104-6003,RB,Casey,Casey Crane,Crane,0.00,16,4500,CHI@GB,GB,CHI,IR,Knee,,,,RB/FLEX
+133104-6004,RB,Dana,Dana Drury,Drury,14.71,16,7100,CHI@GB,CHI,GB,,,,,,RB/FLEX
+133104-6005,WR,Emery,Emery Ellis,Ellis,15.28,16,7600,CHI@GB,GB,CHI,,,,,,WR/FLEX
+133104-6006,WR,Frankie,Frankie Fox,Fox,11.06,16,6000,CHI@GB,CHI,GB,NA,,,,,WR/FLEX
+133104-6007,TE,Gale,Gale Grimm,Grimm,8.42,16,5100,CHI@GB,GB,CHI,,,,,,TE/FLEX
+133104-6008,WR,Harper,Harper Hale,Hale,13.55,16,6800,CLE@JAC,JAC,CLE,Q,Knee,,,,WR/FLEX
+133104-6009,QB,Indigo,Indigo Iles,Iles,15.37,16,7000,CLE@JAC,JAC,CLE,,,,,,QB
+133104-6010,RB,Jules,Jules Jansen,Jansen,0.00,16,4600,CLE@JAC,CLE,JAC,,,,,,RB/FLEX
+133104-6011,D,Green Bay,Green Bay Defense,Defense,7.61,16,3800,CHI@GB,GB,CHI,,,,,,DEF
+133104-6012,D,Jacksonville,Jacksonville Defense,Defense,8.94,16,3600,CLE@JAC,JAC,CLE,,,,,,DEF

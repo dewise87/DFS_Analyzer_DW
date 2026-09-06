@@ -274,3 +274,80 @@ def _salary_row(
         salary=salary,
         game_time=datetime(2026, 9, 13, 17, 0, tzinfo=UTC),
     )
+
+
+def test_draftkings_status_column_is_accepted_and_parsed() -> None:
+    result = parse_salary_csv(GOLDEN_PATH / "dk_salaries_status.csv")
+
+    assert result.salary_format is SalaryFormat.DRAFTKINGS_CLASSIC
+    assert result.parse_report.rows_rejected == 0
+    statuses = {row.name_raw: row.player_status for row in result.rows}
+    assert statuses["Avery Archer"] is None
+    assert statuses["Blake Bishop"] == "Q"
+    assert statuses["Casey Crane"] == "OUT"
+    assert statuses["Frankie Fox"] == "IR"
+
+
+def test_draftkings_export_without_status_still_parses(tmp_path: Path) -> None:
+    lines = (GOLDEN_PATH / "dk_salaries_status.csv").read_text(encoding="utf-8-sig").splitlines()
+    trimmed = "\n".join(line.rsplit(",", 1)[0] for line in lines)
+    path = tmp_path / "no_status.csv"
+    path.write_text(trimmed + "\n", encoding="utf-8")
+
+    result = parse_salary_csv(path)
+
+    assert result.salary_format is SalaryFormat.DRAFTKINGS_CLASSIC
+    assert all(row.player_status is None for row in result.rows)
+
+
+def test_fanduel_empty_header_cells_are_dropped_and_the_slate_is_classic() -> None:
+    result = parse_salary_csv(GOLDEN_PATH / "fd_salaries_classic_2026.csv")
+
+    # `Roster Position` is present and carries FLEX, but no MVP: still a classic slate.
+    assert result.salary_format is SalaryFormat.FANDUEL_CLASSIC
+    assert result.parse_report.rows_rejected == 0
+    archer = next(row for row in result.rows if row.name_raw == "Avery Archer")
+    assert archer.eligible_roster_slots == ("QB",)
+    catcher = next(row for row in result.rows if row.name_raw == "Emery Ellis")
+    assert catcher.eligible_roster_slots == ("WR", "FLEX")
+
+
+def test_fanduel_showdown_with_empty_header_cells_is_still_showdown(tmp_path: Path) -> None:
+    lines = (GOLDEN_PATH / "fanduel_showdown.csv").read_text(encoding="utf-8").splitlines()
+    header, *rows = lines
+    widened = [header.replace("Tier,", "Tier,,,")]
+    widened.extend(row.replace(",,,,MVP/FLEX", ",,,,,,MVP/FLEX") for row in rows)
+    path = tmp_path / "fd_showdown_padded.csv"
+    path.write_text("\n".join(widened) + "\n", encoding="utf-8")
+
+    result = parse_salary_csv(path)
+
+    assert result.salary_format is SalaryFormat.FANDUEL_SHOWDOWN
+    assert result.parse_report.rows_rejected == 0
+
+
+def test_a_duplicated_named_header_is_still_drift(tmp_path: Path) -> None:
+    lines = (GOLDEN_PATH / "fd_salaries_classic_2026.csv").read_text(encoding="utf-8").splitlines()
+    path = tmp_path / "duplicated.csv"
+    path.write_text(
+        "\n".join([lines[0].replace("Tier,,,", "Tier,Team,,"), *lines[1:]]) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SalarySchemaError) as error:
+        parse_salary_csv(path)
+
+    assert "duplicate:Team" in error.value.unexpected_columns
+
+
+def test_data_under_an_unnamed_header_column_rejects_the_row(tmp_path: Path) -> None:
+    lines = (GOLDEN_PATH / "fd_salaries_classic_2026.csv").read_text(encoding="utf-8").splitlines()
+    lines[1] = lines[1].replace(",,,,,QB", ",,,smuggled,,QB")
+    path = tmp_path / "unnamed_data.csv"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = parse_salary_csv(path)
+
+    assert result.parse_report.rows_rejected == 1
+    assert "unnamed header column" in result.parse_report.rejected[0].reasons[0]
+    assert "smuggled" in result.parse_report.rejected[0].reasons[0]

@@ -2,16 +2,17 @@
 
 `na-*` prefix: `uv run` · Dashboard: `na-ops dashboard` → [127.0.0.1:8765](http://127.0.0.1:8765/)
 
-## Week 1 is capture-only
+## Week 1 has its projection source
 
-Slice 9 (the Stokastic projections/ownership adapter) does not exist, so the `SourceFormatRegistry`
-is empty: every projections/ownership capture is a recorded failure naming its vendor, and **every
-build refuses**. Show it: `na-slate list --season 2026 --week 1` for the id, then
-`na-ops readiness --slate-id N` → `FAIL projection_coverage 0 of N ... 0.00% against a 95.00% floor`.
-Still exercised: salary ingest, stats/odds/weather loads, readiness reports, the batch lane, and
-Tuesday's results lane. **No upload CSV is produced this week.** Steps marked **[S9]** apply
-unchanged only if the adapter lands by Saturday; without it they are expected failures — capture
-anyway, because the capture is the irreplaceable part.
+Slice 9 landed on 2026-09-06: the `stokastic` adapter is registered for projections and ownership
+as well as stats, so a captured Data Hub Projections export loads and `projection_coverage` /
+`ownership_coverage` read from real rows: every step below runs, including the build and the
+upload CSV.
+Stokastic ships **one file per site** and both projections and ownership live in the same file, so
+capture each site's export under **both** kinds; the loader attributes each file by its defense
+position token (`DST` → DraftKings, `D` → FanDuel) and lists the other site's file as skipped, by
+name. Show the state: `na-slate list --season 2026 --week 1` for the id, then
+`na-ops readiness --slate-id N`.
 
 Readiness names seven checks; a classic slate prints five, a showdown six. `projection_coverage`
 and `projection_age` ← no ingested projection (or Sunday building on Saturday's capture, 6 h bound);
@@ -25,9 +26,9 @@ and is printed in the memo; an unknown name is refused.
 - [ ] **B1 Collect:** `"2 of 104 sources failed — fox-nfl: feed contains no item or entry elements; pfn-nfl: source 'pfn-nfl' fetch failed after 1 attempts HTTP 403"` → record both dead feeds; purge/history continue; retry only after feed/access repair. `"collection failed entirely (no source was collected), so the window has no new input to extract; fix collection and rerun \`na-ops batch\`"` → repair/enable a source, rerun.
 - [ ] **B2 Extract (normal):** `"extraction reported 103 item failure(s) beside 95 succeeded — 92 evidence_validation_error, 11 schema_violation; item ids are in the run summary (\`na-ops status\` run history)"` → the step fails whenever **any** item is refused; that is expected. Done: succeeded > 0 **and** `episodes` succeeded. Inspect: `na-extract review` → `refused_attempts_by_bucket` (pre-Slice-50 attempts are one `legacy_output_unavailable` bucket of 330; new refusals carry real buckets). `"the provider batch is still processing; rerun \`na-ops batch\` and it resumes the accepted batch without re-billing"` → rerun only. `"monthly LLM budget guard refused the batch: ... nothing was submitted"` → `na-ops batch --max-items N` or raise `monthly_llm_budget_usd`.
 - [ ] **B3 Keychain / pins:** `"ANTHROPIC_API_KEY is not set for this process; a scheduled run reads it from the macOS Keychain through the wrapper \`na-ops schedule install\` writes. Add the Keychain item with \`security add-generic-password -s narrative-alpha-anthropic -a \"$USER\" -w\`"` → add/unlock, choose **Always Allow**, rerun. `"the rolling nflverse roster (01ed4adec274…) no longer matches the newest pin: +145 -0 ~526 players. Review with \`na-crosswalk nflverse-refresh --season 2026 --reviewed-at 2026-09-05\` and paste the new pin entry"` → hash and counts move daily in cutdown week; see Thu 09:20.
-- [ ] **S1 No adapter [S9]:** `"no SourceFormat adapter is registered for vendor(s) stokastic; their capture(s) <stamp>, <stamp> were not loaded and nothing was guessed (registered vendors: none)"` → expected until Slice 9; the capture is preserved, nothing was guessed. Do not work around it.
+- [ ] **S1 No adapter:** `"no SourceFormat adapter is registered for vendor(s) <vendor>; their capture(s) <stamp>, <stamp> were not loaded and nothing was guessed (registered vendors: stokastic)"` → only a genuinely unregistered vendor reaches this now; `stokastic` is registered. The capture is preserved, nothing was guessed. Do not work around it. Not a failure, printed by the same step: `"skipped <stamp>/projections/FD_NFL_Main_Data_Hub_Projections.csv (the adapter attributed it to fanduel, not draftkings)"` → expected, one file per site in one capture.
 - [ ] **S2 Identity:** `"3 salary row(s) did not resolve to a canonical player; the slate was written but a build refuses until they are cleared:"` + one `na-crosswalk resolve` line each → resolve in Dashboard → Queues or by command; Done: `na-slate list` unresolved **0**. `"N unresolved draftkings identity/identities remain; lineup generation must stop until each is decided:"` → same fix.
-- [ ] **S3 Build / slate choice:** `"slate 1 has no draftkings projection row eligible at <stamp>, so no candidate player can be priced — projections: captured but not ingested (see the slate_projections step); ownership: captured but not ingested (see the slate_projections step)"` (or `NOT CAPTURED for this week` when nothing was captured) → the expected Week 1 ending. `"2 draftkings slates exist for 2026 week 01 — 1 (classic, locks …), 2 (showdown, locks …); rerun with \`--slate-id\` naming the one to play"` → repeat with the printed id. `"--decision-at … is before this run began …; To rebuild an earlier decision use \`na-build --decision-at\`, and to reproduce a frozen one use \`na-replay\`"` → drop the stale `--decision-at`.
+- [ ] **S3 Build / slate choice:** `"slate 1 has no draftkings projection row eligible at <stamp>, so no candidate player can be priced — projections: captured but not ingested (see the slate_projections step); ownership: captured but not ingested (see the slate_projections step)"` (or `NOT CAPTURED for this week` when nothing was captured) → with Slice 9 landed this means the capture is genuinely missing or was skipped as another site's file; check the `slate_projections` step before anything else. `"2 draftkings slates exist for 2026 week 01 — 1 (classic, locks …), 2 (showdown, locks …); rerun with \`--slate-id\` naming the one to play"` → repeat with the printed id. `"--decision-at … is before this run began …; To rebuild an earlier decision use \`na-build --decision-at\`, and to reproduce a frozen one use \`na-replay\`"` → drop the stale `--decision-at`.
 
 ## Thu 2026-09-10
 
@@ -43,15 +44,15 @@ and is printed in the memo; an unknown name is refused.
 ## Sat 2026-09-12
 
 - [ ] **12:00 — Data Hub Stats capture and load.** Command: `na-snapshot capture --season 2026 --week 1 --kind stats --source stokastic Stats_Passing.csv Stats_Rushing.csv Stats_Receiving.csv` (three files, **one** command); `na-slate load-stats --season 2026 --week 1 --site dk`; `na-slate stats --season 2026 --week 1 --site dk --slate-id N`. Done: rows written, unresolved names listed, out-of-slate rows counted; derived DK means read sensibly. `load-stats` exits 0 clean, 1 identities queued, 2 held (>10% unresolved, nothing written) or refused. These means never enter a build. Fail: S2; a held capture is a failed step that does not stop the lane.
-- [ ] **18:00 — required capture; odds/weather belong here, not earlier.** Command: `na-snapshot capture --season 2026 --week 1 --kind salaries --source draftkings <salaries.csv>`; `… --kind projections --source stokastic <projections.csv>`; `… --kind ownership --source stokastic <ownership.csv>`; `na-snapshot fetch --season 2026 --week 1 --kind odds`; `na-snapshot fetch --season 2026 --week 1 --kind weather --games <games.csv>`; `na-snapshot verify --season 2026 --week 1`. Done: `na-ops status` SNAPSHOTS shows current salary/projection/ownership/odds/weather captures; no verify problem. **Open-Meteo's run horizon is about a week**, so a fetch made before Saturday does not reach Sunday's kickoffs: `na-slate load-weather` then skips it by name — `"SKIPPED: weather/03_lambeau_field.json Lambeau Field kickoff=2026-09-13 17:00:00+00:00: kickoff hour 2026-09-13T17:00 has 0 forecast values; expected one"` — and readiness reads `FAIL weather_coverage weather for the outdoor games: 2 of 2 game(s) missing — CHI@GB, NYG@DAL`. Fail: retain the immutable capture; rerun only the failed fetch/verify.
-- [ ] **After capture — Saturday slate lane.** Command: `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done **this week**: `slate_salaries`, `slate_stats`, `slate_odds`, `slate_weather`, `slate_episodes` succeed; `slate_projections` fails with S1; `slate_build`/`slate_memo` fail/skip with S3. **[S9]** Done: through `slate_memo`, with a decision, memo, and upload CSV. Odds note (not a failure): `"NOTE: 272 event(s) matched no ingested game for 2026 week 1"` — the feed is league-wide, the store is slate-scoped. Fail: S1/S2/S3.
+- [ ] **18:00 — required capture; odds/weather belong here, not earlier.** Command: `na-snapshot capture --season 2026 --week 1 --kind salaries --source draftkings <salaries.csv>`; `… --kind projections --source stokastic DK_NFL_Main_Data_Hub_Projections.csv FD_NFL_Main_Data_Hub_Projections.csv`; `… --kind ownership --source stokastic DK_NFL_Main_Data_Hub_Projections.csv FD_NFL_Main_Data_Hub_Projections.csv` (Stokastic exports one file per site and puts projections **and** ownership in it, so the same two files are captured under both kinds); `na-snapshot fetch --season 2026 --week 1 --kind odds`; `na-snapshot fetch --season 2026 --week 1 --kind weather --games <games.csv>`; `na-snapshot verify --season 2026 --week 1`. Done: `na-ops status` SNAPSHOTS shows current salary/projection/ownership/odds/weather captures; no verify problem. **Open-Meteo's run horizon is about a week**, so a fetch made before Saturday does not reach Sunday's kickoffs: `na-slate load-weather` then skips it by name — `"SKIPPED: weather/03_lambeau_field.json Lambeau Field kickoff=2026-09-13 17:00:00+00:00: kickoff hour 2026-09-13T17:00 has 0 forecast values; expected one"` — and readiness reads `FAIL weather_coverage weather for the outdoor games: 2 of 2 game(s) missing — CHI@GB, NYG@DAL`. Fail: retain the immutable capture; rerun only the failed fetch/verify.
+- [ ] **After capture — Saturday slate lane.** Command: `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done: through `slate_memo`, with a decision, memo, and upload CSV; `slate_projections` succeeds, skipping the FanDuel file by name and reporting `zero_projection_rows`, `range_dropped`, and any `salary_mismatches` (vendor salary vs the slate's — reported, never a refusal). Odds note (not a failure): `"NOTE: 272 event(s) matched no ingested game for 2026 week 1"` — the feed is league-wide, the store is slate-scoped. Fail: S1/S2/S3.
 
 ## Sun 2026-09-13
 
-- [ ] **09:00 — pre-lock refresh.** Command: `na-ops doctor`; re-capture projections and ownership as at 18:00; `na-snapshot fetch … --kind odds`; `na-snapshot fetch … --kind weather --games <games.csv>`; `na-ops readiness --slate-id N`; **[S9]** `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done: newer capture times; salaries versioned, never overwritten; readiness read before any build. Fail: the named doctor remedy, then S1/S2/S3.
-- [ ] **11:00 — final irreplaceable capture.** Command: repeat 09:00; `na-snapshot verify --season 2026 --week 1`; **[S9]** `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done: final timestamps stored. **[S9]** a frozen decision, memo, and upload CSV from this run — that is the one you upload. A build on Saturday's projections fails `projection_age` (6 h); either re-capture this morning or pass `--accept-readiness projection_age`, which is frozen into the decision and shown in the memo. Fail: S1/S2/S3.
-- [ ] **11:30 — official inactives (only if a rostered player is ruled out) [S9].** Command: `na-fast inactives --season 2026 --week 1 --site dk --paste`, paste the official list one player per line, Ctrl-D. Done: the printed diff names who came out and who went in, the new decision id, and the upload CSV — upload that CSV, all entries. Fail: `"N inactive name(s) are unresolved; the whole command was refused and no availability row was written. Clear the unresolved queue, then rerun:"` → resolve, rerun. `"rule 'official-inactives-v1' does not authorize a full unavailable status; a human must confirm the action"` → nothing was written; decide by hand. `"fast-lane rules … expired at …; a human must review and re-sign"` → not expected before 2026-09-30.
-- [ ] **Before submit — live upload acceptance [S9].** Command/artifact: the upload CSV printed by the 11:00 lane. Done: [ ] fresh template/entry metadata [ ] UTF-8, one header/data row, no formulas/blanks [ ] DK `Name (ID)` [ ] site preview: nine players for classic, CPT + five FLEX for DK showdown, correct salary/contest [ ] record SHA-256, contest ID, timestamp, result/error. Fail: any site header/ID/salary/roster/team/duplicate error → do **not** submit; keep the error and a screenshot.
+- [ ] **09:00 — pre-lock refresh.** Command: `na-ops doctor`; re-capture projections and ownership as at 18:00; `na-snapshot fetch … --kind odds`; `na-snapshot fetch … --kind weather --games <games.csv>`; `na-ops readiness --slate-id N`; `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done: newer capture times; salaries versioned, never overwritten; readiness read before any build. Fail: the named doctor remedy, then S1/S2/S3.
+- [ ] **11:00 — final irreplaceable capture.** Command: repeat 09:00; `na-snapshot verify --season 2026 --week 1`; `na-ops slate --season 2026 --week 1 --site dk --lineups 20`. Done: final timestamps stored, and a frozen decision, memo, and upload CSV from this run — that is the one you upload. A build on Saturday's projections fails `projection_age` (6 h); either re-capture this morning or pass `--accept-readiness projection_age`, which is frozen into the decision and shown in the memo. Fail: S1/S2/S3.
+- [ ] **11:30 — official inactives (only if a rostered player is ruled out).** Command: `na-fast inactives --season 2026 --week 1 --site dk --paste`, paste the official list one player per line, Ctrl-D. Done: the printed diff names who came out and who went in, the new decision id, and the upload CSV — upload that CSV, all entries. Fail: `"N inactive name(s) are unresolved; the whole command was refused and no availability row was written. Clear the unresolved queue, then rerun:"` → resolve, rerun. `"rule 'official-inactives-v1' does not authorize a full unavailable status; a human must confirm the action"` → nothing was written; decide by hand. `"fast-lane rules … expired at …; a human must review and re-sign"` → not expected before 2026-09-30.
+- [ ] **Before submit — live upload acceptance.** Command/artifact: the upload CSV printed by the 11:00 lane. Done: [ ] fresh template/entry metadata [ ] UTF-8, one header/data row, no formulas/blanks [ ] DK `Name (ID)` [ ] site preview: nine players for classic, CPT + five FLEX for DK showdown, correct salary/contest [ ] record SHA-256, contest ID, timestamp, result/error. Fail: any site header/ID/salary/roster/team/duplicate error → do **not** submit; keep the error and a screenshot.
 
 ## Mon 2026-09-14
 
@@ -74,18 +75,19 @@ and is printed in the memo; an unknown name is refused.
 | `na-ops readiness --slate-id N` | README.md:153 |
 | `na-ops slate` / `--accept-readiness` | README.md:176, README.md:166 |
 | `na-ops dashboard` | README.md:246 |
-| `na-snapshot capture` / `fetch` / `verify` | README.md:286, README.md:287, README.md:554 |
+| `na-snapshot capture` / `fetch` / `verify` | README.md:286, README.md:287, README.md:564 |
 | `na-ops results` | README.md:294 |
 | `na-report sources` | README.md:299 |
-| `na-contest add` (results-lane remedy) | README.md:591 |
+| `na-contest add` (results-lane remedy) | README.md:601 |
 | `na-crosswalk resolve` | README.md:302, README.md:473 |
 | `na-crosswalk nflverse-refresh` | README.md:304, README.md:484 |
 | `na-crosswalk nflverse-stats-refresh` | README.md:308 |
 | `na-extract review` | README.md:359 |
 | `na-extract sample` / `eval` | README.md:390, README.md:392 |
 | `na-crosswalk seed` | README.md:485 |
-| `na-slate ingest` / `list` | README.md:512, README.md:513 |
-| `na-slate load-stats` / `stats` | README.md:555, README.md:556 |
-| `na-ops doctor` | README.md:596 |
-| `na-fast inactives` | README.md:640 |
-| `na-slate load-odds` / `load-weather` | README.md:673, README.md:674 |
+| `na-slate ingest` / `list` | README.md:513, README.md:514 |
+| `na-slate load-stats` / `stats` | README.md:565, README.md:566 |
+| `na-slate load-projections` | README.md:515 |
+| `na-ops doctor` | README.md:606 |
+| `na-fast inactives` | README.md:650 |
+| `na-slate load-odds` / `load-weather` | README.md:683, README.md:684 |

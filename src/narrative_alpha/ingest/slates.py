@@ -170,26 +170,58 @@ class _InsertOutcome:
     change: SalaryChange | None = None
 
 
-def newest_salary_capture(snapshot_root: Path, season: int, week: int) -> Path:
-    """Return the newest capture directory for the week that manifests a salary file."""
+def newest_salary_capture(
+    snapshot_root: Path,
+    season: int,
+    week: int,
+    *,
+    site: str | SalarySite,
+) -> Path:
+    """Return the newest capture whose salary file was captured for ``site``.
 
+    One week holds a capture per site, so ignoring the site here hands
+    ``--site dk`` whichever export was downloaded last. The manifest's ``source``
+    is the only thing that says which site a captured file belongs to.
+    """
+
+    salary_site = site if isinstance(site, SalarySite) else normalize_site(site)
     week_path = snapshot_week_path(snapshot_root, season, week)
     if not week_path.is_dir():
         raise SlateIngestError(f"snapshot week does not exist: {week_path}")
 
     captures = sorted((path for path in week_path.iterdir() if path.is_dir()), reverse=True)
+    sources_seen: set[str] = set()
     for capture_path in captures:
         manifest_path = capture_path / MANIFEST_FILENAME
         if not manifest_path.is_file():
             continue
         manifest = load_manifest(manifest_path)
-        if any(record.kind is CaptureKind.SALARIES for record in manifest.files):
-            return capture_path
+        for record in manifest.files:
+            if record.kind is not CaptureKind.SALARIES:
+                continue
+            sources_seen.add(record.source)
+            if _manifest_site(record.source) is salary_site:
+                return capture_path
 
+    if sources_seen:
+        raise SlateIngestError(
+            f"no capture under {week_path} manifests a "
+            f"'{CaptureKind.SALARIES.value}' file for {salary_site.value}; "
+            f"the salary sources captured this week are: {', '.join(sorted(sources_seen))}"
+        )
     raise SlateIngestError(
         f"no capture under {week_path} manifests a '{CaptureKind.SALARIES.value}' file; "
         "capture the salary export first with `na-snapshot capture --kind salaries`"
     )
+
+
+def _manifest_site(source: str) -> SalarySite | None:
+    """The site a manifest ``source`` names, or None when it names no known site."""
+
+    try:
+        return normalize_site(source)
+    except SlateIngestError:
+        return None
 
 
 def load_salary_capture(

@@ -35,6 +35,18 @@ FANDUEL_ROSTER = (
     ("Sample Catcher", "NYG", "WR"),
     ("New York Defense", "NYG", "DST"),
 )
+GOLDEN_2026_ROSTER = (
+    ("Avery Archer", "GB", "QB"),
+    ("Blake Bishop", "CHI", "QB"),
+    ("Casey Crane", "GB", "RB"),
+    ("Dana Drury", "CHI", "RB"),
+    ("Emery Ellis", "GB", "WR"),
+    ("Frankie Fox", "CHI", "WR"),
+    ("Gale Grimm", "GB", "TE"),
+    ("Harper Hale", "JAX", "WR"),
+    ("Indigo Iles", "JAX", "QB"),
+    ("Jules Jansen", "CLE", "RB"),
+)
 SHOWDOWN_ROSTER = (
     ("Example Quarterback", "BUF", "QB"),
     ("Sample Receiver", "MIA", "WR"),
@@ -457,11 +469,11 @@ def test_newest_salary_capture_is_the_default_and_ignores_other_kinds(
         observed_at=OBSERVED + timedelta(hours=20),
     )
 
-    assert newest_salary_capture(snapshots, 2026, 1) == newest
+    assert newest_salary_capture(snapshots, 2026, 1, site="dk") == newest
     with pytest.raises(SlateIngestError, match="no capture"):
-        newest_salary_capture(snapshots, 2026, 2)
+        newest_salary_capture(snapshots, 2026, 2, site="dk")
     with pytest.raises(SlateIngestError, match="snapshot week does not exist"):
-        newest_salary_capture(snapshots, 2026, 3)
+        newest_salary_capture(snapshots, 2026, 3, site="dk")
 
 
 def test_list_shows_ids_counts_and_the_latest_observation_times(tmp_path: Path) -> None:
@@ -618,3 +630,81 @@ def test_team_defenses_resolve_to_one_canonical_row_per_franchise(tmp_path: Path
         ("dst:NYG", "NYG DST", "DST"),
     ]
     assert queued == 0
+
+
+def test_newest_salary_capture_picks_the_capture_for_the_requested_site(
+    tmp_path: Path,
+) -> None:
+    snapshots = tmp_path / "snapshots"
+    draftkings = _capture(tmp_path, "dk_salaries_status.csv", root=snapshots)
+    # FanDuel is captured later, so a site-blind search would hand it to `--site dk`.
+    fanduel = _capture(
+        tmp_path,
+        "fd_salaries_classic_2026.csv",
+        root=snapshots,
+        source="fanduel",
+        observed_at=OBSERVED + timedelta(hours=2),
+    )
+
+    assert newest_salary_capture(snapshots, 2026, 1, site="dk") == draftkings
+    assert newest_salary_capture(snapshots, 2026, 1, site="fd") == fanduel
+
+
+def test_newest_salary_capture_names_the_site_and_the_sources_it_found(
+    tmp_path: Path,
+) -> None:
+    snapshots = tmp_path / "snapshots"
+    _capture(tmp_path, "dk_salaries_status.csv", root=snapshots)
+
+    with pytest.raises(SlateIngestError) as error:
+        newest_salary_capture(snapshots, 2026, 1, site="fd")
+
+    assert "fanduel" in str(error.value)
+    assert "draftkings" in str(error.value)
+
+
+def test_load_salary_capture_skips_the_other_sites_file_by_name(tmp_path: Path) -> None:
+    staged_directory = tmp_path / "staged"
+    staged_directory.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for golden in ("dk_salaries_status.csv", "fd_salaries_classic_2026.csv"):
+        path = staged_directory / golden
+        path.write_bytes((GOLDEN_PATH / golden).read_bytes())
+        staged.append(path)
+    capture = capture_files(
+        tmp_path / "snapshots",
+        2026,
+        1,
+        CaptureKind.SALARIES,
+        "draftkings",
+        staged,
+        observed_at=OBSERVED,
+    )
+
+    with connect_database(_store(tmp_path)) as connection:
+        apply_migrations(connection)
+        report = load_salary_capture(connection, capture, season=2026, week=1, site="dk")
+
+    assert report.files_seen == 2
+    assert report.files_skipped == ("salaries/fd_salaries_classic_2026.csv",)
+    assert len(report.slates) == 1
+    assert report.slates[0].site == "draftkings"
+
+
+def test_the_draftkings_status_column_reaches_the_salary_row(tmp_path: Path) -> None:
+    capture = _capture(tmp_path, "dk_salaries_status.csv")
+
+    with connect_database(_store(tmp_path)) as connection:
+        apply_migrations(connection)
+        _seed_players(connection, GOLDEN_2026_ROSTER)
+        load_salary_capture(connection, capture, season=2026, week=1, site="dk")
+        statuses = dict(
+            connection.execute(
+                "SELECT site_player_id, player_status FROM salaries ORDER BY site_player_id"
+            ).fetchall()
+        )
+
+    assert statuses["5001"] is None
+    assert statuses["5002"] == "Q"
+    assert statuses["5003"] == "OUT"
+    assert statuses["5006"] == "IR"

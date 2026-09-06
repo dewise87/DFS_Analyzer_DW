@@ -34,6 +34,7 @@ from narrative_alpha.ops import (
 )
 from narrative_alpha.ops.cli import main as ops_main
 from narrative_alpha.quant import QuantileInterpretation, fit_player_distribution_with_diagnostics
+from narrative_alpha.readiness import collect_slate_readiness, render_readiness
 from narrative_alpha.replay import read_frozen_decision
 from narrative_alpha.simulation import (
     EXPERIMENTAL_NOTICE,
@@ -75,6 +76,7 @@ ROSTER: tuple[tuple[str, str, str], ...] = tuple(
     + [(f"End {index + 1}", GAMES[index % 4][index % 2], "TE") for index in range(4)]
 )
 SALARIES = {"QB": 7000, "RB": 5600, "WR": 5200, "TE": 3800, "DST": 2800}
+SITE = "draftkings"
 
 
 class FixtureVendor:
@@ -85,6 +87,7 @@ class FixtureVendor:
     def parse_projections(self, path: Path) -> ProjectionParseResult:
         rows = _rows(path)
         return ProjectionParseResult(
+            site=SITE,
             rows_seen=len(rows),
             rows=tuple(
                 ParsedProjection(
@@ -105,6 +108,7 @@ class FixtureVendor:
     def parse_ownership(self, path: Path) -> OwnershipParseResult:
         rows = _rows(path)
         return OwnershipParseResult(
+            site=SITE,
             rows_seen=len(rows),
             rows=tuple(
                 ParsedOwnership(
@@ -1466,3 +1470,122 @@ def test_no_salary_capture_is_a_recorded_refusal_not_a_crash(tmp_path: Path) -> 
     assert "na-snapshot capture --kind salaries" in str(salaries.error_text)
     assert salaries.summary["decision_at"] == utc_timestamp(DECISION_AT)
     assert not report.ok
+
+
+# --------------------------------------------------------------------------------------
+# The real Stokastic adapter, on a store seeded from the golden salary export
+# --------------------------------------------------------------------------------------
+
+
+GOLDEN_PATH = Path(__file__).with_name("golden")
+STOKASTIC_ROSTER: tuple[tuple[str, str, str], ...] = (
+    ("Avery Archer", "GB", "QB"),
+    ("Blake Bishop", "CHI", "QB"),
+    ("Casey Crane", "GB", "RB"),
+    ("Dana Drury", "CHI", "RB"),
+    ("Emery Ellis", "GB", "WR"),
+    ("Frankie Fox", "CHI", "WR"),
+    ("Gale Grimm", "GB", "TE"),
+    ("Harper Hale", "JAX", "WR"),
+    ("Indigo Iles", "JAX", "QB"),
+    ("Jules Jansen", "CLE", "RB"),
+)
+
+
+def _seed_stokastic_roster(connection: sqlite3.Connection) -> None:
+    stamp = utc_timestamp(CAPTURED_AT - timedelta(days=7))
+    for index, (name, team, position) in enumerate(STOKASTIC_ROSTER):
+        cursor = connection.execute(
+            """
+            INSERT INTO players(
+                player_key, canonical_name, position, birth_date, source, published_at,
+                observed_at, ingested_at, effective_at, valid_from, valid_to,
+                source_version, run_id
+            ) VALUES (?, ?, ?, NULL, 'fixture', NULL, ?, ?, NULL, ?, NULL,
+                      'fixture-v1', NULL)
+            """,
+            (f"stokastic-player-{index}", name, position, stamp, stamp, stamp),
+        )
+        assert cursor.lastrowid is not None
+        connection.execute(
+            """
+            INSERT INTO player_team_history(
+                player_id, team, position, roster_status, season, week, source,
+                published_at, observed_at, ingested_at, effective_at, valid_from,
+                valid_to, source_version, run_id
+            ) VALUES (?, ?, ?, 'ACT', ?, ?, 'fixture', NULL, ?, ?, NULL, ?, NULL,
+                      'fixture-v1', NULL)
+            """,
+            (int(cursor.lastrowid), team, position, SEASON, WEEK, stamp, stamp, stamp),
+        )
+
+
+def test_the_registered_stokastic_adapter_carries_the_lane_to_projection_coverage(
+    tmp_path: Path,
+) -> None:
+    """The production default — no injected fixture vendor — on the real export shape."""
+
+    config = load_ops_config(_write_config(tmp_path))
+    _capture(
+        config.snapshot_root,
+        tmp_path,
+        kind=CaptureKind.SALARIES,
+        source="draftkings",
+        filename="DKSalaries.csv",
+        text=(GOLDEN_PATH / "dk_salaries_status.csv").read_text(encoding="utf-8-sig"),
+    )
+    # One capture, both sites' files, exactly as the vendor ships them.
+    for kind in (CaptureKind.PROJECTIONS, CaptureKind.OWNERSHIP):
+        for site in ("dk", "fd"):
+            _capture(
+                config.snapshot_root,
+                tmp_path,
+                kind=kind,
+                source="stokastic",
+                filename=f"{site.upper()}_NFL_Main_Data_Hub_Projections.csv",
+                text=(GOLDEN_PATH / f"stokastic_projections_{site}.csv").read_text(
+                    encoding="utf-8"
+                ),
+                observed_at=CAPTURED_AT + timedelta(minutes=1),
+            )
+    with connect_database(config.database) as connection:
+        apply_migrations(connection)
+        _seed_stokastic_roster(connection)
+
+    report = _run(
+        config,
+        tmp_path=tmp_path,
+        dependencies=SlateDependencies(),
+        accepted_readiness_failures=("projection_age", "odds_coverage", "weather_coverage"),
+    )
+
+    projections = report.step("slate_projections")
+    assert projections is not None, [step.step for step in report.steps]
+    assert projections.status == "succeeded", projections.error_text
+    summary = projections.summary
+    # The S1 message belongs to genuinely unregistered vendors only.
+    assert summary["missing_adapter_vendors"] == []
+    assert summary["projection_rows_inserted"] == 12
+    assert summary["ownership_rows_inserted"] == 12
+    assert summary["zero_projection_rows"] == 2
+    assert summary["salary_mismatches"] == 0
+    skipped = summary["skipped_files"]
+    assert isinstance(skipped, list) and len(skipped) == 2
+    assert all("FD_NFL_Main_Data_Hub_Projections.csv" in entry for entry in skipped)
+    assert all("attributed it to fanduel" in entry for entry in skipped)
+
+    # The two coverage checks now read from the rows this adapter just wrote. (A dozen
+    # golden players cannot fill nine roster slots, so the lane stops at the optimizer;
+    # everything this slice owns has already run.)
+    assert report.slate_id is not None
+    with connect_database(config.database) as connection:
+        readiness = collect_slate_readiness(
+            connection, slate_id=report.slate_id, as_of=DECISION_AT
+        )
+    rendered = render_readiness(readiness)
+    assert "PASS      projection_coverage" in rendered
+    assert "PASS      ownership_coverage" in rendered
+    assert "stokastic" in rendered
+    # The vendor's zero-projection rows are real coverage, and the salary feed's OUT and
+    # IR rows leave the pool before coverage is measured.
+    assert readiness.inactive_salary_players == 3

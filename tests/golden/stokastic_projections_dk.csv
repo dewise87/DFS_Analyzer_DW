@@ -1,0 +1,13 @@
+Player,Salary,Position,Team,Opponent,Projection,Value,Ownership %,Optimal %,Leverage,Std Dev,Boom,Bust,Ceiling,Floor
+Avery Archer,7200,QB,GB,CHI,20.14,2.80,9.4,7.5,-1.88,8.06,5.6,13.2,27.8,14.9
+Blake Bishop,6100,QB,CHI,GB,16.02,2.63,6.1,4.9,-1.22,6.41,3.7,8.5,22.6,11.2
+Casey Crane,4000,RB,GB,CHI,0.00,,0.4,0.3,-0.08,,,,,
+Dana Drury,6600,RB,CHI,GB,14.71,2.23,18.7,15.0,-3.74,5.88,11.2,26.2,21.9,8.3
+Emery Ellis,7000,WR,GB,CHI,15.28,2.18,21.2,17.0,-4.24,6.11,12.7,29.7,23.4,9.1
+Frankie Fox,5400,WR,CHI,GB,11.06,2.05,7.8,6.2,-1.56,4.42,4.7,10.9,17.3,6.2
+Gale Grimm,3800,TE,GB,CHI,8.42,2.22,4.3,3.4,-0.86,3.37,2.6,6.0,13.1,4.4
+Harper Hale,6300,WR,JAX,CLE,13.55,2.15,12.6,10.1,-2.52,5.42,7.6,17.6,20.1,7.9
+Indigo Iles,5900,QB,JAX,CLE,15.37,2.61,5.5,4.4,-1.10,6.15,3.3,7.7,21.2,10.6
+Jules Jansen,3000,RB,CLE,JAX,0.00,,0.2,0.2,-0.04,,,,,
+Packers,3100,DST,GB,CHI,7.61,2.45,8.1,6.5,-1.62,3.04,4.9,11.3,14.6,2.1
+Jaguars,2900,DST,JAX,CLE,8.94,3.08,5.7,4.6,-1.14,3.58,3.4,8.0,15.3,3.2

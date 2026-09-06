@@ -14,16 +14,23 @@ from pydantic import ValidationError
 from narrative_alpha.identity import CrosswalkError
 from narrative_alpha.ingest.game_inputs import newest_game_input_capture, render_game_input_load
 from narrative_alpha.ingest.odds import load_odds_capture
+from narrative_alpha.ingest.projections import (
+    load_projection_capture,
+    render_projection_load,
+    vendor_captures,
+)
 from narrative_alpha.ingest.slates import (
     SlateIngestError,
     SlateLoadReport,
     list_slates,
     load_salary_capture,
     newest_salary_capture,
+    normalize_site,
     render_slates,
 )
 from narrative_alpha.ingest.stokastic_stats import (
     DEFAULT_DERIVED_SCORING_PATH,
+    default_stokastic_registry,
     load_stokastic_stats_capture,
     newest_stats_capture,
     read_derived_projection_means,
@@ -125,6 +132,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    load_projections = subparsers.add_parser(
+        "load-projections",
+        help="load a week's vendor projections/ownership capture into a slate",
+    )
+    _add_common_arguments(load_projections)
+    load_projections.add_argument("--site", choices=("dk", "fd"), required=True)
+    load_projections.add_argument(
+        "--slate-id",
+        type=int,
+        required=True,
+        help="the ingested slate these projections price (see `na-slate list`)",
+    )
+    load_projections.add_argument(
+        "--capture",
+        type=Path,
+        help="capture directory (default: every projections/ownership capture of the week)",
+    )
+    load_projections.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_SNAPSHOT_ROOT,
+        help=f"snapshot root directory (default: {DEFAULT_SNAPSHOT_ROOT})",
+    )
+
     stats = subparsers.add_parser(
         "stats", help="print bonus-free points derived from loaded component projections"
     )
@@ -167,6 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _ingest(connection, arguments)
             if arguments.command == "load-stats":
                 return _load_stats(connection, arguments)
+            if arguments.command == "load-projections":
+                return _load_projections(connection, arguments)
             if arguments.command == "list":  # pragma: no branch - argparse constrains this
                 print(
                     render_slates(
@@ -234,7 +267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _ingest(connection: sqlite3.Connection, arguments: argparse.Namespace) -> int:
     capture_path = arguments.capture or newest_salary_capture(
-        arguments.root, arguments.season, arguments.week
+        arguments.root, arguments.season, arguments.week, site=arguments.site
     )
     report = load_salary_capture(
         connection,
@@ -265,6 +298,41 @@ def _load_stats(connection: sqlite3.Connection, arguments: argparse.Namespace) -
     if report.held:
         return 2
     return 1 if report.unresolved else 0
+
+
+def _load_projections(connection: sqlite3.Connection, arguments: argparse.Namespace) -> int:
+    site = normalize_site(arguments.site).value
+    captures = (
+        [arguments.capture]
+        if arguments.capture is not None
+        else [
+            capture_path
+            for capture_path, _ in vendor_captures(
+                arguments.root, arguments.season, arguments.week
+            )
+        ]
+    )
+    if not captures:
+        raise SlateIngestError(
+            f"no capture for {arguments.season} week {arguments.week:02d} manifests a "
+            "projections or ownership file; capture the purchased downloads with "
+            "`na-snapshot capture --kind projections --source <vendor>` first"
+        )
+    exit_code = 0
+    for capture_path in captures:
+        report = load_projection_capture(
+            connection,
+            capture_path,
+            site=site,
+            slate_id=arguments.slate_id,
+            registry=default_stokastic_registry(),
+        )
+        connection.commit()
+        print(f"{capture_path}")
+        print(render_projection_load(report), end="")
+        if not report.ok:
+            exit_code = 1
+    return exit_code
 
 
 def render_ingest(report: SlateLoadReport) -> str:

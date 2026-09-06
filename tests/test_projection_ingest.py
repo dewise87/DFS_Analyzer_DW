@@ -31,6 +31,7 @@ from narrative_alpha.store import (
 )
 
 OBSERVED = datetime(2026, 9, 12, 15, 0, tzinfo=UTC)
+SITE = "draftkings"
 
 
 class FixtureSourceFormat:
@@ -40,6 +41,7 @@ class FixtureSourceFormat:
         with path.open(newline="", encoding="utf-8") as source:
             rows = list(csv.DictReader(source))
         return ProjectionParseResult(
+            site=SITE,
             rows_seen=len(rows),
             rows=tuple(
                 ParsedProjection(
@@ -61,6 +63,7 @@ class FixtureSourceFormat:
         with path.open(newline="", encoding="utf-8") as source:
             rows = list(csv.DictReader(source))
         return OwnershipParseResult(
+            site=SITE,
             rows_seen=len(rows),
             rows=tuple(
                 ParsedOwnership(

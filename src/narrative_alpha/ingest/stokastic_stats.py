@@ -27,6 +27,10 @@ from narrative_alpha.ingest.projections import (
     SourcePlayerFields,
 )
 from narrative_alpha.ingest.slates import normalize_site
+from narrative_alpha.ingest.stokastic_projections import (
+    parse_stokastic_ownership,
+    parse_stokastic_projections,
+)
 from narrative_alpha.ingest.timestamps import ensure_utc, optional_utc_timestamp, utc_timestamp
 from narrative_alpha.snapshots import MANIFEST_FILENAME, CaptureKind, load_manifest, sha256_file
 from narrative_alpha.snapshots.core import snapshot_week_path
@@ -129,8 +133,13 @@ class StokasticStatsParseResult(BaseModel):
     placeholder_note: str | None = None
 
 
-class StokasticStatsSourceFormat:
-    """A SourceFormatRegistry adapter whose exact header selects one stats schema."""
+class StokasticSourceFormat:
+    """The one registered ``stokastic`` adapter, serving all three real export shapes.
+
+    The three component Stats exports and the two Data Hub Projections exports have
+    disjoint headers, so each entry point matches its own signature exactly and refuses
+    the other file by name rather than falling back to a looser parse.
+    """
 
     name = STOKASTIC_SOURCE
 
@@ -138,14 +147,22 @@ class StokasticStatsSourceFormat:
         return parse_stokastic_stats(path)
 
     def parse_projections(self, path: Path) -> ProjectionParseResult:
-        raise SourceFormatError(
-            f"{path} is a Stokastic stats component export, not a projections export"
-        )
+        return parse_stokastic_projections(path)
 
     def parse_ownership(self, path: Path) -> OwnershipParseResult:
-        raise SourceFormatError(
-            f"{path} is a Stokastic stats component export, not an ownership export"
-        )
+        return parse_stokastic_ownership(path)
+
+
+StokasticStatsSourceFormat = StokasticSourceFormat
+"""Slice 46 name, kept so existing imports of the stats-only adapter still resolve."""
+
+
+def default_stokastic_registry() -> SourceFormatRegistry:
+    """The production registry: one Stokastic adapter for stats, projections, ownership."""
+
+    registry = SourceFormatRegistry()
+    registry.register(StokasticSourceFormat())
+    return registry
 
 
 @runtime_checkable
@@ -276,11 +293,9 @@ class _Fact:
 
 
 def default_stokastic_stats_registry() -> SourceFormatRegistry:
-    """Build the explicit production registry for the component-stats source."""
+    """Slice 46 name for :func:`default_stokastic_registry`; the adapter is the same one."""
 
-    registry = SourceFormatRegistry()
-    registry.register(StokasticStatsSourceFormat())
-    return registry
+    return default_stokastic_registry()
 
 
 def load_derived_scoring_config(
@@ -316,11 +331,13 @@ def parse_stokastic_stats(path: Path) -> StokasticStatsParseResult:
         raise SourceFormatError(f"cannot read Stokastic stats CSV {path}: {error}") from error
     reader = csv.DictReader(io.StringIO(text, newline=""))
     headers = tuple(reader.fieldnames or ())
-    file_kind = _detect_header(headers)
+    file_kind = _detect_header(headers, path)
     rows: list[ParsedStokasticStatLine] = []
     for row_number, row in enumerate(reader, start=2):
         if None in row:
-            raise SourceFormatError(f"row {row_number}: more cells than header columns")
+            raise SourceFormatError(
+                f"{path} row {row_number}: more cells than header columns"
+            )
         rows.append(_parse_row(file_kind, row, row_number))
     receiving = file_kind is StatsFileKind.RECEIVING
     return StokasticStatsParseResult(
@@ -733,7 +750,7 @@ def render_derived_projection_means(
     return "\n".join(lines)
 
 
-def _detect_header(headers: tuple[str, ...]) -> StatsFileKind:
+def _detect_header(headers: tuple[str, ...], path: Path) -> StatsFileKind:
     for file_kind, expected in _HEADERS.items():
         if headers == expected:
             return file_kind
@@ -750,8 +767,9 @@ def _detect_header(headers: tuple[str, ...]) -> StatsFileKind:
     if not missing and not unexpected:
         order_note = f"; expected column order: {', '.join(closest)}"
     raise SourceFormatError(
-        f"unknown or drifted Stokastic stats header (closest: {closest_kind.value}); "
-        f"missing columns: {missing_text}; unexpected columns: {unexpected_text}{order_note}"
+        f"{path} is not a Stokastic stats component export "
+        f"(closest: {closest_kind.value}); missing columns: {missing_text}; "
+        f"unexpected columns: {unexpected_text}{order_note}"
     )
 
 

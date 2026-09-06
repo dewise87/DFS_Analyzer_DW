@@ -13,7 +13,7 @@ called directly and injectable so tests need no network and no optimizer.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,11 +41,14 @@ from narrative_alpha.ingest.game_inputs import (
 )
 from narrative_alpha.ingest.odds import load_odds_capture
 from narrative_alpha.ingest.projections import (
+    MAX_LISTED_SALARY_MISMATCHES,
+    VENDOR_KINDS,
     ProjectionIngestError,
     ProjectionLoadReport,
     SourceFormat,
     SourceFormatRegistry,
     load_projection_capture,
+    vendor_captures,
 )
 from narrative_alpha.ingest.slates import (
     SlateIngestError,
@@ -58,6 +61,7 @@ from narrative_alpha.ingest.slates import (
 )
 from narrative_alpha.ingest.stokastic_stats import (
     MissingStatsCapture,
+    StokasticSourceFormat,
     StokasticStatsLoadReport,
     load_stokastic_stats_capture,
     newest_stats_capture,
@@ -106,12 +110,7 @@ from narrative_alpha.simulation import (
 )
 from narrative_alpha.snapshots import MANIFEST_FILENAME, CaptureKind, load_manifest
 from narrative_alpha.snapshots.core import snapshot_week_path
-from narrative_alpha.snapshots.models import SnapshotManifest
 from narrative_alpha.store import MigrationError, StoreConfigurationError
-
-# The two capture kinds the slate lane loads into a slate; salaries are loaded by their
-# own step, as are odds and weather.
-VENDOR_KINDS = frozenset({CaptureKind.PROJECTIONS, CaptureKind.OWNERSHIP})
 
 # How many by-hand commands a refusal prints before it says "+N more".
 MAX_LISTED_ACTIONS = 10
@@ -131,9 +130,10 @@ class SlateDependencies:
     """The library calls the lane makes, injectable so tests need no network.
 
     Defaults are the production functions; nothing here re-implements them.
-    ``source_formats`` is the set of registered vendor adapters — empty today, because no
-    vendor adapter has landed yet. A capture from an unregistered vendor is a recorded
-    failure naming the vendor, never a guessed schema.
+    ``source_formats`` is the set of registered vendor adapters. It holds the one
+    Stokastic adapter, which serves stats, projections, and ownership from the exports
+    that vendor really ships. A capture from any other vendor is a recorded failure
+    naming the vendor, never a guessed schema.
     """
 
     newest_salary_capture: NewestCapture = newest_salary_capture
@@ -148,7 +148,7 @@ class SlateDependencies:
     build_decision: DecisionStep = build_decision
     build_slate_memo: MemoStep = build_slate_memo
     run_simulation: SimulationStep = run_simulation
-    source_formats: tuple[SourceFormat, ...] = ()
+    source_formats: tuple[SourceFormat, ...] = (StokasticSourceFormat(),)
 
 
 DEFAULT_SLATE_DEPENDENCIES = SlateDependencies()
@@ -551,7 +551,9 @@ def _ingest_salaries(
     # No ``run_id``: it is a foreign key into ``model_runs`` and the lane opens no model
     # run of its own. One invocation is traced through its ``ops_runs`` rows, and each
     # ingested row through its own ``source_file_sha256`` — the same as `na-slate ingest`.
-    capture_path = capture or dependencies.newest_salary_capture(config.snapshot_root, season, week)
+    capture_path = capture or dependencies.newest_salary_capture(
+        config.snapshot_root, season, week, site=site
+    )
     report = dependencies.load_salary_capture(
         connection,
         capture_path,
@@ -682,12 +684,13 @@ def _ingest_vendor_captures(
 ) -> tuple[OpsStepStatus, dict[str, object], str | None]:
     """Load every projection/ownership capture of the week that has a registered adapter.
 
-
     Loading is keyed on (source, site, slate, player, observed_at), so a capture already
     loaded inserts nothing and is reported as duplicates rather than skipped by guesswork.
+    A vendor that ships one file per site puts both in one capture; the adapter attributes
+    each file and the loader lists the other site's file as skipped, by name.
     """
 
-    captures = tuple(_vendor_captures(config.snapshot_root, season, week))
+    captures = tuple(vendor_captures(config.snapshot_root, season, week))
     summary: dict[str, object] = {"slate_id": slate_id, "captures_seen": len(captures)}
     if not captures:
         return (
@@ -700,12 +703,17 @@ def _ingest_vendor_captures(
 
     loaded: list[str] = []
     skipped: list[str] = []
+    skipped_files: list[str] = []
     missing_adapters: set[str] = set()
     projection_rows = 0
     ownership_rows = 0
     duplicate_rows = 0
     unresolved_rows = 0
     rejected_rows = 0
+    zero_projection_rows = 0
+    range_dropped: list[str] = []
+    salary_mismatches = 0
+    salary_mismatch_names: list[str] = []
     errors: list[str] = []
 
     for capture_path, manifest in captures:
@@ -734,18 +742,31 @@ def _ingest_vendor_captures(
         duplicate_rows += report.duplicate_rows
         unresolved_rows += report.unresolved_rows
         rejected_rows += report.rejected_rows
+        zero_projection_rows += report.zero_projection_rows
+        range_dropped.extend(report.range_dropped)
+        salary_mismatches += report.salary_mismatches
+        salary_mismatch_names.extend(report.salary_mismatch_names)
+        skipped_files.extend(
+            f"{capture_path.name}/{skipped_file.path} ({skipped_file.reason})"
+            for skipped_file in report.skipped_files
+        )
         errors.extend(f"{capture_path.name}: {error}" for error in report.errors)
 
     summary |= {
         "captures_loaded": len(loaded),
         "captures_skipped": len(skipped),
         "skipped_captures": skipped,
+        "skipped_files": skipped_files,
         "missing_adapter_vendors": sorted(missing_adapters),
         "projection_rows_inserted": projection_rows,
         "ownership_rows_inserted": ownership_rows,
         "duplicate_rows": duplicate_rows,
         "unresolved_rows": unresolved_rows,
         "rejected_rows": rejected_rows,
+        "zero_projection_rows": zero_projection_rows,
+        "range_dropped": range_dropped,
+        "salary_mismatches": salary_mismatches,
+        "salary_mismatch_names": salary_mismatch_names[:MAX_LISTED_SALARY_MISMATCHES],
     }
 
     reasons: list[str] = []
@@ -777,29 +798,6 @@ def _registered(registry: SourceFormatRegistry, vendor: str) -> bool:
     except ProjectionIngestError:
         return False
     return True
-
-
-def _vendor_captures(
-    snapshot_root: Path,
-    season: int,
-    week: int,
-) -> Iterator[tuple[Path, SnapshotManifest]]:
-    """Yield the week's captures that manifest a projections or ownership file, oldest first.
-
-    Oldest first so a Sunday re-download lands after Saturday's, leaving the newest
-    observation newest in the store as well.
-    """
-
-    week_path = snapshot_week_path(snapshot_root, season, week)
-    if not week_path.is_dir():
-        return
-    for capture_path in sorted(path for path in week_path.iterdir() if path.is_dir()):
-        manifest_path = capture_path / MANIFEST_FILENAME
-        if not manifest_path.is_file():
-            continue
-        manifest = load_manifest(manifest_path)
-        if any(record.kind in VENDOR_KINDS for record in manifest.files):
-            yield capture_path, manifest
 
 
 def _build_episodes(

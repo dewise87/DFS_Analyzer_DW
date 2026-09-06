@@ -512,12 +512,22 @@ for `na-slate` directly when you want to ingest or inspect without running the w
 ```bash
 uv run na-slate ingest --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk
 uv run na-slate list --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1
+uv run na-slate load-projections --database data/db/narrative_alpha.sqlite3 --season 2026 --week 1 --site dk --slate-id 1
 ```
 
-`ingest` defaults to the newest `salaries` capture for the week under `data/snapshots/`
-(`--capture` picks a specific one). It verifies each file's hash against the manifest,
+`ingest` defaults to the newest `salaries` capture for the week whose manifest `source`
+matches `--site` (`--capture` picks a specific one), so a FanDuel download captured after a
+DraftKings one cannot be handed to `--site dk`. It verifies each file's hash against the manifest,
 parses it with the strict DK/FD parser, and writes one `slates` row per distinct slate plus
 one `salaries` row per player. `observed_at` is the capture's time, never now.
+
+`load-projections` loads the week's `projections` and `ownership` captures into one slate
+through the registered vendor adapter. A vendor that exports one file per site — Stokastic
+does — puts both in one capture; the adapter attributes each file and the loader lists the
+other site's file as skipped, by name. The report counts the vendor's zero-projection rows,
+names any row whose vendor floor/ceiling contradicted its mean (the mean is kept, the bounds
+dropped), and names any player whose vendor salary differs from the slate's — salaries move
+before lock, so that is reported, never refused.
 
 Salary exports carry no slate id, so one is derived from site, season, week, slate type, and
 the slate's earliest kickoff — `draftkings:2026:w01:classic:20260913T170000Z`. Sunday's

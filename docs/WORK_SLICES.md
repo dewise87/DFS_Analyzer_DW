@@ -564,6 +564,33 @@ attribution) is made above.
 > readiness output, the unresolved names, and anything in the real files that contradicted
 > the facts block.
 
+**Review (2026-09-06, project lead) — accepted, merged to main.** 959 tests, ruff and mypy
+green. Real-file result: DK slate 1 = 673 salaries (192 with a `Status`), 674 projection and
+674 ownership rows, 417 zero-mean rows, 0 salary mismatches, the FD file skipped by name;
+FD slate 2 = 667 salaries, 664/664 rows, `Dolphins` bounds dropped. Reload on a store copy
+inserted nothing (674 duplicates). Readiness on slate 1: `projection_coverage` 534/535 and
+`ownership_coverage` 534/535 PASS, `projection_age` PASS; only odds/weather fail, which is
+the Saturday capture. Lead fixes before merge: restored the `_ingest_vendor_captures` name
+(the executor had dropped the underscore), the load render now says
+`N manifested, M skipped, R row(s) read` instead of counting a skipped file as read, and
+the four touched files were `ruff format`ted.
+
+Open items recorded, not blocking:
+- **Identity queue is the operator cost now.** The vendor file carries ~70 names per site
+  that the crosswalk cannot place (practice-squad and free-agent rows such as
+  `Kyron Drones`, plus spellings like `Joshua Palmer` / `Hollywood Brown`): 71 DK + 69 FD
+  pending from Stokastic, 71 + 63 from the salary exports. Coverage still passes because
+  those rows are mostly not salaried; Daniel resolves only what readiness or the memo names.
+  A follow-up could suppress queue entries for vendor rows whose `vendor_salary` matches no
+  slate salary, so the queue holds only players who are actually on the slate.
+- **FanDuel slate has no game rows** (all 667 salaries carry `game_id` NULL — the FD export
+  has no kickoff time), so slate 2's readiness passes `odds_coverage` and
+  `weather_coverage` vacuously ("no game on this slate needs odds"). Pre-existing (Slices
+  47/48), harmless for Week 1 because DK is the play site, but a silent pass: readiness
+  should FAIL when a slate has salaried players and no game rows. Small slice.
+- The lane's ownership-kind pass reports `zero means 0` because the ownership parse does not
+  carry the count; cosmetic.
+
 ### Slice 10 — Player outcome distributions
 
 **Goal:** turn each player's point estimate into the §6.2 mixture — `P(active)`,
@@ -3862,7 +3889,7 @@ operator items for Thursday's preflight, which the doctor names with remedies.
   season of grades, the A grade for `na-fast item` comes from the ledger's per-claim-type
   precision, not the catalog's family default.
 - **Late swap MVP** (§6.7, Phase 3): after Week 1 shows what in-slate captures look like.
-- **Slice 52 — Stage 1 model comparison harness** (after the v2 evaluation exists):
+- **Slice 52 — Stage 1 model comparison harness** (after the v2 evaluation exists; Slice 9 landed 2026-09-06):
   `na-extract sample --items-from <earlier sample csv>` so the same 50 items are drawn
   under a new (prompt, model) pair; `na-extract run` accepting `--model` and
   `--source-item-ids`; `na-extract compare` printing two `model_evals` rows side by side.
