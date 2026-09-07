@@ -588,6 +588,7 @@ Open items recorded, not blocking:
   `weather_coverage` vacuously ("no game on this slate needs odds"). Pre-existing (Slices
   47/48), harmless for Week 1 because DK is the play site, but a silent pass: readiness
   should FAIL when a slate has salaried players and no game rows. Small slice.
+- **Pre-season stats refresh fails opaquely.** `na-crosswalk nflverse-stats-refresh --season 2026` prints `failed to fetch nflverse weekly player stats after 3 attempts: HTTPStatusError` because the 2026 asset is a 404 until Week 1 is played; doctor then shows `nflverse stats pin FAIL` all week. The fetch should name the URL and status and say the season's file is not yet published, and doctor should report that state as an expected pre-season condition rather than a FAIL. Cheap slice.
 - The lane's ownership-kind pass reports `zero means 0` because the ownership parse does not
   carry the count; cosmetic.
 
