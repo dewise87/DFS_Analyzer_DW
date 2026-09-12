@@ -292,6 +292,11 @@ def test_schedule_contains_a_nightly_backup_wrapper(tmp_path: Path) -> None:
     assert backup.weekday_numbers == tuple(range(7))
     assert backup.local_time == fixture.config.backup_local_time
     assert "--config" in backup.script and " backup " in backup.script
+    # `--config` is a top-level `na-ops` option, not a `backup` subcommand option: it
+    # must appear before " backup " on the invocation line or the scheduled run exits 2
+    # with "unrecognized arguments: --config ...". Match the invocation line itself
+    # (" backup \") rather than the bare word, which also appears in a comment above it.
+    assert backup.script.index("--config") < backup.script.index(" backup \\")
     assert "security" not in backup.script
 
 

@@ -32,9 +32,7 @@ from narrative_alpha.ops.config import WEEKDAY_NUMBERS, OpsConfig
 LABEL_PREFIX = "com.narrative-alpha"
 WRAPPER_MARKER = "# na-ops-managed:"
 EASTERN = ZoneInfo("America/New_York")
-KEYCHAIN_ACCOUNT_HINT = (
-    'security add-generic-password -s {service} -a "$USER" -w'
-)
+KEYCHAIN_ACCOUNT_HINT = 'security add-generic-password -s {service} -a "$USER" -w'
 # §9.0 fixes the manual capture times in Eastern. DST offsets differ between zones only in
 # their transition weeks, so the conversion is anchored to a mid-season date rather than
 # to whenever `schedule install` happens to run.
@@ -95,8 +93,7 @@ REMINDERS: tuple[ReminderSpec, ...] = (
         eastern_time=time(9, 0),
         title="Sunday 9:00 a.m. ET capture",
         notification=(
-            "Re-capture projections and ownership, refresh odds and weather, rerun "
-            "na-ops slate."
+            "Re-capture projections and ownership, refresh odds and weather, rerun na-ops slate."
         ),
         instructions=(
             "Re-download projections and ownership (they have moved overnight), then:",
@@ -117,8 +114,7 @@ REMINDERS: tuple[ReminderSpec, ...] = (
         eastern_time=time(11, 0),
         title="Sunday 11:00 a.m. ET final pre-lock capture",
         notification=(
-            "Final pre-lock capture, then na-ops slate. This is the one that cannot be "
-            "redone."
+            "Final pre-lock capture, then na-ops slate. This is the one that cannot be redone."
         ),
         instructions=(
             "This capture is irreplaceable: after lock the pre-lock state is gone.",
@@ -393,7 +389,7 @@ printf '%s starting %s\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(label
 # `set -e` must not swallow the finish line: a failed lane is exactly the run whose log
 # the operator reads, so the exit code is captured rather than allowed to abort the shell.
 status=0
-{shlex.quote(str(na_ops))} batch --config {shlex.quote(str(config.path))} \\
+{shlex.quote(str(na_ops))} --config {shlex.quote(str(config.path))} batch \\
     >>"$LOG" 2>&1 || status=$?
 printf '%s finished %s exit=%s\\n' \\
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" {shlex.quote(label)} "$status" >>"$LOG"

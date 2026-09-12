@@ -25,7 +25,7 @@ printf '%s starting %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" com.narrative-alpha
 # `set -e` must not swallow the finish line: a failed lane is exactly the run whose log
 # the operator reads, so the exit code is captured rather than allowed to abort the shell.
 status=0
-/opt/narrative-alpha/.venv/bin/na-ops batch --config config/ops.toml \
+/opt/narrative-alpha/.venv/bin/na-ops --config config/ops.toml batch \
     >>"$LOG" 2>&1 || status=$?
 printf '%s finished %s exit=%s\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" com.narrative-alpha.batch "$status" >>"$LOG"

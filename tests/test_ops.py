@@ -1150,6 +1150,11 @@ def test_no_agent_carries_key_material(
     # It is fetched, never embedded.
     assert "security find-generic-password" in batch.script
     assert batch.script.count("ANTHROPIC_API_KEY") == 2
+    # `--config` is a top-level `na-ops` option, not a `batch` subcommand option: it must
+    # appear before " batch " on the invocation line or the scheduled run exits 2 with
+    # "unrecognized arguments: --config ...".
+    assert "--config" in batch.script and " batch " in batch.script
+    assert batch.script.index("--config") < batch.script.index(" batch ")
 
 
 def test_reminder_jobs_do_no_data_work_and_carry_the_manual_commands(
