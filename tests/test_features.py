@@ -10,6 +10,7 @@ import pytest
 
 from narrative_alpha.features_cli import main as features_main
 from narrative_alpha.narrative import (
+    FeatureInputError,
     FeatureSnapshotConflictError,
     FeatureVersionMismatchError,
     PreparedExtraction,
@@ -24,7 +25,8 @@ from narrative_alpha.narrative import (
     normalize_item_text,
     run_extraction_batch,
 )
-from narrative_alpha.store import apply_migrations, connect_database
+from narrative_alpha.narrative.extraction import PROMPT_VERSION_ID, default_prompt_version
+from narrative_alpha.store import PromptVersionRow, apply_migrations, connect_database
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "episode_claims.json"
 PRICING_PATH = Path("config/model_pricing.toml")
@@ -133,12 +135,7 @@ def test_derivative_changes_episode_reach_but_not_event_count(tmp_path: Path) ->
     assert heats[0].n_events == 1
     expected_quality = 0.15 + 0.85 * ((0.75 + 0.85 + 1.0) / 3.0)
     expected_specificity = 0.15 + 0.85 * 0.8
-    expected_heat = (
-        expected_quality
-        * expected_specificity
-        * math.log(3)
-        * 2 ** (-2 / 24)
-    )
+    expected_heat = expected_quality * expected_specificity * math.log(3) * 2 ** (-2 / 24)
     assert heats[0].heat == pytest.approx(expected_heat)
 
 
@@ -152,9 +149,7 @@ def test_point_in_time_excludes_future_claim_and_baseline(tmp_path: Path) -> Non
             ownership=0.42,
             observed_at=as_of + timedelta(hours=1),
         )
-        report = build_episodes(
-            connection, as_of=as_of, built_at=as_of + timedelta(minutes=5)
-        )
+        report = build_episodes(connection, as_of=as_of, built_at=as_of + timedelta(minutes=5))
         build_features(
             connection,
             slate_id=1,
@@ -342,19 +337,22 @@ def test_features_cli_builds_exact_snapshot(
     with connect_database(database) as connection:
         build_episodes(connection, as_of=as_of, built_at=as_of + timedelta(minutes=5))
 
-    assert features_main(
-        [
-            "build",
-            "--database",
-            str(database),
-            "--slate-id",
-            "1",
-            "--site",
-            "dk",
-            "--as-of",
-            _timestamp(as_of),
-        ]
-    ) == 0
+    assert (
+        features_main(
+            [
+                "build",
+                "--database",
+                str(database),
+                "--slate-id",
+                "1",
+                "--site",
+                "dk",
+                "--as-of",
+                _timestamp(as_of),
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["features_inserted"] == 1
     assert payload["feature_version"] == "narrative-heat-v1"
@@ -365,6 +363,7 @@ def _feature_database(
     tmp_path: Path,
     *claim_keys: str,
     player_count: int = 1,
+    prompt_version: PromptVersionRow | None = None,
 ) -> tuple[Path, tuple[int, ...]]:
     database = tmp_path / "features.sqlite3"
     fixtures = {fixture.key: fixture for fixture in _load_fixtures()}
@@ -372,7 +371,7 @@ def _feature_database(
         apply_migrations(connection)
         player_ids = _seed_slate_players(connection, player_count)
         for key in claim_keys:
-            _seed_extracted_claim(connection, fixtures[key])
+            _seed_extracted_claim(connection, fixtures[key], prompt_version=prompt_version)
     return database, player_ids
 
 
@@ -481,7 +480,12 @@ def _seed_slate_players(connection: sqlite3.Connection, count: int) -> tuple[int
     return tuple(player_ids)
 
 
-def _seed_extracted_claim(connection: sqlite3.Connection, fixture: FixtureClaim) -> None:
+def _seed_extracted_claim(
+    connection: sqlite3.Connection,
+    fixture: FixtureClaim,
+    *,
+    prompt_version: PromptVersionRow | None = None,
+) -> None:
     configured_at = BASE_TIME - timedelta(days=5)
     observed_at = BASE_TIME + timedelta(hours=fixture.observed_hours)
     _seed_source(connection, fixture, configured_at)
@@ -554,6 +558,7 @@ def _seed_extracted_claim(connection: sqlite3.Connection, fixture: FixtureClaim)
         pricing=load_batch_pricing(PRICING_PATH),
         run_at=observed_at + timedelta(minutes=1),
         clock=lambda: observed_at + timedelta(minutes=1),
+        prompt_version=prompt_version,
     )
     assert report.claims_stored == 1
 
@@ -735,3 +740,73 @@ def test_zero_variance_channels_standardize_to_zero(tmp_path: Path) -> None:
     # pool: z must be exactly 0, never NaN.
     assert all(row.h_dfs_z == 0.0 and row.h_team_fan_z == 0.0 for row in rows)
     assert all(math.isfinite(row.h_signed_z) for row in rows)
+
+
+LEGACY_PROMPT_VERSION_ID = "stage1-extraction-legacy-test"
+
+
+def _legacy_prompt_version() -> PromptVersionRow:
+    """An earlier, distinct Stage 1 prompt artifact (a different id and digest)."""
+
+    current = default_prompt_version()
+    system_prompt = current.system_prompt + " (legacy)"
+    return current.model_copy(
+        update={
+            "prompt_version_id": LEGACY_PROMPT_VERSION_ID,
+            "system_prompt": system_prompt,
+            "prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        }
+    )
+
+
+def test_claims_from_an_earlier_prompt_do_not_block_the_current_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Regression: Slice 50 bumped the prompt; v1 claims must not trip the v2 completeness check.
+
+    The episode builder clusters only the current prompt's claims, so a slate player whose
+    only claims came from an earlier prompt has no episode under the current prompt by
+    design. Features must treat that as "no narrative signal", not as a missing snapshot.
+    """
+
+    database, _ = _feature_database(tmp_path, "origin", prompt_version=_legacy_prompt_version())
+    as_of = BASE_TIME + timedelta(hours=2)
+    with connect_database(database) as connection:
+        episodes = build_episodes(connection, as_of=as_of, built_at=as_of + timedelta(minutes=5))
+        assert episodes.claims_considered == 0
+        report = build_features(
+            connection,
+            slate_id=1,
+            site="dk",
+            as_of=as_of,
+            built_at=as_of + timedelta(minutes=10),
+        )
+        assert report.episode_count == 0
+        assert report.player_count == 1
+        assert load_episode_heats(connection, player_id=1, slate_id=1, site="dk", as_of=as_of) == ()
+        # Asking explicitly for the legacy prompt's snapshot still demands that snapshot.
+        with pytest.raises(FeatureInputError, match=f"under prompt {LEGACY_PROMPT_VERSION_ID!r}"):
+            build_features(
+                connection,
+                slate_id=1,
+                site="dk",
+                as_of=as_of,
+                built_at=as_of + timedelta(minutes=15),
+                prompt_version_id=LEGACY_PROMPT_VERSION_ID,
+            )
+
+
+def test_current_prompt_claim_without_an_episode_is_still_refused(tmp_path: Path) -> None:
+    database, _ = _feature_database(tmp_path, "origin")
+    as_of = BASE_TIME + timedelta(hours=2)
+    with (
+        connect_database(database) as connection,
+        pytest.raises(FeatureInputError, match=f"under prompt {PROMPT_VERSION_ID!r}"),
+    ):
+        build_features(
+            connection,
+            slate_id=1,
+            site="dk",
+            as_of=as_of,
+            built_at=as_of + timedelta(minutes=10),
+        )

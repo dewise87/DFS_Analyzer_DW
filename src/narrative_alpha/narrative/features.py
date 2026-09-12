@@ -19,7 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from narrative_alpha import __version__
 from narrative_alpha.ingest.timestamps import ensure_utc, utc_timestamp
-from narrative_alpha.narrative.episodes import METHOD_VERSION as DEFAULT_EPISODE_METHOD_VERSION
+from narrative_alpha.narrative.episodes import (
+    DEFAULT_PROMPT_VERSION_ID,
+)
+from narrative_alpha.narrative.episodes import (
+    METHOD_VERSION as DEFAULT_EPISODE_METHOD_VERSION,
+)
 from narrative_alpha.store import (
     ModelRunRow,
     NarrativeFeatureRow,
@@ -121,15 +126,11 @@ class _HeatConfigFile(_StrictConfig):
     @model_validator(mode="after")
     def validate_complete_semantics(self) -> _HeatConfigFile:
         if self.formula_version != FORMULA_VERSION:
-            raise ValueError(
-                f"formula_version must be {FORMULA_VERSION!r} for this implementation"
-            )
+            raise ValueError(f"formula_version must be {FORMULA_VERSION!r} for this implementation")
         if self.novelty_method != NOVELTY_METHOD:
             raise ValueError(f"novelty_method must be {NOVELTY_METHOD!r}")
         if self.standardization_method != STANDARDIZATION_METHOD:
-            raise ValueError(
-                f"standardization_method must be {STANDARDIZATION_METHOD!r}"
-            )
+            raise ValueError(f"standardization_method must be {STANDARDIZATION_METHOD!r}")
         if self.winsor_limit != 4.0:
             raise ValueError("winsor_limit must be 4.0 for the Appendix B v1 columns")
         if self.velocity_window_hours != 6.0:
@@ -400,8 +401,14 @@ def build_features(
     as_of: datetime,
     config_path: Path = DEFAULT_HEAT_CONFIG_PATH,
     built_at: datetime | None = None,
+    prompt_version_id: str = DEFAULT_PROMPT_VERSION_ID,
 ) -> FeatureBuildReport:
-    """Build one immutable player/slate feature snapshot from an exact Stage 2 snapshot."""
+    """Build one immutable player/slate feature snapshot from an exact Stage 2 snapshot.
+
+    The Stage 2 snapshot is keyed by the Stage 1 prompt whose claims it clustered, so the
+    completeness check and the episode load are scoped to ``prompt_version_id``: claims
+    extracted under an earlier prompt belong to that prompt's snapshot, never to this one.
+    """
 
     if slate_id <= 0:
         raise FeatureInputError("slate_id must be positive")
@@ -417,12 +424,11 @@ def build_features(
     salaries = _load_salaries(connection, slate_id, cutoff)
     if not salaries:
         raise FeatureInputError(
-            f"slate {slate_id} has no point-in-time eligible salary rows at "
-            f"{utc_timestamp(cutoff)}"
+            f"slate {slate_id} has no point-in-time eligible salary rows at {utc_timestamp(cutoff)}"
         )
     player_ids = tuple(salary.player_id for salary in salaries)
-    _require_complete_episode_snapshot(connection, player_ids, config, cutoff)
-    episodes = _load_episodes(connection, player_ids, config, cutoff)
+    _require_complete_episode_snapshot(connection, player_ids, config, cutoff, prompt_version_id)
+    episodes = _load_episodes(connection, player_ids, config, cutoff, prompt_version_id)
     ownership = _load_ownership(connection, slate_id, canonical_site, role, player_ids, cutoff)
     projections = _load_projections(connection, slate_id, canonical_site, player_ids, cutoff)
     ownership_by_player = _group_by_player(ownership)
@@ -453,8 +459,7 @@ def build_features(
         for raw in raw_rows
     }
     input_hashes = {
-        player_id: _sha256_json(payload)
-        for player_id, payload in semantic_payloads.items()
+        player_id: _sha256_json(payload) for player_id, payload in semantic_payloads.items()
     }
 
     existing_rows = connection.execute(
@@ -509,10 +514,13 @@ def build_features(
 
     connection.execute("SAVEPOINT narrative_feature_build")
     try:
-        if connection.execute(
-            "SELECT 1 FROM narrative_feature_versions WHERE feature_version = ?",
-            (config.feature_version,),
-        ).fetchone() is None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM narrative_feature_versions WHERE feature_version = ?",
+                (config.feature_version,),
+            ).fetchone()
+            is None
+        ):
             _insert_row(connection, "narrative_feature_versions", version)
         _insert_row(connection, "model_runs", run)
         for raw in raw_rows:
@@ -584,6 +592,7 @@ def load_episode_heats(
     site: str,
     as_of: datetime,
     config_path: Path = DEFAULT_HEAT_CONFIG_PATH,
+    prompt_version_id: str = DEFAULT_PROMPT_VERSION_ID,
 ) -> tuple[EpisodeHeat, ...]:
     """Reconstruct auditable per-episode heat factors without writing feature rows."""
 
@@ -594,11 +603,9 @@ def load_episode_heats(
     config = load_heat_config(config_path)
     slate_type = _load_slate_type(connection, slate_id, canonical_site, cutoff)
     role: Role = "classic" if slate_type == "classic" else "flex"
-    _require_complete_episode_snapshot(connection, (player_id,), config, cutoff)
-    episodes = _load_episodes(connection, (player_id,), config, cutoff)
-    ownership = _load_ownership(
-        connection, slate_id, canonical_site, role, (player_id,), cutoff
-    )
+    _require_complete_episode_snapshot(connection, (player_id,), config, cutoff, prompt_version_id)
+    episodes = _load_episodes(connection, (player_id,), config, cutoff, prompt_version_id)
+    ownership = _load_ownership(connection, slate_id, canonical_site, role, (player_id,), cutoff)
     return _episode_heats(episodes, ownership, cutoff, config)
 
 
@@ -702,6 +709,7 @@ def _require_complete_episode_snapshot(
     player_ids: tuple[int, ...],
     config: HeatConfig,
     as_of: datetime,
+    prompt_version_id: str,
 ) -> None:
     placeholders = ", ".join("?" for _ in player_ids)
     cutoff = utc_timestamp(as_of)
@@ -715,6 +723,7 @@ def _require_complete_episode_snapshot(
         JOIN claim_player_refs AS ref ON ref.claim_id = claim.claim_id
         WHERE ref.player_id IN ({placeholders})
           AND extraction.status = 'succeeded'
+          AND extraction.prompt_version_id = ?
           AND claim.observed_at <= ? AND claim.ingested_at <= ?
           AND claim.valid_from <= ? AND (claim.valid_to IS NULL OR ? < claim.valid_to)
           AND item.observed_at <= ? AND item.ingested_at <= ?
@@ -725,7 +734,8 @@ def _require_complete_episode_snapshot(
               JOIN episode_claims AS member ON member.episode_id = episode.episode_id
               WHERE episode.subject_type = 'player'
                 AND episode.subject_player_id = ref.player_id
-                AND episode.method_version = ? AND episode.as_of = ?
+                AND episode.method_version = ? AND episode.prompt_version_id = ?
+                AND episode.as_of = ?
                 AND member.claim_id = claim.claim_id
           )
         ORDER BY ref.player_id, claim.claim_id
@@ -733,6 +743,7 @@ def _require_complete_episode_snapshot(
         """,
         (
             *player_ids,
+            prompt_version_id,
             cutoff,
             cutoff,
             cutoff,
@@ -742,14 +753,15 @@ def _require_complete_episode_snapshot(
             cutoff,
             cutoff,
             config.episode_method_version,
+            prompt_version_id,
             cutoff,
         ),
     ).fetchone()
     if row is not None:
         raise FeatureInputError(
             f"claim {row['claim_id']} for player {row['player_id']} has no "
-            f"{config.episode_method_version!r} episode at {cutoff}; run na-episodes build "
-            "for the identical --as-of first"
+            f"{config.episode_method_version!r} episode under prompt {prompt_version_id!r} "
+            f"at {cutoff}; run na-episodes build for the identical --as-of first"
         )
 
 
@@ -758,6 +770,7 @@ def _load_episodes(
     player_ids: tuple[int, ...],
     config: HeatConfig,
     as_of: datetime,
+    prompt_version_id: str,
 ) -> tuple[_EpisodeInput, ...]:
     placeholders = ", ".join("?" for _ in player_ids)
     cutoff = utc_timestamp(as_of)
@@ -792,10 +805,11 @@ def _load_episodes(
         JOIN source_items AS item ON item.source_item_id = member.source_item_id
         WHERE episode.subject_type = 'player'
           AND episode.subject_player_id IN ({placeholders})
-          AND episode.method_version = ? AND episode.as_of = ?
+          AND episode.method_version = ? AND episode.prompt_version_id = ?
+          AND episode.as_of = ?
         ORDER BY episode.episode_id, item.observed_at, member.claim_id
         """,
-        (*player_ids, config.episode_method_version, cutoff),
+        (*player_ids, config.episode_method_version, prompt_version_id, cutoff),
     ).fetchall()
     grouped: dict[tuple[str, int, datetime], list[_EpisodeMember]] = defaultdict(list)
     for row in rows:
@@ -1042,9 +1056,7 @@ def _episode_heat(
     strict_origin: bool = False,
     fixed_novelty: float | None = None,
 ) -> EpisodeHeat | None:
-    members = tuple(
-        member for member in episode.members if _member_eligible(member, evaluation_at)
-    )
+    members = tuple(member for member in episode.members if _member_eligible(member, evaluation_at))
     if not members:
         return None
     if not any(member.relation == "origin" for member in members):
@@ -1099,9 +1111,7 @@ def _episode_heat(
     specificity_raw = _mean(item_specificities)
     source_families_by_source: dict[str, str] = {}
     for member in members:
-        prior_family = source_families_by_source.setdefault(
-            member.source_id, member.source_family
-        )
+        prior_family = source_families_by_source.setdefault(member.source_id, member.source_family)
         if prior_family != member.source_family:
             raise FeatureInputError(
                 f"source {member.source_id!r} has conflicting frozen families in episode "
@@ -1115,8 +1125,7 @@ def _episode_heat(
         source_class = config.source_families[origin.source_family].source_class
     except KeyError as error:
         raise FeatureInputError(
-            f"episode {episode.episode_id} uses unconfigured source family "
-            f"{origin.source_family!r}"
+            f"episode {episode.episode_id} uses unconfigured source family {origin.source_family!r}"
         ) from error
     half_life = config.half_life_hours[source_class]
     last_non_derivative = max(
@@ -1236,13 +1245,9 @@ def _aggregate_heat(heats: tuple[EpisodeHeat, ...]) -> dict[str, float]:
     values = {
         "h_signed": signed,
         "h_absolute": absolute,
-        "h_mainstream": math.fsum(
-            heat.heat for heat in heats if heat.source_class == "mainstream"
-        ),
+        "h_mainstream": math.fsum(heat.heat for heat in heats if heat.source_class == "mainstream"),
         "h_dfs": math.fsum(heat.heat for heat in heats if heat.source_class == "dfs"),
-        "h_team_fan": math.fsum(
-            heat.heat for heat in heats if heat.source_class == "team_fan"
-        ),
+        "h_team_fan": math.fsum(heat.heat for heat in heats if heat.source_class == "team_fan"),
         "h_velocity_6h": 0.0,
         "h_acceleration": 0.0,
         "h_consensus": abs(signed) / absolute if absolute > 0 else 0.0,
@@ -1262,9 +1267,7 @@ def _aggregate_heat(heats: tuple[EpisodeHeat, ...]) -> dict[str, float]:
                 )
     values["unique_source_count"] = float(len(sources))
     if sources:
-        values["source_overlap_index"] = 1.0 - (
-            len(set(sources.values())) / len(sources)
-        )
+        values["source_overlap_index"] = 1.0 - (len(set(sources.values())) / len(sources))
     return values
 
 
@@ -1274,16 +1277,12 @@ def _source_class_entropy(heats: tuple[EpisodeHeat, ...]) -> float:
         for source_id, source_class in heat.independent_classes_by_source:
             prior = sources.setdefault(source_id, source_class)
             if prior != source_class:
-                raise FeatureInputError(
-                    f"source {source_id!r} maps to conflicting heat classes"
-                )
+                raise FeatureInputError(f"source {source_id!r} maps to conflicting heat classes")
     if not sources:
         return 0.0
     counts = Counter(sources.values())
     total = len(sources)
-    entropy = -math.fsum(
-        (count / total) * math.log(count / total) for count in counts.values()
-    )
+    entropy = -math.fsum((count / total) * math.log(count / total) for count in counts.values())
     return max(0.0, min(1.0, entropy / math.log(len(_SOURCE_CLASSES))))
 
 
@@ -1299,9 +1298,7 @@ def _standardize(
     rows: tuple[_RawFeature, ...],
     winsor_limit: float,
 ) -> dict[int, dict[str, float]]:
-    result: dict[int, dict[str, float]] = {
-        row.salary.player_id: {} for row in rows
-    }
+    result: dict[int, dict[str, float]] = {row.salary.player_id: {} for row in rows}
     for field in _STANDARDIZED_FIELDS:
         values = [row.values[field] for row in rows]
         mean = math.fsum(values) / len(values)
@@ -1376,7 +1373,8 @@ def _semantic_payload(
             None if raw.baseline_previous is None else raw.baseline_previous.snapshot_id
         ),
         "projection_snapshot_id": (
-            None if raw.projection is None or raw.projection_previous is None
+            None
+            if raw.projection is None or raw.projection_previous is None
             else raw.projection.snapshot_id
         ),
         "projection_previous_snapshot_id": (
@@ -1487,4 +1485,3 @@ def _optional_timestamp(value: object) -> datetime | None:
 
 # Explicit long name for callers that prefer the table name over the CLI verb.
 build_narrative_features = build_features
-
