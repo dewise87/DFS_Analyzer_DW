@@ -161,6 +161,16 @@ PINNED_ROSTER_RELEASES: Mapping[int, tuple[PinnedRosterRelease, ...]] = MappingP
                 sha256=("01ed4adec274529038c4ec8c88ca1d95239b26addac160bdf63410f196f7e5a1"),
                 reviewed_at=date(2026, 9, 5),
             ),
+            # Week 1 eve: +17 veterans re-listed, 310 status/team moves (practice-squad
+            # DEV -> ACT elevations, CUT -> DEV signings, a handful of ACT -> INA). Reviewed
+            # from the refresh diff on 2026-09-12; one upstream row with a blank gsis_id was
+            # rejected by the parser as before.
+            PinnedRosterRelease(
+                season=2026,
+                url=ROLLING_ROSTER_URL.format(season=2026),
+                sha256=("ffdc6f358df0597365b1889332577692c484a283a758d9956b92b2730d0fcd1c"),
+                reviewed_at=date(2026, 9, 12),
+            ),
         )
     }
 )

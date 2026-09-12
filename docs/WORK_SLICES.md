@@ -3899,6 +3899,19 @@ operator items for Thursday's preflight, which the doctor names with remedies.
   claim-bearing items) earns a slice. A second provider (an OpenAI adapter behind the
   existing `ExtractionProvider` protocol) is its own later slice; the harness must not
   assume one vendor.
+- **Follow-up (found 2026-09-12) — batch-lane episodes miss the same run's claims.**
+  `ops/batch.py` builds episodes with `as_of=started_at`, but the extract step ingests its
+  claims later in the same run, so `_load_claims` (which requires `claim.ingested_at <=
+  as_of`) excludes them; the snapshot only catches up on the next run. Decide whether the
+  episodes step should use its own start instant (the store is the authority; the lane's
+  window end still bounds item observation) and add the test that a same-run claim is
+  clustered.
+- **Follow-up (found 2026-09-12) — Stage 2/3 prompt-version scoping.** `build_features`
+  and `load_episode_heats` now take `prompt_version_id` (default: the extraction module's
+  current prompt) and scope both the completeness check and the episode load to it. The
+  ops lanes use the default; the feature snapshot does not yet record which prompt it was
+  built under. When Slice 52 compares prompts, record it (or fold it into
+  `feature_version`).
 - **Operator chore, not a slice — paste the reviewed roster pin.** `na-crosswalk
   nflverse-refresh --season 2026 --reviewed-at <today>` succeeds again (upstream restored
   the `week` column on 2026-09-05); Daniel reads the status-change diff it prints and

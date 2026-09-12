@@ -2,6 +2,40 @@
 
 `na-*` prefix: `uv run` · Dashboard: `na-ops dashboard` → [127.0.0.1:8765](http://127.0.0.1:8765/)
 
+## Saturday 2026-09-12 addendum — what actually happened, and what changed
+
+Read this before the Sunday rows. Thursday and Friday did not run as written:
+
+- **The scheduled batch had failed every morning since 9/3.** The launchd wrapper invoked
+  `na-ops batch --config config/ops.toml`, but `--config` is a top-level option, so every run
+  exited 2 with "unrecognized arguments" and nothing was collected for a week. Fixed on 9/12
+  (`ops/schedule.py`, golden wrapper, ordering assertions); agents reinstalled. Two manual
+  batches ran on 9/12: the first (default window) extracted 200 of the oldest deferred items
+  under prompt **v2** (197 succeeded, 2 refused, 1 flagged — the v2 refusal rate is a fraction
+  of v1's); the second used `--window-start 2026-09-12T00:00:00Z` to reach the 2,259 items
+  collected that afternoon. Use that flag whenever the backlog is older than the slate.
+- **`na-ops slate` died at `slate_features` on every run since Slice 50.** The episode
+  builder clusters only the current prompt's claims (v2), but the features completeness check
+  looked at every succeeded claim, so v1 claims for slate players tripped it. Fixed on 9/12:
+  the check and the episode load are scoped to the same prompt version, so earlier-prompt
+  claims mean "no narrative signal", not "missing snapshot".
+- **Identity queue.** The build refuses on any pending draftkings-site identity. On 9/12 the
+  61 salary rows marked OUT by DraftKings and their 60 Stokastic twins were ignored, and 13
+  unambiguous name variants were resolved. Eight rows were left for a human decision (see the
+  dashboard Queues page): Al-Jay Henderson, River Cracraft, and Eli Mitchell are not on the
+  nflverse roster; Nate Carter (roster KC, feed ATL) and Tutu Atwell (roster LA/INA, feed MIA)
+  disagree with the feed. Tonight's fresh salary file may add a few more.
+- **Roster pin** reviewed and pasted for 2026-09-12 (+17, ~310), seeded 17 players.
+- **Weather** needs a games CSV (`home_team,kickoff`): `data/scratch/games_2026_week_01.csv`
+  is generated from the store's 12 games. **Odds** needs `ODDS_API_KEY`, which lives in
+  `~/.zshrc`; a non-login shell must `source ~/.zshrc` first.
+- **Vendor drop folders** for tonight: `data/vendor/draftkings/2026-09-12/`,
+  `data/vendor/fanduel/2026-09-12/`, `data/vendor/stokastic/2026-09-12/` (git-ignored).
+- **Known, not fixed:** the batch lane builds episodes at `started_at`, so claims ingested by
+  the same run's extract step never make that run's episode snapshot (they are picked up by
+  the next run, or by `na-ops slate`, which builds at the decision instant). The FanDuel
+  slate still passes odds/weather vacuously because it has no game rows.
+
 ## Week 1 has its projection source
 
 Slice 9 landed on 2026-09-06: the `stokastic` adapter is registered for projections and ownership
