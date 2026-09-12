@@ -367,6 +367,42 @@ def test_requeued_identity_reopens_resolved_status_and_fails_closed(tmp_path: Pa
     assert requeued.unresolved_id == unresolved.unresolved_id
 
 
+def test_ignored_identity_stays_ignored_when_reobserved(tmp_path: Path) -> None:
+    """An ignore is a human decision about one identity; re-ingesting the file keeps it."""
+
+    with connect_database(tmp_path / "store.sqlite3") as connection:
+        apply_migrations(connection)
+        _insert_player(connection, "William Fuller", "MIA")
+        crosswalk = PlayerCrosswalk(connection)
+        first = crosswalk.match(_identity("Billy Fuller", "MIA"))
+        assert first.unresolved_id is not None and not first.ignored
+        crosswalk.ignore(first.unresolved_id, note="practice squad, cannot be rostered")
+        crosswalk.require_all_resolved()
+
+        again = crosswalk.match(
+            _identity("Billy Fuller", "MIA", observed_at=OBSERVED + timedelta(days=3))
+        )
+        crosswalk.require_all_resolved()
+        assert crosswalk.list_unresolved() == ()
+        row = connection.execute(
+            "SELECT status, occurrences, resolution_note, last_observed_at "
+            "FROM unresolved_player_matches WHERE unresolved_id = ?",
+            (first.unresolved_id,),
+        ).fetchone()
+
+        # A different team is a different identity: it is queued afresh.
+        moved = crosswalk.match(_identity("Billy Fuller", "BUF"))
+
+    assert again.player_id is None
+    assert again.ignored is True
+    assert again.unresolved_id == first.unresolved_id
+    assert str(row["status"]) == "ignored"
+    assert int(row["occurrences"]) == 2
+    assert str(row["resolution_note"]) == "practice squad, cannot be rostered"
+    assert str(row["last_observed_at"]) == _timestamp(OBSERVED + timedelta(days=3))
+    assert moved.ignored is False and moved.unresolved_id not in (None, first.unresolved_id)
+
+
 def test_manual_resolution_is_team_scoped_and_preserves_other_teams_aliases(
     tmp_path: Path,
 ) -> None:
@@ -763,9 +799,7 @@ def test_pinned_roster_release_selects_newest_pin_without_lookahead() -> None:
 
 def test_same_day_repin_selects_the_later_table_entry() -> None:
     morning = PinnedRosterRelease(2026, "https://example.test/am.csv", "3" * 64, date(2026, 9, 2))
-    afternoon = PinnedRosterRelease(
-        2026, "https://example.test/pm.csv", "4" * 64, date(2026, 9, 2)
-    )
+    afternoon = PinnedRosterRelease(2026, "https://example.test/pm.csv", "4" * 64, date(2026, 9, 2))
     releases = {2026: (morning, afternoon)}
 
     assert pinned_roster_release(2026, date(2026, 9, 2), releases=releases) is afternoon

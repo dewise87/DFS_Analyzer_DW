@@ -99,9 +99,7 @@ class PlayerCrosswalk:
         if len(exact) > 1:
             return self._unresolved(identity, exact)
 
-        aliases, manual_alias_ids = self._alias_candidates(
-            identity, candidates, normalized_input
-        )
+        aliases, manual_alias_ids = self._alias_candidates(identity, candidates, normalized_input)
         if len(aliases) == 1:
             return self._accept(
                 identity,
@@ -615,6 +613,42 @@ class PlayerCrosswalk:
         public_candidates = tuple(candidate.public() for candidate in candidates[:10])
         identity_key = _identity_key(identity)
         observed_at = _timestamp(identity.observed_at)
+        existing = self.connection.execute(
+            "SELECT unresolved_id, status FROM unresolved_player_matches WHERE identity_key = ?",
+            (identity_key,),
+        ).fetchone()
+        if existing is not None and str(existing["status"]) == "ignored":
+            # A human decided this exact identity (same source, site, name, team, position)
+            # is not a canonical player. Re-observing it records the sighting but never
+            # reopens the decision; a changed team or position is a different identity key.
+            self.connection.execute(
+                """
+                UPDATE unresolved_player_matches
+                SET roster_status = ?, candidates_json = ?, source_file_sha256 = ?,
+                    last_observed_at = ?, occurrences = occurrences + 1, run_id = ?
+                WHERE unresolved_id = ?
+                """,
+                (
+                    identity.roster_status,
+                    json.dumps(
+                        [candidate.model_dump(mode="json") for candidate in public_candidates],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    identity.source_file_sha256,
+                    observed_at,
+                    identity.run_id,
+                    int(existing["unresolved_id"]),
+                ),
+            )
+            return IdentityMatchResult(
+                player_id=None,
+                method=None,
+                confidence=None,
+                unresolved_id=int(existing["unresolved_id"]),
+                candidates=public_candidates,
+                ignored=True,
+            )
         cursor = self.connection.execute(
             """
             INSERT INTO unresolved_player_matches(

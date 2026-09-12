@@ -232,6 +232,8 @@ class ProjectionLoadReport(BaseModel):
     unresolved_rows: int = Field(ge=0)
     rejected_rows: int = Field(ge=0)
     unresolved_ids: tuple[int, ...] = ()
+    ignored_rows: int = Field(default=0, ge=0)
+    """Vendor rows whose identity a human already ignored; skipped, never re-queued."""
     skipped_files: tuple[SkippedProjectionFile, ...] = ()
     """Files the capture manifests that belong to another site or refused to parse."""
     zero_projection_rows: int = Field(default=0, ge=0)
@@ -301,6 +303,7 @@ def load_projection_capture(
     ownership_rows_inserted = 0
     duplicate_rows = 0
     unresolved_ids: list[int] = []
+    ignored_ids: list[int] = []
     rejected_rows = 0
     skipped_files: list[SkippedProjectionFile] = []
     zero_projection_rows = 0
@@ -353,6 +356,7 @@ def load_projection_capture(
                         ingested_at=ingestion_time,
                         run_id=run_id,
                         unresolved_ids=unresolved_ids,
+                        ignored_ids=ignored_ids,
                     )
                     if player_id is None:
                         continue
@@ -402,6 +406,7 @@ def load_projection_capture(
                         ingested_at=ingestion_time,
                         run_id=run_id,
                         unresolved_ids=unresolved_ids,
+                        ignored_ids=ignored_ids,
                     )
                     if player_id is None:
                         continue
@@ -434,6 +439,7 @@ def load_projection_capture(
         unresolved_rows=len(unresolved_ids),
         rejected_rows=rejected_rows,
         unresolved_ids=tuple(unresolved_ids),
+        ignored_rows=len(ignored_ids),
         skipped_files=tuple(skipped_files),
         zero_projection_rows=zero_projection_rows,
         range_dropped=tuple(range_dropped),
@@ -508,6 +514,11 @@ def render_projection_load(report: ProjectionLoadReport) -> str:
             "`na-crosswalk resolve`: "
             + ", ".join(str(unresolved_id) for unresolved_id in report.unresolved_ids)
         )
+    if report.ignored_rows:
+        lines.append(
+            f"  ignored     {report.ignored_rows} vendor row(s) skipped: a human already "
+            "ignored their identities"
+        )
     if report.errors:
         lines.append("")
         lines.append("  ERRORS")
@@ -528,6 +539,7 @@ def _resolve_player(
     ingested_at: datetime,
     run_id: str | None,
     unresolved_ids: list[int],
+    ignored_ids: list[int],
 ) -> int | None:
     """A vendor row's canonical player: the franchise defense row for DST, else crosswalk."""
 
@@ -544,7 +556,7 @@ def _resolve_player(
     )
     if result.player_id is None:
         if result.unresolved_id is not None:
-            unresolved_ids.append(result.unresolved_id)
+            (ignored_ids if result.ignored else unresolved_ids).append(result.unresolved_id)
         return None
     return result.player_id
 

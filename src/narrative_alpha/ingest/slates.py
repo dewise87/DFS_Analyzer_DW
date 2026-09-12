@@ -109,6 +109,8 @@ class SlateLoadResult(BaseModel):
     duplicate_rows: int = Field(ge=0)
     salary_changes: tuple[SalaryChange, ...] = ()
     unresolved: tuple[UnresolvedSalaryPlayer, ...] = ()
+    ignored_rows: int = Field(default=0, ge=0)
+    """Salary rows whose identity a human already ignored; skipped, never re-queued."""
     games_inserted: int = Field(default=0, ge=0)
     teams_inserted: int = Field(default=0, ge=0)
     matchups_without_kickoff: tuple[str, ...] = ()
@@ -143,6 +145,10 @@ class SlateLoadReport(BaseModel):
     @property
     def unresolved_rows(self) -> int:
         return sum(len(slate.unresolved) for slate in self.slates)
+
+    @property
+    def ignored_rows(self) -> int:
+        return sum(slate.ignored_rows for slate in self.slates)
 
     @property
     def ok(self) -> bool:
@@ -446,6 +452,7 @@ def _load_slate_group(
     duplicate_rows = 0
     changes: list[SalaryChange] = []
     unresolved: list[UnresolvedSalaryPlayer] = []
+    ignored_rows = 0
 
     salary_rows, merge_errors = _coalesce_draftkings_showdown_rows(group.rows)
     errors.extend(merge_errors)
@@ -519,6 +526,9 @@ def _load_slate_group(
             )
             player_id = match.player_id
             unresolved_id = match.unresolved_id
+            if match.ignored:
+                ignored_rows += 1
+                continue
         if player_id is None:
             unresolved.append(
                 UnresolvedSalaryPlayer(
@@ -567,6 +577,7 @@ def _load_slate_group(
         duplicate_rows=duplicate_rows,
         salary_changes=tuple(changes),
         unresolved=tuple(unresolved),
+        ignored_rows=ignored_rows,
         games_inserted=games_inserted,
         teams_inserted=teams_inserted,
         matchups_without_kickoff=tuple(sorted(matchups_without_kickoff)),

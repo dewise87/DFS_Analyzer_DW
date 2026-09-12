@@ -98,6 +98,8 @@ class IdentityMatchResult(BaseModel):
     manual_override: bool = False
     unresolved_id: int | None = None
     candidates: tuple[MatchCandidate, ...] = ()
+    ignored: bool = False
+    """A human already ignored this exact identity; the row is skipped, not re-queued."""
 
     @property
     def matched(self) -> bool:

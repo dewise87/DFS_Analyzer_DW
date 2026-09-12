@@ -574,6 +574,7 @@ def _ingest_salaries(
         "salary_rows_inserted": report.salary_rows_inserted,
         "duplicate_rows": report.duplicate_rows,
         "unresolved_rows": report.unresolved_rows,
+        "ignored_rows": report.ignored_rows,
         "slate_ids": [slate.slate_id for slate in report.slates],
         "external_slate_ids": [slate.external_slate_id for slate in report.slates],
         "salary_changes": sum(len(slate.salary_changes) for slate in report.slates),
@@ -709,6 +710,7 @@ def _ingest_vendor_captures(
     ownership_rows = 0
     duplicate_rows = 0
     unresolved_rows = 0
+    ignored_rows = 0
     rejected_rows = 0
     zero_projection_rows = 0
     range_dropped: list[str] = []
@@ -741,6 +743,7 @@ def _ingest_vendor_captures(
         ownership_rows += report.ownership_rows_inserted
         duplicate_rows += report.duplicate_rows
         unresolved_rows += report.unresolved_rows
+        ignored_rows += report.ignored_rows
         rejected_rows += report.rejected_rows
         zero_projection_rows += report.zero_projection_rows
         range_dropped.extend(report.range_dropped)
@@ -762,6 +765,7 @@ def _ingest_vendor_captures(
         "ownership_rows_inserted": ownership_rows,
         "duplicate_rows": duplicate_rows,
         "unresolved_rows": unresolved_rows,
+        "ignored_rows": ignored_rows,
         "rejected_rows": rejected_rows,
         "zero_projection_rows": zero_projection_rows,
         "range_dropped": range_dropped,
