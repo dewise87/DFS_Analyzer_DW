@@ -25,6 +25,19 @@ Read this before the Sunday rows. Thursday and Friday did not run as written:
   dashboard Queues page): Al-Jay Henderson, River Cracraft, and Eli Mitchell are not on the
   nflverse roster; Nate Carter (roster KC, feed ATL) and Tutu Atwell (roster LA/INA, feed MIA)
   disagree with the feed. Tonight's fresh salary file may add a few more.
+- **Ignored identities used to reopen on every re-ingest.** The queue upsert reset an
+  `ignored` row to `pending` whenever the same file was loaded again, so the 121 ignores
+  came straight back and the build refused. Fixed on 9/12: an ignore is sticky for the same
+  identity key (source, site, name, team, position); the sighting is recorded, the decision
+  stands, and the salary/projection steps report `ignored_rows` instead of queueing them.
+- **The build refused eleven players whose DraftKings slot disagrees with the roster
+  position** (long snappers priced as TE/FLEX, a few WR-vs-TE relabels). Fixed on 9/12: a
+  candidate's lineup position is the site's base slot; the canonical position stands only
+  when it is among the granted slots (or in showdown, where slots carry no position).
+- **Rehearsed end to end on a store copy on 9/12** with the eight leftover identities
+  ignored there only: every step succeeded — 8 of 8 weather games matched, 225 v2 claims
+  clustered into 195 episodes, 20 lineups, memo and upload CSV written (with
+  `--accept-readiness projection_age`, since the projections were the 9/6 capture).
 - **Roster pin** reviewed and pasted for 2026-09-12 (+17, ~310), seeded 17 players.
 - **Weather** needs a games CSV (`home_team,kickoff`): `data/scratch/games_2026_week_01.csv`
   is generated from the store's 12 games. **Odds** needs `ODDS_API_KEY`, which lives in

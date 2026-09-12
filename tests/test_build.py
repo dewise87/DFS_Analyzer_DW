@@ -644,3 +644,16 @@ def test_rebuilding_the_identical_decision_is_a_structured_error(tmp_path: Path)
             decision_at=DECISION_AT,
             artifact_directory=artifacts,
         )
+
+
+def test_lineup_position_follows_the_site_slot_when_the_roster_disagrees() -> None:
+    """DraftKings prices long snappers as TE/FLEX and sometimes relabels WR/TE/RB."""
+
+    from narrative_alpha.candidate_selection import _lineup_position
+
+    assert _lineup_position("RB", ["RB", "FLEX"]) == "RB"
+    assert _lineup_position("LS", ["TE", "FLEX"]) == "TE"
+    assert _lineup_position("TE", ["WR", "FLEX"]) == "WR"
+    assert _lineup_position("DEF", ["DST"]) == "DST"
+    assert _lineup_position("WR", ["CPT", "FLEX"]) == "WR"
+    assert _lineup_position("", ["QB"]) == "QB"

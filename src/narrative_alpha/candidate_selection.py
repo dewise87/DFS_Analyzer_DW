@@ -320,6 +320,28 @@ def select_candidate_scenario(
     )
 
 
+_NON_POSITION_SLOTS = frozenset({"FLEX", "CPT", "MVP", "UTIL", "SUPER FLEX", "SUPERFLEX"})
+
+
+def _lineup_position(canonical_position: str, slots: list[str]) -> str:
+    """The position the site prices this player at, which is what its lineup rules enforce.
+
+    The canonical (nflverse) position is identity metadata. DraftKings lists long snappers
+    as TE/FLEX and occasionally disagrees with the roster on a WR-vs-TE or RB-vs-WR call;
+    the site's own base slot wins whenever the canonical position is not among the slots
+    it granted, because the optimizer and the site validator both reason in site slots.
+    Showdown slots (CPT/FLEX) carry no base position, so the canonical one stands there.
+    """
+
+    canonical = canonical_position.strip().upper()
+    base_slots = [slot.upper() for slot in slots if slot.upper() not in _NON_POSITION_SLOTS]
+    if canonical and canonical in base_slots:
+        return canonical
+    if base_slots:
+        return base_slots[0]
+    return canonical or str(slots[0]).upper()
+
+
 def _candidate_from_rows(
     rows: list[sqlite3.Row],
     *,
@@ -344,7 +366,7 @@ def _candidate_from_rows(
     )
     if baseline_ownership is not None:
         projected_ownership = baseline_ownership.get("classic", baseline_ownership.get("flex"))
-    position = str(first["position"] or slots[0]).upper()
+    position = _lineup_position(str(first["position"] or ""), slots)
     return CandidatePlayer(
         player_id=int(first["player_id"]),
         site_player_id=str(first["site_player_id"]),
