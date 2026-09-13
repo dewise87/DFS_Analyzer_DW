@@ -848,17 +848,34 @@ def _resolve_game(
 
     The key is the alphabetical pair so both sites and both sides of a game land on one
     row; home and away come from the export's own ``AWAY@HOME`` field, never from the
-    key's order. A file without kickoff times (FanDuel) leaves ``game_id`` NULL and is
+    key's order. A file without kickoff times (FanDuel) reuses the matchup's game when
+    another export already observed it, and otherwise leaves ``game_id`` NULL and is
     reported rather than invented. Like a team, a game is an identity the whole week
     points at, so the first row for the matchup is reused; a kickoff that later disagrees
     is returned as a message rather than overwriting what was already observed.
     """
 
-    if parsed_row.game_time is None or parsed_row.is_home is None:
+    if parsed_row.is_home is None:
         return None, False, None
 
     first, second = _matchup_key(parsed_row)
     external_game_id = f"{season}:w{week:02d}:{first}-{second}"
+    if parsed_row.game_time is None:
+        # No kickoff in this export (FanDuel classic). The game is a week-level identity,
+        # so a matchup another export already observed (DraftKings carries kickoffs) is
+        # reused as-is; only a matchup nobody has observed stays NULL and is reported.
+        existing = connection.execute(
+            """
+            SELECT game_id FROM games
+            WHERE external_game_id = ? AND season = ? AND week = ?
+            ORDER BY valid_from, game_id
+            LIMIT 1
+            """,
+            (external_game_id, season, week),
+        ).fetchone()
+        if existing is None:
+            return None, False, None
+        return int(existing["game_id"]), False, None
     observed_text = utc_timestamp(observed_at)
     kickoff_text = utc_timestamp(parsed_row.game_time)
     home = normalize_team_code(parsed_row.team if parsed_row.is_home else parsed_row.opponent)

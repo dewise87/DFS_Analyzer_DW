@@ -3912,6 +3912,16 @@ operator items for Thursday's preflight, which the doctor names with remedies.
   ops lanes use the default; the feature snapshot does not yet record which prompt it was
   built under. When Slice 52 compares prompts, record it (or fold it into
   `feature_version`).
+- **Follow-up (found 2026-09-13, FanDuel build) — memo re-derivation fails on a team
+  defense.** `na-ops slate --site fd` built and replay-verified 10 lineups, but `slate_memo`
+  raised "lineup player 2960 (MIA DST) cannot be reproduced from the store"; the memo's
+  `candidate_scenario` re-selection drops the defense row the build used. Reproduce with
+  decision `41e1a21e…` and fix the re-derivation, not the build.
+- **Follow-up (found 2026-09-13) — exact-name matches never consult manual aliases.**
+  `PlayerCrosswalk.match` returns `_unresolved(identity, exact)` before the alias lookup, so
+  a practice-squad player whose exact name is ambiguous or team-gated reopens as pending on
+  every re-ingest even after `na-crosswalk resolve` (Van Jefferson, Ahmani Marshall, Ronnie
+  Bell on the Stokastic FD file). Aliases should win before the exact-name refusal.
 - **Operator chore, not a slice — paste the reviewed roster pin.** `na-crosswalk
   nflverse-refresh --season 2026 --reviewed-at <today>` succeeds again (upstream restored
   the `week` column on 2026-09-05); Daniel reads the status-change diff it prints and

@@ -708,3 +708,52 @@ def test_the_draftkings_status_column_reaches_the_salary_row(tmp_path: Path) -> 
     assert statuses["5002"] == "Q"
     assert statuses["5003"] == "OUT"
     assert statuses["5006"] == "IR"
+
+
+def test_fanduel_rows_reuse_a_game_another_export_already_observed(tmp_path: Path) -> None:
+    """FanDuel omits kickoffs; a matchup DraftKings already created is the same game."""
+
+    starts_at = datetime(2026, 9, 13, 20, 25, tzinfo=UTC)
+    first_capture = _capture(tmp_path / "one", "fanduel_classic.csv", source="fanduel")
+    second_capture = _capture(
+        tmp_path / "two",
+        "fanduel_classic.csv",
+        source="fanduel",
+        observed_at=OBSERVED + timedelta(hours=6),
+    )
+    with connect_database(_store(tmp_path)) as connection:
+        apply_migrations(connection)
+        _seed_players(connection, FANDUEL_ROSTER)
+        first = load_salary_capture(
+            connection, first_capture, season=2026, week=1, site="fd", starts_at=starts_at
+        )
+        assert first.slates[0].matchups_without_kickoff == ("DAL@NYG",)
+        # Another export (DraftKings, with kickoffs) observes the same matchup.
+        connection.execute(
+            """
+            INSERT INTO games(
+                external_game_id, season, week, kickoff_at, home_team_id, away_team_id,
+                game_status, source, observed_at, ingested_at, valid_from
+            )
+            SELECT '2026:w01:DAL-NYG', 2026, 1, '2026-09-13T20:25:00.000000Z',
+                   home.team_id, away.team_id, 'scheduled', 'draftkings', ?, ?, ?
+            FROM teams AS home, teams AS away
+            WHERE home.abbreviation = 'NYG' AND away.abbreviation = 'DAL'
+            """,
+            (utc_timestamp(OBSERVED),) * 3,
+        )
+        second = load_salary_capture(
+            connection, second_capture, season=2026, week=1, site="fd", starts_at=starts_at
+        )
+        game_ids = [
+            row["game_id"]
+            for row in connection.execute(
+                "SELECT game_id FROM salaries WHERE observed_at = ?",
+                (utc_timestamp(OBSERVED + timedelta(hours=6)),),
+            )
+        ]
+
+    assert second.ok
+    assert second.slates[0].matchups_without_kickoff == ()
+    assert second.slates[0].games_inserted == 0
+    assert game_ids and all(game_id is not None for game_id in game_ids)
